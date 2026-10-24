@@ -138,6 +138,7 @@ type Shadow struct {
 type Rules struct {
 	FreeBonus            float64 `yaml:"free_bonus" json:"free_bonus"`
 	PlanBonus            float64 `yaml:"plan_bonus" json:"plan_bonus"`
+	PlanCostFactor       float64 `yaml:"plan_cost_factor" json:"plan_cost_factor"` // share of list price a plan-covered request counts for
 	PromoBonusMax        float64 `yaml:"promo_bonus_max" json:"promo_bonus_max"`
 	PromoMinRemainingHrs float64 `yaml:"promo_min_remaining_hours" json:"promo_min_remaining_hours"`
 	UpcomingLookaheadHrs float64 `yaml:"upcoming_lookahead_hours" json:"upcoming_lookahead_hours"`
@@ -196,7 +197,7 @@ func Default() *Config {
 		},
 		Kenari: Kenari{BaseURL: "https://kenari.id", SyncMinutes: 10, UserAgent: "xellter/1.0", FirstByteSecs: 120, MusicTimeoutSec: 900},
 		Rules: Rules{
-			FreeBonus: 0.10, PlanBonus: 0.08, PromoBonusMax: 0.05, PromoMinRemainingHrs: 12, UpcomingLookaheadHrs: 24,
+			FreeBonus: 0.10, PlanBonus: 0.08, PlanCostFactor: 0.3, PromoBonusMax: 0.05, PromoMinRemainingHrs: 12, UpcomingLookaheadHrs: 24,
 			NewModelDays: 14, CanaryPercent: 5, CanaryMinRequests: 20, CanaryMinSuccess: 0.9, AvoidSunsetDays: 3,
 			StickyMinutes: 30, StatsWindowHours: 24,
 		},
@@ -314,6 +315,9 @@ func (c *Config) fillDefaults() {
 	}
 	if c.Resilience.BreakerOpenSec <= 0 {
 		c.Resilience.BreakerOpenSec = d.Resilience.BreakerOpenSec
+	}
+	if c.Rules.PlanCostFactor <= 0 {
+		c.Rules.PlanCostFactor = d.Rules.PlanCostFactor
 	}
 	if c.Rules.StatsWindowHours <= 0 {
 		c.Rules.StatsWindowHours = d.Rules.StatsWindowHours

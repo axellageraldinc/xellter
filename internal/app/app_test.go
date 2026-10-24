@@ -66,7 +66,7 @@ const modelsJSON = `{"object":"list","data":[
  {"id":"stt-1","endpoints":["audio_transcription"],"owned_by":"x","pricing":{"free":false,"input":0,"output":0},"pricing_lines":[{"unit":"second","micro_idr":175000}]}
 ]}`
 
-func newFake(t *testing.T) *fake {
+func newFake(t testing.TB) *fake {
 	f := &fake{}
 	end := time.Now().Add(7 * 24 * time.Hour).Unix()
 	mux := http.NewServeMux()
@@ -152,7 +152,7 @@ type env struct {
 	keyCl string // client key with all shadows
 }
 
-func setup(t *testing.T, mutate func(*config.Config)) *env {
+func setup(t testing.TB, mutate func(*config.Config)) *env {
 	t.Helper()
 	f := newFake(t)
 	dir := t.TempDir()

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -27,6 +28,7 @@ const usage = `xellter - LLM gateway for kenari.id
 Usage:
   xellter serve        [-config xellter.yaml]
   xellter check        [-config xellter.yaml]        validate the config
+  xellter explain      [-config f] [-shadow name]    print the current ranking and why (fetches the catalog, probes keys)
   xellter admin init   [-config f] [-username u] [-from-record file] [-credentials-out file]
   xellter client add   [-config f] -name N [-shadows a,b] [-passthrough glob,glob] [-upstreams u1,u2] [-budget IDR] [-out file]
   xellter version
@@ -43,6 +45,8 @@ func main() {
 		err = serve(os.Args[2:])
 	case "check":
 		err = check(os.Args[2:])
+	case "explain":
+		err = explain(os.Args[2:])
 	case "admin":
 		err = adminCmd(os.Args[2:])
 	case "client":
@@ -108,6 +112,54 @@ func check(args []string) error {
 		return err
 	}
 	fmt.Printf("ok: %d upstreams, %d clients, %d shadows\n", len(c.Upstreams), len(c.Clients), len(c.Shadows))
+	return nil
+}
+
+func explain(args []string) error {
+	fs := flag.NewFlagSet("explain", flag.ExitOnError)
+	path := cfgPath(fs)
+	only := fs.String("shadow", "", "only this shadow model")
+	_ = fs.Parse(args)
+	abs, _ := filepath.Abs(*path)
+	a, err := app.New(abs, nil)
+	if err != nil {
+		return err
+	}
+	defer a.Close()
+	a.Logf = func(string, ...any) {}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := a.Cat.Refresh(ctx); err != nil {
+		return fmt.Errorf("catalog: %w", err)
+	}
+	a.Rt.MarkSeen(a.Cat.Snapshot())
+	a.ProbeKeys(ctx)
+	names := make([]string, 0)
+	for n := range a.Rt.Rankings() {
+		if *only == "" || *only == n {
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		r := a.Rt.Rankings()[n]
+		fmt.Printf("\n== %s (%s, %s)  round-robin group: %d\n", n, r.Modality, r.Mode, r.Front)
+		for i, c := range r.Candidates {
+			fmt.Printf("%2d. %-34s %s\n", i+1, c.Model, c.Reason)
+		}
+		for _, c := range r.Trial {
+			fmt.Printf(" T  %-34s %s\n", c.Model, c.Reason)
+		}
+		if len(r.Candidates)+len(r.Trial) == 0 {
+			fmt.Println("    (no eligible model)")
+		}
+		for _, x := range r.Rejected {
+			fmt.Printf("    x %-32s %s\n", x.Model, x.Why)
+		}
+		if len(r.Unavailable) > 0 {
+			fmt.Printf("    (%d catalog models are not callable with the configured keys)\n", len(r.Unavailable))
+		}
+	}
 	return nil
 }
 

@@ -25,7 +25,7 @@ Per auto shadow, for every catalog model of the shadow's modality:
 
 1. **Gates** (pass/fail): allow/deny globs, tool calling, vision, reasoning, min context, not sunsetting within `avoid_sunset_days`, subscriber-only needs a plan key, at least one enabled key may use it.
 2. **Components** (each 0..1):
-   - `cost`: price of a reference request (`cost_profile`) from the live catalog, including a running promo, a scheduled price change inside the lookahead, cache discounts, and zero if the model is free or covered by a plan key that still has budget. Log-scaled across candidates; free/covered = 1.
+   - `cost`: price of a reference request (`cost_profile`) from the live catalog, including a running promo, a scheduled price change inside the lookahead, cache discounts, zero if the model is free, and `plan_cost_factor` × list price if a plan key that still has budget covers it. Log-scaled across candidates; free = 1.
    - `benchmark`: configured score/100, else a price-percentile proxy computed from *undiscounted* prices (a promo never makes a model look weaker; a `:free` twin uses its paid sibling), else 0.5.
    - `jev`: stored System One score; unscored models get 0.4 while JEV is enabled.
    - `reliability`: success rate and latency vs the median over `stats_window_hours` (0.6 until 5 samples).

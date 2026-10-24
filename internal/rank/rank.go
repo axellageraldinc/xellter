@@ -50,14 +50,15 @@ type Rejected struct {
 
 // Ranking is the result for one shadow.
 type Ranking struct {
-	Shadow     string      `json:"shadow"`
-	Modality   string      `json:"modality"`
-	Mode       string      `json:"mode"`
-	Candidates []Candidate `json:"candidates"` // ordered main list
-	Front      int         `json:"front"`      // first Front candidates are tied (round-robin group)
-	Trial      []Candidate `json:"trial"`      // canary pool (new, unproven)
-	Rejected   []Rejected  `json:"rejected"`
-	Computed   time.Time   `json:"computed"`
+	Shadow      string      `json:"shadow"`
+	Modality    string      `json:"modality"`
+	Mode        string      `json:"mode"`
+	Candidates  []Candidate `json:"candidates"` // ordered main list
+	Front       int         `json:"front"`      // first Front candidates are tied (round-robin group)
+	Trial       []Candidate `json:"trial"`      // canary pool (new, unproven)
+	Rejected    []Rejected  `json:"rejected"`
+	Unavailable []string    `json:"unavailable"` // right modality, but no enabled key may call them
+	Computed    time.Time   `json:"computed"`
 }
 
 // All computes rankings for every shadow.
@@ -142,14 +143,17 @@ func One(in Inputs, name string, sh config.Shadow) *Ranking {
 			}
 		}
 		if !usable {
-			reject(id, "no enabled key may use it")
+			r.Unavailable = append(r.Unavailable, id)
 			continue
 		}
 		s.covered = covered
 		s.listCost, s.costKnown = RefCost(m, sh.Cost, in.Now, look)
 		s.cost = s.listCost
-		if m.Free || covered {
+		switch {
+		case m.Free:
 			s.cost, s.costKnown = 0, true
+		case covered: // plan quota is finite, so covered models are discounted, not free
+			s.cost = s.listCost * rules.PlanCostFactor
 		}
 		pool = append(pool, s)
 	}
@@ -158,9 +162,18 @@ func One(in Inputs, name string, sh config.Shadow) *Ranking {
 	}
 	assignBench(in, pool, sh)
 
-	// cost normalisation (log scale among paid candidates)
+	// cost normalisation: log scale between the cheapest and the dearest paid model of this modality in
+	// the whole catalog, so a lone expensive candidate never looks cheap just because it has no rival
 	var lo, hi = math.Inf(1), 0.0
-	for _, s := range pool {
+	for _, m := range in.Snap.Models {
+		if m.Endpoint != sh.Modality || m.Free {
+			continue
+		}
+		if c, ok := RefCost(m, sh.Cost, in.Now, look); ok && c > 0 {
+			lo, hi = math.Min(lo, c), math.Max(hi, c)
+		}
+	}
+	for _, s := range pool { // plan discounts can undercut the catalog minimum
 		if s.costKnown && s.cost > 0 {
 			lo, hi = math.Min(lo, s.cost), math.Max(hi, s.cost)
 		}

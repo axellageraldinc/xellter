@@ -39,7 +39,7 @@ function toast(msg, bad) {
 }
 const fail = e => toast(e.message || String(e), true);
 
-const idr = n => n == null ? '–' : (n >= 100 ? Math.round(n).toLocaleString('en-US') : n >= 1 ? n.toFixed(2) : n.toFixed(4));
+const idr = n => n == null ? '–' : n === 0 ? '0' : (n >= 100 ? Math.round(n).toLocaleString('en-US') : n >= 1 ? n.toFixed(2) : n.toFixed(4));
 const ago = ts => { const s = Math.max(0, Math.round((Date.now() - ts) / 1000)); return s < 90 ? s + 's' : s < 5400 ? Math.round(s / 60) + 'm' : s < 172800 ? Math.round(s / 3600) + 'h' : Math.round(s / 86400) + 'd'; };
 const until = t => { const ms = new Date(t) - Date.now(); return ms > 0 ? Math.ceil(ms / 1000) + 's' : ''; };
 const chip = (t, c) => h('span', { class: 'chip ' + (c || '') }, t);
@@ -85,7 +85,7 @@ async function saveCfg() {
   catch (e) { fail(e); }
 }
 
-function showDialog(...kids) { const d = $('#dlgbody'); d.replaceChildren(...kids); const dlg = $('#dlg'); if (!dlg.open) dlg.showModal(); }
+function showDialog(...kids) { const d = $('#dlgbody'); d.replaceChildren(...kids.flat(Infinity).filter(Boolean)); const dlg = $('#dlg'); if (!dlg.open) dlg.showModal(); }
 
 // ---------- views ----------
 const views = {};
@@ -185,6 +185,7 @@ async function showRanking(name) {
     showDialog(h('h2', {}, `${name} · ranking`), h('p', { class: 'muted' }, `Round-robin group: first ${r.front} candidate(s). Computed ${ago(new Date(r.computed))} ago.`),
       r.candidates?.length ? tbl(r.candidates) : h('p', { class: 'bad' }, 'No eligible candidates.'),
       r.trial?.length ? [h('h3', {}, 'On trial (receive canary traffic)'), tbl(r.trial)] : null,
+      r.unavailable?.length ? h('p', { class: 'muted' }, `${r.unavailable.length} catalog models of this modality are not callable with the configured keys: ` + r.unavailable.slice(0, 12).join(', ') + (r.unavailable.length > 12 ? ', …' : '')) : null,
       r.rejected?.length ? [h('h3', {}, `Rejected (${r.rejected.length})`), h('div', { class: 'scroll' }, h('table', {}, h('tbody', {}, r.rejected.map(x => h('tr', {}, h('td', { class: 'mono' }, x.model), h('td', { class: 'muted' }, x.why))))))] : null);
   } catch (e) { fail(e); }
 }
@@ -256,7 +257,7 @@ views.policy = async function (root) {
   root.replaceChildren(
     h('h2', {}, 'Auto-route policy'),
     h('div', { class: 'card' }, h('h3', {}, 'Rules'), h('p', { class: 'muted' }, 'Bonuses are added to a model\'s 0-1 score. Promos and free tiers are read live from kenari.'),
-      h('div', { class: 'grid' }, [['free_bonus', 'Free model bonus'], ['plan_bonus', 'Plan-covered bonus'], ['promo_bonus_max', 'Promo bonus at 100% off'], ['promo_min_remaining_hours', 'Ignore promos ending within (h)'], ['upcoming_lookahead_hours', 'Price-change lookahead (h)'], ['avoid_sunset_days', 'Avoid models sunsetting within (days)'],
+      h('div', { class: 'grid' }, [['free_bonus', 'Free model bonus'], ['plan_bonus', 'Plan-covered bonus'], ['plan_cost_factor', 'Plan-covered cost factor (0-1)'], ['promo_bonus_max', 'Promo bonus at 100% off'], ['promo_min_remaining_hours', 'Ignore promos ending within (h)'], ['upcoming_lookahead_hours', 'Price-change lookahead (h)'], ['avoid_sunset_days', 'Avoid models sunsetting within (days)'],
         ['new_model_days', 'A model is "new" for (days)'], ['canary_percent', 'Canary traffic to new models (%)'], ['canary_min_requests', 'Requests to prove a model'], ['canary_min_success', 'Success rate to prove (0-1)'], ['sticky_minutes', 'Session stickiness (min)'], ['stats_window_hours', 'Health window (h)']].map(([k, l]) => field(R, k, { type: 'num', label: l })))),
     h('div', { class: 'card' }, h('h3', {}, 'Resilience'), h('div', { class: 'grid' }, [['max_attempts', 'Max attempts per request'], ['cooldown_base_s', 'Cooldown base (s)'], ['cooldown_max_s', 'Cooldown max (s)'], ['breaker_failures', 'Breaker opens after failures'], ['breaker_open_s', 'Breaker open time (s)']].map(([k, l]) => field(c.resilience, k, { type: 'num', label: l })))),
     h('div', { class: 'card' }, h('div', { class: 'row spread' }, h('h3', {}, 'JEV quality judge (System One)'), h('span', {}, chip(j.enabled ? 'enabled' : 'disabled', j.enabled ? 'ok' : ''), chip(`today Rp${idr(j.spent_idr)} / Rp${idr(j.budget_idr)}`))),
