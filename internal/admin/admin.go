@@ -383,7 +383,26 @@ func (h *Handler) requests(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) jevInfo(w http.ResponseWriter, r *http.Request) {
 	scores, _ := h.a.St.JEVScores()
 	spent, limit := h.a.Judge.Budget()
-	jok(w, map[string]any{"enabled": h.a.Cfg().JEV.Enabled, "model": h.a.Cfg().JEV.Model, "scores": scores, "spent_idr": spent, "budget_idr": limit})
+	type judgeRow struct {
+		ID   string  `json:"id"`
+		Free bool    `json:"free"`
+		In   float64 `json:"in_idr"`
+	}
+	var judges []judgeRow
+	if snap := h.a.Cat.Snapshot(); snap != nil {
+		for _, id := range snap.IDs() {
+			if m := snap.Models[id]; m.Endpoint == "systemone" && strings.HasPrefix(id, "jev") { // clef-* are image locators, not judges
+				judges = append(judges, judgeRow{id, m.Free, m.InIDR})
+			}
+		}
+	}
+	var keys []string
+	for _, k := range h.a.Pool.Keys() {
+		if k.Client != "" && k.Config().Enabled {
+			keys = append(keys, k.Name)
+		}
+	}
+	jok(w, map[string]any{"enabled": h.a.Cfg().JEV.Enabled, "model": h.a.Cfg().JEV.Model, "upstream": h.a.Cfg().JEV.Upstream, "scores": scores, "spent_idr": spent, "budget_idr": limit, "judges": judges, "keys": keys, "last": h.a.Judge.Last()})
 }
 
 func (h *Handler) jevRun(w http.ResponseWriter, r *http.Request) {

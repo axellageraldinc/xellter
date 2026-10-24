@@ -68,10 +68,11 @@ const zero = t => !t || String(t).startsWith('0001');
 
 const badge = (text, color = 'secondary') => h('span', { class: `badge bg-${color}-lt me-1` }, text);
 const dot = color => h('span', { class: `status-dot bg-${color} me-2` });
-const progress = (used, total) => {
+const progress = (used, total, neutral) => { // neutral = a share of a total, not a limit: never turns red
   const p = total > 0 ? Math.min(100, used / total * 100) : 0;
-  return h('div', { class: 'progress progress-sm' }, h('div', { class: 'progress-bar ' + (p >= 97 ? 'bg-danger' : p >= 80 ? 'bg-warning' : 'bg-primary'), style: `width:${p}%` }));
+  return h('div', { class: 'progress progress-sm' }, h('div', { class: 'progress-bar ' + (neutral || p < 80 ? 'bg-primary' : p < 97 ? 'bg-warning' : 'bg-danger'), style: `width:${p}%` }));
 };
+const keyLabel = k => !k ? '' : k.includes('/') ? k : `${k} (before migration)`;
 const card = (title, body, o = {}) => h('div', { class: 'card ' + (o.class || '') },
   (title || o.actions) && h('div', { class: 'card-header' }, h('h3', { class: 'card-title' }, title), o.actions && h('div', { class: 'card-actions' }, o.actions)),
   h('div', { class: 'card-body' + (o.flush ? ' p-0' : '') }, body));
@@ -396,10 +397,10 @@ views.usage = async function (_, q) {
     h('div', { class: 'mb-3' }, card('Requests over time', chart(series, hours))),
     h('div', { class: 'mb-3' }, card('Breakdown', h('div', {}, h('div', { class: 'mb-3' }, seg(DIMS, dim, v => to({ by: v }))),
       rows.length ? h('div', { class: 'table-responsive' }, h('table', { class: 'table table-vcenter' }, h('thead', {}, h('tr', {}, [DIMS.find(d => d[0] === dim)[1], 'Requests', '', 'Errors', 'Tokens in / out', 'Avg time', 'Rp at list price'].map(x => h('th', {}, x)))),
-        h('tbody', {}, rows.filter(r => r.key).map(r => h('tr', {}, h('td', { class: 'mono' }, r.key), h('td', {}, num(r.requests)), h('td', { style: 'min-width:90px' }, progress(r.requests, max)), h('td', { class: r.errors ? 'text-danger' : 'text-secondary' }, r.errors), h('td', {}, `${num(r.in_tok)} / ${num(r.out_tok)}`), h('td', {}, Math.round(r.avg_latency_ms) + ' ms'), h('td', {}, idr(r.cost_idr))))))) : empty('No traffic in this period.')))),
+        h('tbody', {}, rows.filter(r => r.key).map(r => h('tr', {}, h('td', { class: 'mono' }, dim === 'upstream' ? keyLabel(r.key) : r.key), h('td', {}, num(r.requests)), h('td', { style: 'min-width:90px' }, progress(r.requests, max, true)), h('td', { class: r.errors ? 'text-danger' : 'text-secondary' }, r.errors), h('td', {}, `${num(r.in_tok)} / ${num(r.out_tok)}`), h('td', {}, Math.round(r.avg_latency_ms) + ' ms'), h('td', {}, idr(r.cost_idr))))))) : empty('No traffic in this period.')))),
     card('Recent requests', h('div', {}, h('div', { class: 'mb-3' }, seg([['all', 'All'], ['err', 'Errors only']], filter, v => to({ f: v }))),
       shown.length ? h('div', { class: 'table-responsive' }, h('table', { class: 'table table-sm table-vcenter' }, h('thead', {}, h('tr', {}, ['When', 'Client', 'Asked for', 'Served by', 'Key', 'Result', 'Time', 'Tokens in / out', 'Notes'].map(x => h('th', {}, x)))),
-        h('tbody', {}, shown.slice(0, 100).map(r => h('tr', {}, h('td', { class: 'nowrap text-secondary' }, ago(r.ts) + ' ago'), h('td', {}, r.client), h('td', { class: 'mono' }, r.requested || r.preset), h('td', { class: 'mono' }, r.model), h('td', {}, (r.upstream || '').split('/').pop()),
+        h('tbody', {}, shown.slice(0, 100).map(r => h('tr', {}, h('td', { class: 'nowrap text-secondary' }, ago(r.ts) + ' ago'), h('td', {}, r.client), h('td', { class: 'mono' }, r.requested || r.preset), h('td', { class: 'mono' }, r.model), h('td', {}, keyLabel(r.upstream)),
           h('td', {}, badge(r.ok ? 'ok' : (r.status || 'error'), r.ok ? 'green' : 'red')), h('td', { class: 'nowrap' }, r.latency_ms + ' ms'), h('td', { class: 'nowrap' }, `${r.in_tok} / ${r.out_tok}`),
           h('td', {}, r.attempt > 1 && badge('retry ' + r.attempt, 'orange'), r.canary && badge('trial', 'azure'), r.rtk_saved > 0 && badge('saved ' + r.rtk_saved, 'green'), r.err && h('span', { class: 'text-danger small' }, r.err))))))) : empty('Nothing to show.'))));
 };
@@ -423,12 +424,16 @@ views.settings = async function () {
       field(c.rtk, 'enabled', { type: 'switch', label: 'Token saver on' }),
       h('div', { class: 'row' }, [['git_diff', 'git diff'], ['grep', 'grep results'], ['ls', 'directory listings'], ['logs', 'logs'], ['truncate', 'any very long output']].map(([k, l]) => h('div', { class: 'col-6' }, field(c.rtk, k, { type: 'switch', label: l })))),
       advanced(cols(field(c.rtk, 'min_chars', { type: 'num', label: 'Only outputs longer than (characters)' }), field(c.rtk, 'max_chars', { type: 'num', label: 'Hard cap (characters)' }), field(c.rtk, 'diff_context', { type: 'num', label: 'Context lines kept around diff changes' })))), { class: 'h-100' })),
-    h('div', { class: 'col-lg-6' }, card('Quality judge (JEV)', h('div', {}, h('p', { class: 'text-secondary' }, 'Candidate models answer a few test questions and kenari\'s System One model scores them. Scores decide which models are good enough. It costs a little, so a daily limit applies.'),
+    h('div', { class: 'col-lg-6' }, card('Quality judge (JEV)', h('div', {}, h('p', { class: 'text-secondary' }, 'Candidate models answer a few test questions and kenari\'s System One model scores each answer. The score decides which models are good enough for a preset. Judging costs a little, so a daily limit applies.'),
       h('div', { class: 'mb-2' }, badge(j.enabled ? 'on' : 'off', j.enabled ? 'green' : 'secondary'), badge(`today Rp ${idr(j.spent_idr)} of Rp ${idr(j.budget_idr)}`)),
-      field(c.jev, 'enabled', { type: 'switch', label: 'Judge models automatically' }), field(c.jev, 'daily_budget_idr', { type: 'num', label: 'Daily limit (Rp)' }),
-      btn('Judge pending models now', 'btn-outline-primary btn-sm mb-3', () => api('jev/run', { method: 'POST', body: {} }).then(() => toast('Started in the background; check back in a minute'), fail)),
+      field(c.jev, 'enabled', { type: 'switch', label: 'Judge models automatically' }),
+      field(c.jev, 'model', { type: 'select', label: 'Judge model', opts: (j.judges || []).map(x => [x.id, x.free ? `${x.id} (free)` : `${x.id} (Rp ${idr(x.in_idr)} per 1M input tokens)`]), help: 'a System One model from kenari' }),
+      field(c.jev, 'upstream', { type: 'select', label: 'Key used for judging', opts: [['', 'Any key that can call both models (first match)'], ...(j.keys || []).map(k => [k, k])], help: 'judging calls count against that key\'s account, and show up under the "_jev" client in the request log' }),
+      field(c.jev, 'daily_budget_idr', { type: 'num', label: 'Daily limit (Rp)' }),
+      j.last && j.last.at && !String(j.last.at).startsWith('0001') ? h('div', { class: 'small mb-2 ' + (j.last.error ? 'text-danger' : 'text-secondary') }, `Last round ${ago(j.last.at)} ago: judged ${j.last.judged} model${j.last.judged === 1 ? '' : 's'}${j.last.error ? ' · ' + j.last.error : ''}`) : h('div', { class: 'small text-secondary mb-2' }, 'No round yet. The first one starts about a minute after you switch it on and save.'),
+      btn('Judge pending models now', 'btn-outline-primary btn-sm mb-3', () => api('jev/run', { method: 'POST', body: {} }).then(() => { toast('Started in the background'); setTimeout(render, 8000); }, fail)),
       Object.keys(j.scores || {}).length ? h('div', { class: 'table-responsive' }, h('table', { class: 'table table-sm' }, h('thead', {}, h('tr', {}, ['Model', 'Score', 'Judged'].map(x => h('th', {}, x)))), h('tbody', {}, Object.entries(j.scores).sort((a, b) => b[1].Score - a[1].Score).map(([m, s]) => h('tr', {}, h('td', { class: 'mono' }, m), h('td', {}, s.Score.toFixed(2)), h('td', { class: 'text-secondary' }, ago(s.TS) + ' ago')))))) : h('div', { class: 'text-secondary small' }, 'No scores yet.'),
-      advanced(cols(field(c.jev, 'model', { label: 'Judge model' }), field(c.jev, 'pass_threshold', { type: 'num', step: '0.01', label: 'Minimum score to be used (0-1)' }), field(c.jev, 'every_hours', { type: 'num', label: 'Re-judge every (hours)' }), field(c.jev, 'upstream', { label: 'Use only this key (client/key)' })), field(c.jev, 'prompts', { type: 'lines', label: 'Test questions (one per line)' }))), { class: 'h-100' })),
+      advanced(cols(field(c.jev, 'pass_threshold', { type: 'num', step: '0.01', label: 'Minimum score to be used (0-1)' }), field(c.jev, 'every_hours', { type: 'num', label: 'Re-judge every (hours)' })), field(c.jev, 'prompts', { type: 'lines', label: 'Test questions (one per line)' }))), { class: 'h-100' })),
     h('div', { class: 'col-lg-6' }, card('Known quality scores', h('div', {}, h('p', { class: 'text-secondary' }, 'Without a score from you, quality is estimated from price. If you trust a benchmark for a model, enter it here (0-100).'),
       h('datalist', { id: 'models' }, cat.map(m => h('option', { value: m.id }))),
       bench.length ? h('table', { class: 'table table-sm' }, h('tbody', {}, bench.map(([m, v]) => h('tr', {}, h('td', { class: 'mono' }, m), h('td', { style: 'width:110px' }, h('input', { class: 'form-control form-control-sm', type: 'number', min: 0, max: 100, value: v, onchange: e => { c.benchmarks[m] = Number(e.target.value); markDirty(); } })), h('td', { class: 'text-end' }, btn('Remove', 'btn-sm btn-ghost-danger', () => { delete c.benchmarks[m]; markDirty(); render(); })))))) : h('div', { class: 'text-secondary small mb-2' }, 'None set: using the price-based estimate.'),

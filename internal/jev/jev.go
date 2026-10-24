@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,6 +39,34 @@ type Judge struct {
 	day     string
 	spent   float64
 	running bool
+	last    RunInfo
+	down    time.Time // the judge model answered 5xx: do not try before this time
+}
+
+// errJudgeDown means kenari cannot serve the judge model right now; the round stops and retries later.
+var errJudgeDown = errors.New("the judge model is unavailable at kenari right now")
+
+// RunInfo describes the latest evaluation round for the panel.
+type RunInfo struct {
+	At     time.Time `json:"at"`
+	Judged int       `json:"judged"`
+	Error  string    `json:"error"`
+}
+
+// Last returns the latest evaluation round.
+func (j *Judge) Last() RunInfo {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.last
+}
+
+func (j *Judge) note(judged int, err error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.last = RunInfo{At: j.Now(), Judged: judged}
+	if err != nil {
+		j.last.Error = err.Error()
+	}
 }
 
 // Budget returns spent and limit for today.
@@ -71,15 +100,19 @@ func (j *Judge) overBudget() bool {
 
 // Run evaluates due models every interval until ctx ends.
 func (j *Judge) Run(ctx context.Context) {
+	wait := 45 * time.Second // the first round soon after start, then every 10 minutes
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(10 * time.Minute):
+		case <-time.After(wait):
 		}
+		wait = 10 * time.Minute
 		if j.Cfg().JEV.Enabled {
-			if _, err := j.RunDue(ctx, 4); err != nil {
+			if n, err := j.RunDue(ctx, 4); err != nil {
 				j.Logf("jev run: %v", err)
+			} else if n > 0 {
+				j.Logf("jev: judged %d model(s)", n)
 			}
 		}
 	}
@@ -129,18 +162,31 @@ func (j *Judge) RunDue(ctx context.Context, max int) (int, error) {
 		}
 	}
 	done := 0
+	var lastErr error
 	for _, m := range todo {
 		if done >= max || ctx.Err() != nil {
 			break
 		}
 		if j.overBudget() {
-			return done, errors.New("daily JEV budget used")
+			lastErr = errors.New("daily JEV budget used")
+			break
 		}
 		if _, err := j.Evaluate(ctx, m); err != nil {
 			j.Logf("jev evaluate %s: %v", m, err)
+			lastErr = err
+			if errors.Is(err, errJudgeDown) {
+				break // every other model would fail the same way; try again next round
+			}
+			lastErr = fmt.Errorf("%s: %w", m, err)
 			continue
 		}
 		done++
+	}
+	if len(todo) > 0 || lastErr != nil {
+		j.note(done, lastErr)
+	}
+	if done == 0 && lastErr != nil && len(todo) > 0 {
+		return 0, lastErr
 	}
 	return done, nil
 }
@@ -152,6 +198,12 @@ func (j *Judge) Evaluate(ctx context.Context, model string) (float64, error) {
 	m := snap.Models[model]
 	if m == nil || m.Endpoint != "chat" {
 		return 0, errors.New("not a chat model")
+	}
+	j.mu.Lock()
+	down := j.down
+	j.mu.Unlock()
+	if j.Now().Before(down) {
+		return 0, fmt.Errorf("%w; next try at %s", errJudgeDown, down.Format("15:04"))
 	}
 	key := j.pickKey(cfg, snap, m)
 	if key == nil {
@@ -175,6 +227,12 @@ func (j *Judge) Evaluate(ctx context.Context, model string) (float64, error) {
 		j.charge(rank.UsageCost(m, in, out, 0, false, j.Now()))
 		score, jin, err := j.judge(ctx, cfg, key, prompt, answer)
 		if err != nil {
+			if strings.Contains(err.Error(), "HTTP 5") { // 503 all_providers_failed and friends
+				j.mu.Lock()
+				j.down = j.Now().Add(10 * time.Minute)
+				j.mu.Unlock()
+				return 0, fmt.Errorf("%w (%s): %v", errJudgeDown, cfg.JEV.Model, err)
+			}
 			return 0, err
 		}
 		j.charge(float64(jin) * judge.InIDR / 1e6)

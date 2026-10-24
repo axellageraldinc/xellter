@@ -317,6 +317,23 @@ func (k *Kenari) Fetch(ctx context.Context) (*Snapshot, error) {
 		s.Models[m.ID] = m
 	}
 
+	// System One (JEV) models are not part of the default list; they are used as judges.
+	var judges struct {
+		Data []rawModel `json:"data"`
+	}
+	if err := k.get(ctx, "/v1/models?modality=systemone", &judges); err == nil {
+		for _, r := range judges.Data {
+			if _, taken := s.Models[r.ID]; taken {
+				continue
+			}
+			m := &Model{ID: r.ID, Owner: r.OwnedBy, Endpoint: "systemone", Endpoints: []string{"systemone"}, Free: r.Pricing.Free || strings.HasSuffix(r.ID, ":free")}
+			if r.Pricing.Input != nil {
+				m.InIDR = *r.Pricing.Input / micro
+			}
+			s.Models[m.ID] = m
+		}
+	}
+
 	// Public pricing: promos, upcoming prices, subscriber-only flags, free tier.
 	var pricing struct {
 		FreeTier struct {

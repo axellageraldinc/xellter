@@ -27,6 +27,8 @@ type fake struct {
 	calls []call
 	// chat decides the response for a chat call; default is 200.
 	chat func(c call, n int) (int, string)
+	// judge, when set, answers /v1/systemone instead of the default success.
+	judge func() (int, string)
 	// account answers /v1/account/quota; default: 403 like a restricted key.
 	account func(auth string) (int, string)
 	srv     *httptest.Server
@@ -64,7 +66,6 @@ const modelsJSON = `{"object":"list","data":[
  {"id":"promo-d","endpoints":["chat"],"owned_by":"x","context_length":128000,"tool_call":true,"protocols":["openai-chat"],"modalities":{"input":["text"]},"pricing":{"free":false,"input":60000000,"output":250000000}},
  {"id":"img-paid","endpoints":["images"],"owned_by":"x","pricing":{"free":false,"input":0,"output":0},"pricing_lines":[{"unit":"image","micro_idr":300000000}]},
  {"id":"img-free:free","endpoints":["images"],"owned_by":"x","pricing":{"free":true}},
- {"id":"jev-1-13:free","endpoints":["chat"],"owned_by":"jev","pricing":{"free":true}},
  {"id":"stt-1","endpoints":["audio_transcription"],"owned_by":"x","pricing":{"free":false,"input":0,"output":0},"pricing_lines":[{"unit":"second","micro_idr":175000}]}
 ]}`
 
@@ -72,7 +73,13 @@ func newFake(t testing.TB) *fake {
 	f := &fake{}
 	end := time.Now().Add(7 * 24 * time.Hour).Unix()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, modelsJSON) })
+	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("modality") == "systemone" {
+			io.WriteString(w, `{"object":"list","data":[{"id":"jev-1-13:free","owned_by":"jev","pricing":{"free":true}},{"id":"jev-1-14","owned_by":"jev","pricing":{"free":false,"input":850000000}}]}`)
+			return
+		}
+		io.WriteString(w, modelsJSON)
+	})
 	mux.HandleFunc("/api/public/pricing", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `{"free_tier":{"daily":50,"rpm":5,"next":{"daily":1000,"rpm":10},"plan":{"daily":0,"rpm":25},"threshold_idr":10000},"usd_idr_rate":17500,
 		"items":[{"model":"promo-d","promo":{"percent_off":90,"starts_at":%d,"ends_at":%d,"original":{}},"upcoming_price":null}]}`, time.Now().Add(-time.Hour).Unix(), end)
@@ -154,6 +161,13 @@ func newFake(t testing.TB) *fake {
 	})
 	mux.HandleFunc("/v1/systemone", func(w http.ResponseWriter, r *http.Request) {
 		rec(w, r)
+		if f.judge != nil {
+			st, body := f.judge()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(st)
+			io.WriteString(w, body)
+			return
+		}
 		io.WriteString(w, `{"model":"jev-1.13.0","answers":{"q":{"type":"noul","noul":0.9}},"usage":{"input_tokens":120,"output_tokens":4}}`)
 	})
 	mux.HandleFunc("/v1/images/generations", func(w http.ResponseWriter, r *http.Request) {

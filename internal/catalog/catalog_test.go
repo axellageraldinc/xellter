@@ -18,6 +18,10 @@ func TestFetchParsesPricesPromosPlansAndTiers(t *testing.T) {
 			w.WriteHeader(403) // kenari blocks the default Go user agent
 			return
 		}
+		if r.URL.Query().Get("modality") == "systemone" { // judges are only listed here, not in the default list
+			io.WriteString(w, `{"data":[{"id":"jev-1-13:free","owned_by":"jev","pricing":{"free":true}},{"id":"jev-1-14","owned_by":"jev","pricing":{"free":false,"input":850000000}}]}`)
+			return
+		}
 		io.WriteString(w, `{"data":[
 		 {"id":"m","endpoints":["chat"],"owned_by":"o","context_length":64000,"tool_call":true,"reasoning":true,"protocols":["openai-chat"],"modalities":{"input":["text","image"]},"pricing":{"free":false,"input":630000000,"output":2500000000,"cache_read":120000000}},
 		 {"id":"m:free","endpoints":["chat"],"pricing":{"free":true,"input":null,"output":null}},
@@ -58,6 +62,12 @@ func TestFetchParsesPricesPromosPlansAndTiers(t *testing.T) {
 	}
 	if in, _, _ := m.Effective(time.Now(), 0); in != 630 {
 		t.Fatalf("current price: %v", in)
+	}
+	if j := s.Models["jev-1-13:free"]; j == nil || j.Endpoint != "systemone" || !j.Free {
+		t.Fatalf("free judge missing: %+v", j)
+	}
+	if j := s.Models["jev-1-14"]; j == nil || j.InIDR != 850 || j.Free {
+		t.Fatalf("paid judge price wrong: %+v", j)
 	}
 	v := s.Models["v"]
 	if len(v.Lines) != 1 || v.Lines[0].IDR != 750 || v.SunsetAt == nil {

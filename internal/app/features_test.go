@@ -3,6 +3,7 @@ package app_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -232,5 +233,32 @@ func TestPresetsAreGeneratedFromWhatTheKeysCanCall(t *testing.T) {
 	}
 	if got.Presets["image"].Strategy != "round_robin" {
 		t.Fatal("an edited preset was overwritten")
+	}
+}
+
+func TestJEVStopsTheRoundWhenTheJudgeIsDown(t *testing.T) {
+	e := setup(t, func(c *config.Config) { c.JEV.Enabled = true; c.JEV.Prompts = []string{"say hi"} })
+	e.a.Judge.HC = e.f.srv.Client()
+	e.f.judge = func() (int, string) {
+		return 503, `{"error":{"code":"all_providers_failed","message":"upstream unavailable"}}`
+	}
+	n, err := e.a.Judge.RunDue(context.Background(), 5)
+	if err == nil || n != 0 || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	calls := e.f.count("cheap-b") + e.f.count("free-a:free") + e.f.count("pro-c")
+	if calls > 1 {
+		t.Fatalf("a failing judge must not make us generate answers for every model: %d candidate calls", calls)
+	}
+	if last := e.a.Judge.Last(); last.Error == "" || last.Judged != 0 {
+		t.Fatalf("panel status: %+v", last)
+	}
+	// while the judge is known to be down, nothing is spent on candidate answers
+	before := e.f.count("cheap-b") + e.f.count("free-a:free") + e.f.count("pro-c")
+	if _, err := e.a.Judge.Evaluate(context.Background(), "cheap-b"); err == nil {
+		t.Fatal("expected the cool-down error")
+	}
+	if after := e.f.count("cheap-b") + e.f.count("free-a:free") + e.f.count("pro-c"); after != before {
+		t.Fatal("candidate answers were requested although the judge is down")
 	}
 }
