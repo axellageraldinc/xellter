@@ -31,9 +31,12 @@ function icon(name, cls = '') {
   s.innerHTML = ICONS[name] || ''; // static markup from icons.js
   return s;
 }
-// iconBtn is a square, icon-only button: the icon sits in the middle of the
-// button, so a row of them (replace, rename, delete) lines up exactly.
-const iconBtn = (title, ic, onclick, cls = 'btn-ghost-secondary', off) => h('button', { class: `btn btn-sm icon-btn ${cls}`, title, 'aria-label': title, onclick, disabled: off }, icon(ic));
+// iconBtn is an icon-only button: the icon sits in the middle of a square, so
+// a row of them (rename, replace, delete) lines up and the icons do not wobble.
+// o.cls styles it, o.off disables it, o.sm makes it the small size (use it
+// inside tables; in a button row use the normal size, so every button there
+// has the same height).
+const iconBtn = (title, ic, onclick, o = {}) => h('button', { class: `btn icon-btn ${o.sm ? 'btn-sm' : ''} ${o.cls || 'btn-ghost-secondary'}`, title, 'aria-label': title, onclick, disabled: o.off }, icon(ic));
 const btn = (label, cls, onclick, ic) => h('button', { class: 'btn ' + cls, onclick }, ic && icon(ic, label ? 'me-1' : ''), label);
 
 async function api(path, opt = {}, retried) {
@@ -148,9 +151,15 @@ async function saveCfg() {
   try { await api('config', { method: 'PUT', body: { config: S.cfg } }); await loadCfg(); toast('Saved and applied'); render(); } catch (e) { fail(e); }
 }
 
+// dialog shows a modal. The optional last argument {wide: true} makes it
+// wider, for tables that need the room.
 function dialog(...kids) {
+  const last = kids[kids.length - 1];
+  const opts = last && typeof last === 'object' && !last.nodeType && last.__opts ? (kids.pop().__opts) : {};
   $('#dlgbody').replaceChildren(...kids.flat(Infinity).filter(Boolean));
-  const d = $('#dlg'); if (!d.open) d.showModal();
+  const d = $('#dlg');
+  d.classList.toggle('dlg-wide', !!opts.wide);
+  if (!d.open) d.showModal();
 }
 const closeDialog = () => $('#dlg').close();
 const dialogButtons = (...b) => h('div', { class: 'd-flex gap-2 justify-content-end mt-3' }, h('button', { class: 'btn btn-ghost-secondary', onclick: closeDialog }, 'Close'), b);
@@ -454,15 +463,15 @@ views.client = async function (name) {
   setHead({ crumbs: [h('a', { class: 'clickable', onclick: () => go('clients') }, 'Clients'), ' / ', name], title: [name, ' ', !cl.enabled && badge('disabled', 'red')],
     sub: `${pl(row.keys.length, 'kenari key')} · ${pl(Object.keys(cl.presets).length, 'preset')} · xellter key ${cl.key_hint || ''}`,
     actions: [btn('Usage', 'btn-outline-secondary', () => go('usage?client=' + encodeURIComponent(name)), 'chart-bar'), btn('New xellter key', 'btn-outline-secondary', () => { if (confirm(`Create a new key for ${name}? The old key stops working at once.`)) rotateKey(name); }, 'refresh'),
-      iconBtn('Delete client', 'trash', () => { if (confirm(`Delete client ${name} and its kenari keys from xellter?`)) act(api('clients', { method: 'POST', body: { action: 'delete', name } }).then(() => { location.hash = '#/clients'; }), 'Client deleted'); }, 'btn-outline-danger')] });
+      iconBtn('Delete client', 'trash', () => { if (confirm(`Delete client ${name} and its kenari keys from xellter?`)) act(api('clients', { method: 'POST', body: { action: 'delete', name } }).then(() => { location.hash = '#/clients'; }), 'Client deleted'); }, { cls: 'btn-outline-danger' })] });
 
   const keyRows = row.keys.map(k => {
     const paused = (!zero(k.cooldown_until) && left(k.cooldown_until)) || (!zero(k.breaker_until) && left(k.breaker_until));
     const st = !k.has_secret ? ['red', 'No key value'] : paused ? ['orange', 'Paused ' + paused] : ['green', 'Ready'];
     return h('tr', {}, h('td', {}, h('strong', {}, k.label), k.last_error && h('div', { class: 'text-danger small' }, k.last_error)),
       h('td', {}, dot(st[0]), st[1]), h('td', {}, k.learned_allow?.length ? h('span', { title: k.learned_allow.join(', ') }, `${k.learned_allow.length} model${k.learned_allow.length === 1 ? '' : 's'}`) : 'All models'),
-      h('td', { class: 'text-end nowrap' }, iconBtn('Rename key', 'pencil', () => renameKey(name, k.label)), iconBtn('Replace key', 'key', () => replaceKey(name, k.label)),
-        iconBtn('Remove key', 'trash', () => { if (confirm(`Remove key "${k.label}" from ${name}? It stays valid at kenari.`)) act(api('keys', { method: 'POST', body: { client: name, action: 'remove', name: k.label } }), 'Key removed'); }, 'btn-ghost-danger')));
+      h('td', { class: 'text-end nowrap' }, iconBtn('Rename key', 'pencil', () => renameKey(name, k.label), { sm: true }), iconBtn('Replace key', 'key', () => replaceKey(name, k.label), { sm: true }),
+        iconBtn('Remove key', 'trash', () => { if (confirm(`Remove key "${k.label}" from ${name}? It stays valid at kenari.`)) act(api('keys', { method: 'POST', body: { client: name, action: 'remove', name: k.label } }), 'Key removed'); }, { sm: true, cls: 'btn-ghost-danger' })));
   });
   const presets = Object.keys(cl.presets).sort((a, b) => presetSort(cl.presets[a], a).localeCompare(presetSort(cl.presets[b], b)));
   return h('div', {},
@@ -522,11 +531,17 @@ const MODALITIES = { chat: 'Text', images: 'Image', videos: 'Video', audio_speec
 function presetCard(client, name, p, r) {
   p.require ||= {}; p.weights ||= {}; p.cost_profile ||= {};
   const isChat = p.modality === 'chat', obj = objectiveOf(p), [kind, ic] = KIND[p.modality] || ['', 'message'];
+  // "Serving now" lists every model this preset can use right now: the main
+  // list, plus the ones on trial. The ones left out are counted, and the
+  // "Why this order?" button explains each of them.
+  const main = r?.candidates || [], trial = r?.trial || [];
+  const out = (r?.rejected?.length || 0) + (r?.unavailable?.length || 0);
   const body = h('div', {},
     p.description && h('div', { class: 'text-secondary mb-3' }, p.description),
     h('div', { class: 'mb-3' }, h('div', { class: 'subheader' }, 'Serving now'),
-      r?.candidates?.length ? r.candidates.slice(0, 3).map((c, i) => h('div', { class: 'model-line' }, h('span', { class: 'mono' + (i ? ' text-secondary' : ' fw-bold') }, c.model), flags(c.flags))) : h('span', { class: 'text-danger' }, 'Nothing available right now'),
-      r?.trial?.length ? h('div', { class: 'text-secondary small mt-1' }, `${r.trial.length} new model${r.trial.length === 1 ? '' : 's'} on trial`) : null),
+      main.length ? main.map((c, i) => h('div', { class: 'model-line' }, h('span', { class: 'model-rank' }, i + 1), h('span', { class: 'mono ' + (i ? 'text-secondary' : 'fw-bold') }, c.model), flags(c.flags), c.score != null && h('span', { class: 'text-secondary small ms-auto' }, 'score ' + c.score.toFixed(2)))) : h('span', { class: 'text-danger' }, 'Nothing available right now'),
+      trial.length ? h('div', { class: 'model-line' }, h('span', { class: 'model-rank trial' }, 'T'), h('span', { class: 'mono text-secondary' }, trial.map(c => c.model).join(', ')), h('span', { class: 'text-secondary small ms-auto' }, 'on trial')) : null,
+      out ? h('div', { class: 'form-hint' }, `${out} more model${out === 1 ? '' : 's'} left out; "Why this order?" says why.`) : null),
     h('div', { class: 'mb-3' }, h('div', { class: 'subheader' }, 'Optimise for'),
       h('div', { class: 'btn-group w-100' }, Object.entries(objectivesFor(p)).map(([k, o]) => h('button', { class: 'btn btn-sm ' + (obj === k ? 'btn-primary' : 'btn-outline-primary'), onclick: () => { p.weights = { ...o.w }; p.min_quality = o.q; markDirty(); render(); } }, o.label)), obj === 'custom' && h('button', { class: 'btn btn-sm btn-primary', disabled: true }, 'Custom')),
       h('div', { class: 'form-hint' }, obj === 'custom' ? 'Tuned by hand. Pick an option to reset it.' : isChat ? 'Cheapest: lowest price among models that are good enough. Balanced: best quality for the price. Best quality: the strongest model, price matters little.' : 'Quality comes from the Arena leaderboard when the model is listed there, otherwise it is estimated from price.')),
@@ -535,7 +550,7 @@ function presetCard(client, name, p, r) {
     isChat && h('div', { class: 'mb-2' }, h('div', { class: 'subheader' }, 'The model must support'),
       field(p.require, 'tool_call', { type: 'switch', label: 'Tool calling (agents, function calls)' }), field(p.require, 'vision', { type: 'switch', label: 'Image input' })));
   return card(h('span', { class: 'd-flex align-items-center gap-2' }, h('span', { class: 'kind-icon' }, icon(ic)), h('span', {}, name, h('div', { class: 'text-secondary small fw-normal' }, `${kind} · ${r ? r.callable : 0} model${r?.callable === 1 ? '' : 's'} available`))), body,
-    { actions: h('div', { class: 'd-flex gap-1' }, btn('Why this order?', 'btn-sm btn-ghost-secondary', () => showRanking(client, name)), iconBtn('Delete preset', 'trash', () => { const cl = S.cfg.clients.find(c => c.name === client); if (confirm(`Delete preset "${name}" of ${client}? Apps calling it will get an error until you add it again with "Add preset".`)) { delete cl.presets[name]; markDirty(); render(); } }, 'btn-ghost-danger')), class: 'h-100' });
+    { actions: h('div', { class: 'd-flex gap-1 align-items-center' }, btn('Why this order?', 'btn-sm btn-ghost-secondary', () => showRanking(client, name)), iconBtn('Delete preset', 'trash', () => { const cl = S.cfg.clients.find(c => c.name === client); if (confirm(`Delete preset "${name}" of ${client}? Apps calling it will get an error until you add it again with "Add preset".`)) { delete cl.presets[name]; markDirty(); render(); } }, { sm: true, cls: 'btn-ghost-danger' })), class: 'h-100' });
 }
 
 function addPreset(cl) {
@@ -557,17 +572,34 @@ function newDefault(kind) {
   return { description: '', modality: kind, mode: 'auto', require: {}, min_quality: 0, max_candidates: 3, strategy: 'priority', rr_band: 0.03, weights: media, cost_profile: { images: 1, seconds: kind === 'audio_transcription' ? 60 : 5, chars: 1000, variant: kind === 'videos' ? '720p' : '' } };
 }
 
+// showRanking explains the order of a preset: the main list with its scores,
+// the models on trial, and every model that was left out with the reason.
 async function showRanking(client, name) {
   try {
     const r = await api(`ranking?client=${encodeURIComponent(client)}&preset=${encodeURIComponent(name)}`);
-    const row = (c, i) => h('tr', {}, h('td', {}, i + 1), h('td', { class: 'mono' }, c.model), h('td', {}, c.score.toFixed(2)), h('td', { class: 'nowrap' }, c.cost_idr ? 'Rp ' + idr(c.cost_idr) : 'free / plan'),
-      h('td', {}, (c.flags || []).map(f => badge(f, /free|plan|promo|proven/.test(f) ? 'green' : 'orange'))), h('td', { class: 'text-secondary small' }, Object.entries(c.components || {}).map(([k, v]) => `${k} ${v.toFixed(2)}`).join(' · ')));
-    const tbl = list => h('div', { class: 'table-responsive' }, h('table', { class: 'table table-sm' }, h('thead', {}, h('tr', {}, ['#', 'Model', 'Score', 'Cost per typical request', 'Why', 'Scores'].map(x => h('th', {}, x)))), h('tbody', {}, list.map(row))));
-    dialog(h('h3', {}, `${client} / ${name}: how the order is decided`), h('p', { class: 'text-secondary' }, 'Higher score wins. Models close to the top score take turns when the preset is set to do so.'),
-      r.candidates?.length ? tbl(r.candidates) : h('p', { class: 'text-danger' }, 'No model qualifies right now.'),
-      r.trial?.length ? [h('h4', {}, 'New models on trial'), h('p', { class: 'text-secondary' }, 'They get a small share of traffic until they have proven themselves.'), tbl(r.trial)] : null,
-      r.rejected?.length ? [h('h4', {}, `Left out (${r.rejected.length})`), h('table', { class: 'table table-sm' }, h('tbody', {}, r.rejected.map(x => h('tr', {}, h('td', { class: 'mono' }, x.model), h('td', { class: 'text-secondary' }, x.why)))))] : null,
-      r.unavailable?.length ? h('p', { class: 'text-secondary small' }, `${r.unavailable.length} more models exist but this client's keys may not call them.`) : null, dialogButtons());
+    const comps = c => Object.entries(c.components || {}).map(([k, v]) => h('span', { class: 'rank-comp' }, h('span', { class: 'text-secondary' }, k), ' ', h('strong', {}, v.toFixed(2))));
+    const row = (c, i) => h('tr', {}, h('td', { class: 'rank-num' }, i + 1), h('td', { class: 'mono' }, c.model),
+      h('td', { class: 'rank-score' }, c.score.toFixed(2)), h('td', { class: 'nowrap' }, c.cost_idr ? 'Rp ' + idr(c.cost_idr) : h('span', { class: 'text-secondary' }, 'free / plan')),
+      h('td', {}, (c.flags || []).map(f => badge(f, /free|plan|promo|proven/.test(f) ? 'green' : 'orange'))),
+      h('td', {}, h('div', { class: 'rank-comps' }, comps(c))));
+    const table = (list, empty) => list.length ? h('div', { class: 'table-responsive' }, h('table', { class: 'table table-sm rank-table' }, h('thead', {}, h('tr', {}, ['#', 'Model', 'Score', 'Cost', 'Flags', 'Components'].map(x => h('th', {}, x)))), h('tbody', {}, list.map(row)))) : h('p', { class: 'text-secondary' }, empty);
+    // the left-out models are many: group them by the reason, so the list stays short
+    const reasons = new Map();
+    for (const x of (r.rejected || [])) {
+      const list = reasons.get(x.why) || [];
+      list.push(x.model);
+      reasons.set(x.why, list);
+    }
+    const rejected = reasons.size ? h('div', { class: 'rank-reasons' }, [...reasons.entries()].sort((a, b) => b[1].length - a[1].length).map(([why, models]) => h('div', { class: 'rank-reason' },
+      h('div', { class: 'rank-reason-head' }, h('span', { class: 'rank-reason-count' }, models.length), h('span', {}, why)),
+      h('div', { class: 'rank-reason-models mono' }, models.join(', '))))) : null;
+    const section = (title, note, body) => h('div', { class: 'mb-4' }, h('h4', { class: 'rank-h' }, title), note && h('p', { class: 'text-secondary small' }, note), body);
+    dialog(h('h3', {}, `${client} / ${name}`), h('p', { class: 'text-secondary' }, 'How the order is decided. The higher the score, the better the model; models close to the top take turns when the preset is set to do so.'),
+      section('Main list', 'The models this preset uses, best first.', table(r.candidates, 'No model qualifies right now.')),
+      r.trial?.length ? section(`On trial (${r.trial.length})`, 'New or unproven models. They get a small share of traffic until they have proven themselves.', h('div', { class: 'rank-reason-models mono' }, r.trial.map(c => c.model).join(', '))) : null,
+      r.rejected?.length ? section(`Left out (${r.rejected.length})`, 'Models of this kind that do not serve this preset, grouped by the reason.', rejected) : null,
+      r.unavailable?.length ? h('p', { class: 'text-secondary small' }, `${r.unavailable.length} more models exist but this client's keys may not call them.`) : null,
+      dialogButtons(), { __opts: { wide: true } });
   } catch (e) { fail(e); }
 }
 
@@ -626,9 +658,9 @@ function judgeOrder(jev, j) {
       h('span', { class: 'text-secondary mono me-1' }, i + 1 + '.'),
       h('span', { class: 'mono me-auto' + (meta(id) ? '' : ' text-warning') }, label(id), !meta(id) && h('span', { class: 'small' }, ' · not in the catalog right now')),
       i === 0 && badge('tried first', 'blue'),
-      iconBtn('Move up', 'arrow-up', () => move(i, -1), 'btn-ghost-secondary', i === 0),
-      iconBtn('Move down', 'arrow-down', () => move(i, 1), 'btn-ghost-secondary', i === jev.judges.length - 1),
-      iconBtn('Remove', 'trash', () => { jev.judges.splice(i, 1); markDirty(); render(); }, 'btn-ghost-danger')))) : empty('No judge chosen yet.'),
+      iconBtn('Move up', 'arrow-up', () => move(i, -1), { sm: true, off: i === 0 }),
+      iconBtn('Move down', 'arrow-down', () => move(i, 1), { sm: true, off: i === jev.judges.length - 1 }),
+      iconBtn('Remove', 'trash', () => { jev.judges.splice(i, 1); markDirty(); render(); }, { sm: true, cls: 'btn-ghost-danger' })))) : empty('No judge chosen yet.'),
     h('div', { class: 'd-flex gap-2' }, picker, btn('Add', 'btn-outline-primary btn-sm', () => { if (picker.value) { jev.judges.push(picker.value); markDirty(); render(); } }, 'plus')),
     h('div', { class: 'form-hint' }, 'The judge at the top scores every answer. If kenari cannot serve it (down or too slow), the next one in this list takes over, and after that any other free System One judge. A judge that is not free costs money from the daily limit, so keep free ones first.'));
 }

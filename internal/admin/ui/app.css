@@ -10,8 +10,11 @@ body { font-feature-settings: "cv11", "ss01"; letter-spacing: -.005em; }
 .icon { width: 1.15rem; height: 1.15rem; flex: none; }
 .icon-lg { width: 1.5rem; height: 1.5rem; }
 /* An icon-only button is a square: the icon sits in the middle, so a row of
-   them (rename, replace, delete) lines up and the icons do not wobble. */
-.btn.icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 2rem; height: 2rem; padding: 0; flex: none; }
+   them (rename, replace, delete) lines up and the icons do not wobble. The
+   size matches the buttons next to it: the normal one is 40px tall, the small
+   one 28px. */
+.btn.icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 2.5rem; height: 2.5rem; padding: 0; flex: none; }
+.btn.btn-sm.icon-btn { width: 1.75rem; height: 1.75rem; }
 .btn.icon-btn .icon { display: block; margin: 0; }
 .page-body { margin-top: .5rem; padding-bottom: 5rem; }
 .head-row { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; }
@@ -24,6 +27,7 @@ body { font-feature-settings: "cv11", "ss01"; letter-spacing: -.005em; }
 .toast-lite { position: fixed; left: 50%; bottom: 4.5rem; transform: translateX(-50%); background: #182433; color: #fff; padding: .55rem .95rem; border-radius: 8px; opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 2000; max-width: 92vw; }
 .toast-lite.show { opacity: .96; } .toast-lite.bad { background: var(--tblr-danger); }
 dialog#dlg { max-width: min(860px, 94vw); width: 100%; height: fit-content; max-height: 88vh; overflow: auto; padding: 0; border: 1px solid var(--tblr-border-color); }
+dialog#dlg.dlg-wide { max-width: min(1180px, 96vw); }
 dialog#dlg:not([open]) { display: none; }
 dialog#dlg::backdrop { background: rgba(0, 0, 0, .5); }
 .mono { font-family: var(--tblr-font-monospace); font-size: .84em; }
@@ -59,6 +63,24 @@ details.adv > summary::before { content: "▸ "; } details.adv[open] > summary::
 .kind-icon { display: inline-flex; align-items: center; justify-content: center; width: 2rem; height: 2rem; border-radius: 8px; background: var(--tblr-primary-lt); color: var(--tblr-primary); flex: none; }
 .subheader { margin-bottom: .35rem; }
 .model-line { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; padding: .1rem 0; }
+/* the position of a model in the list, as a small fixed-width number */
+.model-rank { display: inline-flex; align-items: center; justify-content: center; width: 1.35rem; height: 1.35rem; border-radius: 5px; background: var(--tblr-secondary-lt); color: var(--tblr-secondary); font-size: .72rem; font-weight: 600; flex: none; }
+.model-rank.trial { background: var(--tblr-warning-lt); color: var(--tblr-warning); font-style: italic; }
+/* the "Why this order?" dialog */
+.rank-h { font-size: .95rem; font-weight: 650; margin-bottom: .1rem; }
+.rank-table { font-size: .82rem; }
+.rank-table th { font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; color: var(--tblr-secondary); font-weight: 600; white-space: nowrap; }
+.rank-table td { vertical-align: middle; }
+.rank-num { width: 2rem; color: var(--tblr-secondary); }
+.rank-score { font-variant-numeric: tabular-nums; font-weight: 600; }
+.rank-comps { display: flex; flex-wrap: wrap; gap: .25rem; }
+.rank-comp { background: var(--tblr-bg-surface-secondary); border: 1px solid var(--tblr-border-color); border-radius: 4px; padding: .05rem .3rem; font-size: .72rem; white-space: nowrap; }
+/* the left-out models, grouped by the reason they were left out */
+.rank-reasons { display: flex; flex-direction: column; gap: .5rem; }
+.rank-reason { border-left: 2px solid var(--tblr-border-color); padding-left: .6rem; }
+.rank-reason-head { display: flex; align-items: baseline; gap: .4rem; font-size: .85rem; }
+.rank-reason-count { display: inline-flex; align-items: center; justify-content: center; min-width: 1.3rem; height: 1.2rem; border-radius: 4px; background: var(--tblr-secondary-lt); color: var(--tblr-secondary); font-size: .72rem; font-weight: 600; }
+.rank-reason-models { color: var(--tblr-secondary); font-size: .78rem; line-height: 1.5; word-break: break-word; }
 .crumbs { font-size: .85rem; color: var(--tblr-secondary); }
 .crumbs a { color: inherit; }
 @media (max-width: 991.98px) { .page-header { margin-top: .75rem; } }
