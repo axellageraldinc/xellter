@@ -369,16 +369,49 @@ function drawChart(ctl) {
     svg.append(g);
   });
 
-  const ticks = new Set([0, n - 1]); // a few labels on the time axis, first and last always
-  const step = Math.max(1, Math.round(n / 5));
-  for (let i = 0; i < n; i += step) ticks.add(i);
-  [...ticks].sort((a, b) => a - b).forEach(i => {
-    const t = mk('text', { x: padL + i * bw + bw / 2, y: H - 5, class: 'chart-axis', 'text-anchor': i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle' });
+  // Time axis: the labels are spread evenly over the buckets and as many as
+  // fit are kept. Every label is measured in the DOM, so a crowded axis
+  // thins out instead of overlapping.
+  const made = []; // every time label, so the ones that do not fit can go
+  const mkLabel = i => {
+    // the first and last label are pinned to the edge so they cannot hang out
+    const first = i === 0, last = i === n - 1;
+    const t = mk('text', { x: first ? padL : last ? W - padR : padL + i * bw + bw / 2, y: H - 5, class: 'chart-axis', 'text-anchor': first ? 'start' : last ? 'end' : 'middle' });
     t.textContent = bucketLabel(pts[i].key, unit, ctl.hours > 24);
     svg.append(t);
-  });
+    made.push(t);
+    return { i, el: t };
+  };
+  const probe = [0, Math.floor(n / 2), n - 1].map(mkLabel);
+  ctl.canvas.replaceChildren(svg); // the labels must be in the DOM to be measured
 
-  ctl.canvas.replaceChildren(svg);
+  const boxOf = t => { const b = t.getBBox(); return { l: b.x, r: b.x + b.width }; };
+  const labelGap = 12; // room between two labels
+  const labelW = Math.max(...probe.map(p => boxOf(p.el).r - boxOf(p.el).l));
+  probe.forEach(p => p.el.remove());
+  // how many labels fit in the plot
+  const room = plotW + labelGap;
+  const maxLabels = Math.max(2, Math.min(n, Math.floor(room / (labelW + labelGap))));
+  // candidates at a regular bucket step, so the times on the axis are evenly
+  // spaced; the last bucket is always a candidate
+  const step = Math.max(1, Math.round((n - 1) / Math.max(1, maxLabels - 1)));
+  const cand = [];
+  for (let i = 0; i < n; i += step) cand.push(i);
+  if (cand[cand.length - 1] !== n - 1) cand.push(n - 1);
+  const labs = cand.map(mkLabel);
+  const boxes = labs.map(l => boxOf(l.el));
+  const lastBox = boxes[boxes.length - 1];
+  // keep a label only when it clears the last one and the one before it
+  const kept = [];
+  for (let i = 0; i < labs.length - 1; i++) {
+    const b = boxes[i];
+    if (!(lastBox.l > b.r + labelGap || lastBox.r < b.l - labelGap)) continue;
+    if (kept.length && b.l <= boxes[kept[kept.length - 1]].r + labelGap) continue;
+    kept.push(i);
+  }
+  kept.push(labs.length - 1);
+  const keepSet = new Set(kept.map(i => labs[i].el));
+  made.forEach(t => { if (!keepSet.has(t)) t.remove(); });
 }
 
 // Charts are redrawn on resize so the bars keep their real pixel width.
