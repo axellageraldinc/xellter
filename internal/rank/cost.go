@@ -7,7 +7,7 @@ import (
 	"github.com/axellageraldinc/xellter/internal/config"
 )
 
-// RefCost estimates the price (IDR) of one reference request of the shadow's
+// RefCost estimates the price (IDR) of one reference request of the preset's
 // cost profile at list prices. The bool is false when the price is unknown.
 func RefCost(m *catalog.Model, p config.CostProfile, now time.Time, lookahead time.Duration) (float64, bool) {
 	if m.Free {

@@ -29,9 +29,9 @@ const usage = `xellter - LLM gateway for kenari.id
 Usage:
   xellter serve        [-config xellter.yaml]
   xellter check        [-config xellter.yaml]        validate the config
-  xellter explain      [-config f] [-shadow name]    print the current ranking and why (fetches the catalog, probes keys)
+  xellter explain      [-config f] [-preset name]    print the current ranking and why (fetches the catalog, probes keys)
   xellter admin init   [-config f] [-username u] [-from-record file] [-credentials-out file]
-  xellter client add   [-config f] -name N [-shadows a,b] [-passthrough glob,glob] [-upstreams u1,u2] [-budget IDR] [-out file]
+  xellter client add   [-config f] -name N [-presets a,b] [-passthrough glob,glob] [-upstreams u1,u2] [-budget IDR] [-out file]
   xellter version
 `
 
@@ -112,14 +112,14 @@ func check(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("ok: %d upstreams, %d clients, %d shadows\n", len(c.Upstreams), len(c.Clients), len(c.Shadows))
+	fmt.Printf("ok: %d upstreams, %d clients, %d presets\n", len(c.Upstreams), len(c.Clients), len(c.Presets))
 	return nil
 }
 
 func explain(args []string) error {
 	fs := flag.NewFlagSet("explain", flag.ExitOnError)
 	path := cfgPath(fs)
-	only := fs.String("shadow", "", "only this shadow model")
+	only := fs.String("preset", "", "only this preset model")
 	_ = fs.Parse(args)
 	abs, _ := filepath.Abs(*path)
 	a, err := app.New(abs, nil)
@@ -233,7 +233,7 @@ func clientCmd(args []string) error {
 	fs := flag.NewFlagSet("client add", flag.ExitOnError)
 	path := cfgPath(fs)
 	name := fs.String("name", "", "client name")
-	shadows := fs.String("shadows", "*", "comma separated shadow models (or *)")
+	presets := fs.String("presets", "*", "comma separated preset models (or *)")
 	pass := fs.String("passthrough", "", "comma separated real-model globs the client may call directly")
 	ups := fs.String("upstreams", "", "comma separated upstream names (empty = all)")
 	budget := fs.Float64("budget", 0, "daily budget in IDR (0 = unlimited)")
@@ -244,7 +244,7 @@ func clientCmd(args []string) error {
 		return err
 	}
 	key := "xl-" + auth.RandomHex(24)
-	cl := config.Client{Name: *name, Enabled: true, KeyHash: proxy.HashKey(key), KeyHint: "…" + key[len(key)-4:], Shadows: split(*shadows), Passthrough: split(*pass), Upstreams: split(*ups), DailyBudget: *budget}
+	cl := config.Client{Name: *name, Enabled: true, KeyHash: proxy.HashKey(key), KeyHint: "…" + key[len(key)-4:], Presets: split(*presets), Passthrough: split(*pass), Upstreams: split(*ups), DailyBudget: *budget}
 	c.Clients = append(c.Clients, cl)
 	if err := config.Save(*path, c); err != nil {
 		return err

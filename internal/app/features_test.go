@@ -10,16 +10,16 @@ import (
 )
 
 func twoEqualModels(c *config.Config) {
-	sh := c.Shadows["xl-chat"]
+	sh := c.Presets["xl-balanced"]
 	sh.Mode, sh.Models, sh.Strategy = "combo", []string{"cheap-b", "pro-c"}, "round_robin"
-	c.Shadows["xl-chat"] = sh
+	c.Presets["xl-balanced"] = sh
 }
 
 func TestRoundRobinRotatesAndSessionsStick(t *testing.T) {
 	e := setup(t, twoEqualModels)
 	seen := map[string]int{}
 	for i := 0; i < 6; i++ { // different prompts = different sessions (identical prompts stick to one model)
-		r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(`{"model":"xl-chat","messages":[{"role":"user","content":"question %d"}]}`, i))
+		r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(`{"model":"xl-balanced","messages":[{"role":"user","content":"question %d"}]}`, i))
 		seen[r.Header.Get("X-Xellter-Model")]++
 	}
 	if seen["cheap-b"] == 0 || seen["pro-c"] == 0 {
@@ -28,7 +28,7 @@ func TestRoundRobinRotatesAndSessionsStick(t *testing.T) {
 	// with a session header, every request of the session lands on the same model
 	first := ""
 	for i := 0; i < 6; i++ {
-		r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-chat"), "X-Xellter-Session", "s1")
+		r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-balanced"), "X-Xellter-Session", "s1")
 		m := r.Header.Get("X-Xellter-Model")
 		if first == "" {
 			first = m
@@ -44,11 +44,11 @@ func TestCanarySendsTrafficToNewModelAndFallsBack(t *testing.T) {
 	// mark one model as brand new after the baseline
 	e.a.St.SetSeen("promo-d", time.Now().Unix())
 	e.a.Rt.Recompute(time.Now())
-	rk := e.a.Rt.Rankings()["xl-fast"]
+	rk := e.a.Rt.Rankings()["xl-budget"]
 	if len(rk.Trial) != 1 || rk.Trial[0].Model != "promo-d" {
 		t.Fatalf("trial pool: %+v rejected: %+v", rk.Trial, rk.Rejected)
 	}
-	r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-fast"))
+	r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-budget"))
 	if r.Header.Get("X-Xellter-Model") != "promo-d" {
 		t.Fatalf("canary should serve first, got %s", r.Header.Get("X-Xellter-Model"))
 	}
@@ -60,7 +60,7 @@ func TestCanarySendsTrafficToNewModelAndFallsBack(t *testing.T) {
 	}
 	e.a.Pool.Keys()[0].ResetState()
 	e.a.Pool.Keys()[1].ResetState()
-	r, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-fast"))
+	r, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-budget"))
 	if r.StatusCode != 200 || r.Header.Get("X-Xellter-Model") == "promo-d" {
 		t.Fatalf("a failing canary must fall back to a proven model: %d %s %s", r.StatusCode, r.Header.Get("X-Xellter-Model"), body)
 	}
@@ -82,7 +82,7 @@ func TestJEVEvaluationStoresScoreAndRespectsBudget(t *testing.T) {
 		t.Fatalf("stored: %+v", scores)
 	}
 	e.a.Rt.Recompute(time.Now())
-	for _, c := range e.a.Rt.Rankings()["xl-chat"].Candidates {
+	for _, c := range e.a.Rt.Rankings()["xl-balanced"].Candidates {
 		if c.Model == "free-a:free" && c.Components["jev"] < 0.89 {
 			t.Fatalf("JEV score must feed the ranking: %+v", c.Components)
 		}
@@ -102,10 +102,9 @@ func TestProbeLearnsAllowListWithoutBilling(t *testing.T) {
 		return 404, `{"error":{"code":"model_not_found","message":"no such model"}}`
 	}
 	e.a.ProbeKeys(context.Background())
-	snap := e.a.Cat.Snapshot()
 	var plan, topup []string
 	for _, k := range e.a.Pool.Keys() {
-		st := k.Status(snap, time.Now())
+		st := k.Status(time.Now())
 		if st.Name == "plan" {
 			plan = st.Learned
 		} else {
@@ -115,10 +114,62 @@ func TestProbeLearnsAllowListWithoutBilling(t *testing.T) {
 	if len(plan) != 2 || len(topup) != 0 {
 		t.Fatalf("plan=%v topup=%v", plan, topup)
 	}
-	for _, c := range e.a.Rt.Rankings()["xl-chat"].Candidates {
+	for _, c := range e.a.Rt.Rankings()["xl-balanced"].Candidates {
 		if c.Model == "pro-c" { // topup (unrestricted) can still serve it
 			return
 		}
 	}
 	t.Fatal("pro-c should remain routable through the unrestricted key")
+}
+
+func TestAccountQuotaFromUnrestrictedKeyReplacesGuess(t *testing.T) {
+	e := setup(t, func(c *config.Config) {
+		for i := range c.Upstreams {
+			c.Upstreams[i].Account = "main"
+			c.Upstreams[i].Plan = "WrongGuess"
+		}
+		c.Upstreams[0].Tier, c.Upstreams[1].Tier = "plan", "plan"
+	})
+	reset := time.Now().Add(48 * time.Hour).UTC().Format(time.RFC3339)
+	e.f.account = func(auth string) (int, string) {
+		if auth != "Bearer secret-topup" {
+			return 403, `{"error":{"code":"restricted_key_not_allowed","message":"restricted"}}`
+		}
+		return 200, `{"plan":{"name":"Indie","windows":{"week":{"budget_rp":1000,"used_rp":990,"remaining_rp":10,"used_frac":0.99,"resets_at":"` + reset + `"}}},"coupon":null,"alert_pct":80}`
+	}
+	e.a.ProbeKeys(context.Background())
+	st := e.a.Pool.Accounts()[0].Status(e.a.Cat.Snapshot(), time.Now())
+	if st.Plan != "Indie" || st.PlanSource != "kenari" || st.QuotaKey != "topup" || st.Windows["week"].UsedRP != 990 {
+		t.Fatalf("account not read from kenari: %+v", st)
+	}
+	if st.BalanceIDR != 24998.5 {
+		t.Fatalf("balance %v", st.BalanceIDR)
+	}
+	// kenari says the weekly budget is 99% used, so plan models stop counting as covered
+	m := e.a.Cat.Snapshot().Models["cheap-b"]
+	if e.a.Pool.Keys()[0].Covered(m, e.a.Cat.Snapshot(), time.Now()) {
+		t.Fatal("exhausted weekly window must uncover plan models")
+	}
+	// plan limit is account wide: a 429 on one key blocks the other key of the account too
+	e.a.Pool.Keys()[0].Failure("cheap-b", 429, []byte(`{"error":{"code":"rate_limit_exceeded"}}`), 0, e.a.Cfg().Resilience, time.Now())
+	if r := e.a.Pool.Keys()[1].Check(m, e.a.Cat.Snapshot(), time.Now()); r != "cooldown" {
+		t.Fatalf("rate limits are per account, got %q", r)
+	}
+}
+
+func TestFreeQuotaErrorsAreAccountWide(t *testing.T) {
+	e := setup(t, func(c *config.Config) {
+		c.Upstreams[0].Account, c.Upstreams[1].Account = "main", "main"
+	})
+	free := e.a.Cat.Snapshot().Models["free-a:free"]
+	paid := e.a.Cat.Snapshot().Models["pro-c"]
+	k0, k1 := e.a.Pool.Keys()[0], e.a.Pool.Keys()[1]
+	now := time.Now()
+	k0.Failure("free-a:free", 429, []byte(`{"error":{"code":"free_quota_daily","message":"used"}}`), 0, e.a.Cfg().Resilience, now)
+	if r := k1.Check(free, e.a.Cat.Snapshot(), now); r != "daily free quota used" {
+		t.Fatalf("free daily quota is per account, got %q", r)
+	}
+	if r := k1.Check(paid, e.a.Cat.Snapshot(), now); r != "" {
+		t.Fatalf("paid models must stay usable: %q", r)
+	}
 }

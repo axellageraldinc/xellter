@@ -1,6 +1,7 @@
-// Package upstream models kenari API keys: rate limits, free-tier quota,
-// plan budgets, cooldowns and a circuit breaker. Everything here is in memory
-// and seeded from the request log at startup.
+// Package upstream models kenari API keys and the accounts they belong to:
+// account-wide rate limits, free quota and plan budgets (account.go), and
+// per-key cooldowns, circuit breaker and allow lists (this file). Everything is
+// in memory and seeded from the request log at startup.
 package upstream
 
 import (
@@ -17,128 +18,101 @@ import (
 	"github.com/axellageraldinc/xellter/internal/store"
 )
 
-// Ledger tracks plan-billed spend. Keys of one kenari account share a ledger
-// because a plan's budget belongs to the account, not to a single key.
-type Ledger struct {
-	mu    sync.Mutex
-	spend []store.TimedCost
-}
-
-// Add records spend and drops entries older than the longest plan window.
-func (l *Ledger) Add(ts time.Time, cost float64) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.spend = append(l.spend, store.TimedCost{TS: ts.UnixMilli(), Cost: cost})
-	cut := ts.Add(-31 * 24 * time.Hour).UnixMilli()
-	i := 0
-	for i < len(l.spend) && l.spend[i].TS < cut {
-		i++
-	}
-	l.spend = l.spend[i:]
-}
-
-// Sums returns spend in the last 5 hours, 7 days and 30 days.
-func (l *Ledger) Sums(now time.Time) (s5, sw, sm float64) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	for _, s := range l.spend {
-		age := now.Sub(time.UnixMilli(s.TS))
-		if age <= 5*time.Hour {
-			s5 += s.Cost
-		}
-		if age <= 7*24*time.Hour {
-			sw += s.Cost
-		}
-		if age <= 30*24*time.Hour {
-			sm += s.Cost
-		}
-	}
-	return
-}
-
-// Key is one upstream API key with its live limiter state.
+// Key is one upstream API key with its own failure state. Limits that kenari
+// applies per account are on its Account.
 type Key struct {
 	Name   string
 	Secret string
 
-	mu           sync.Mutex
-	cfg          config.Upstream
-	rpm          []int64 // request times (ms), last minute
-	free         []int64 // free-model request times (ms), last 24h
-	led          *Ledger
-	cooldown     time.Time // key unusable until
-	planBlocked  time.Time // plan-covered models unusable until (plan_limit_reached)
-	balanceEmpty time.Time // paid models unusable until (insufficient_balance)
-	fails        int       // consecutive failures
-	breaker      time.Time
-	blocked      map[string]time.Time // model -> until
-	blockN       map[string]int
-	learned      map[string]struct{} // models this key may use (learned from 400s); nil = unknown
-	lastErr      string
-	lastOK       time.Time
+	mu       sync.Mutex
+	cfg      config.Upstream
+	acct     *Account
+	cooldown time.Time // key unusable until (rejected key)
+	fails    int       // consecutive failures
+	breaker  time.Time
+	blocked  map[string]time.Time // model -> until
+	blockN   map[string]int
+	learned  map[string]struct{} // models this key may use (probed / learned from 400s); nil = unrestricted
+	lastErr  string
+	lastOK   time.Time
 }
 
-// Pool is the set of keys.
+// Pool is the set of keys and accounts.
 type Pool struct {
-	mu      sync.RWMutex
-	keys    []*Key
-	by      map[string]*Key
-	ledgers map[string]*Ledger
-	rr      atomic.Uint64
+	mu    sync.RWMutex
+	keys  []*Key
+	by    map[string]*Key
+	accts map[string]*Account
+	rr    atomic.Uint64
 }
 
 // NewPool returns an empty pool.
-func NewPool() *Pool { return &Pool{by: map[string]*Key{}, ledgers: map[string]*Ledger{}} }
+func NewPool() *Pool { return &Pool{by: map[string]*Key{}, accts: map[string]*Account{}} }
 
-// Reload applies a new config; state of keys with unchanged names is kept.
-// st may be nil (tests); it seeds counters for brand-new keys.
+var tierRank = map[string]int{"free": 0, "topup": 1, "plan": 2}
+
+// Reload applies a new config; state of keys and accounts with unchanged names
+// is kept. st may be nil (tests); it seeds counters of brand-new keys.
 func (p *Pool) Reload(cfg *config.Config, secrets map[string]string, st *store.Store) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	next := make([]*Key, 0, len(cfg.Upstreams))
 	by := map[string]*Key{}
-	ledgers := map[string]*Ledger{}
+	accts := map[string]*Account{}
+	now := time.Now()
 	for _, u := range cfg.Upstreams {
-		secret := secrets[u.KeyEnv]
 		k := p.by[u.Name]
-		if k == nil {
+		isNew := k == nil
+		if isNew {
 			k = &Key{Name: u.Name, blocked: map[string]time.Time{}, blockN: map[string]int{}}
-			if st != nil {
-				now := time.Now()
-				if t, err := st.FreeTimes(u.Name, now.Add(-24*time.Hour)); err == nil {
-					k.free = t
-				}
-				if t, err := st.AllTimes(u.Name, now.Add(-time.Minute)); err == nil {
-					k.rpm = t
-				}
+		}
+		an := u.Account
+		if an == "" {
+			an = u.Name
+		}
+		a := accts[an]
+		if a == nil {
+			a = p.accts[an]
+			if a == nil {
+				a = &Account{Name: an}
+			}
+			accts[an] = a
+			a.mu.Lock() // recomputed below from every member key
+			a.tier, a.planCfg, a.rpmCfg, a.dailyCfg = "free", "", 0, 0
+			a.mu.Unlock()
+		}
+		a.mu.Lock()
+		if tierRank[u.Tier] >= tierRank[a.tier] {
+			a.tier = u.Tier
+		}
+		if a.planCfg == "" {
+			a.planCfg = u.Plan
+		}
+		if a.rpmCfg == 0 {
+			a.rpmCfg = u.RPM
+		}
+		if a.dailyCfg == 0 {
+			a.dailyCfg = u.Daily
+		}
+		if isNew && st != nil {
+			if t, err := st.FreeTimes(u.Name, startOfUTCDay(now)); err == nil {
+				a.free = append(a.free, t...)
+			}
+			if t, err := st.AllTimes(u.Name, now.Add(-time.Minute)); err == nil {
+				a.rpm = append(a.rpm, t...)
+			}
+			if sp, err := st.PlanSpend(u.Name, now.Add(-30*24*time.Hour)); err == nil {
+				a.spend = append(a.spend, sp...)
 			}
 		}
-		acct := u.Account
-		if acct == "" {
-			acct = u.Name
-		}
-		led := ledgers[acct]
-		if led == nil {
-			led = p.ledgers[acct]
-			if led == nil {
-				led = &Ledger{}
-			}
-			ledgers[acct] = led
-		}
-		if _, existing := p.by[u.Name]; !existing && st != nil {
-			if sp, err := st.PlanSpend(u.Name, time.Now().Add(-30*24*time.Hour)); err == nil {
-				for _, x := range sp {
-					led.Add(time.UnixMilli(x.TS), x.Cost)
-				}
-			}
-		}
+		a.mu.Unlock()
 		k.mu.Lock()
-		k.cfg, k.Secret, k.led = u, secret, led
+		k.cfg, k.Secret, k.acct = u, secrets[u.KeyEnv], a
 		k.mu.Unlock()
 		next = append(next, k)
 		by[u.Name] = k
 	}
-	p.keys, p.by, p.ledgers = next, by, ledgers
+	p.keys, p.by, p.accts = next, by, accts
 }
 
 // Keys returns the current keys.
@@ -155,6 +129,18 @@ func (p *Pool) Get(name string) *Key {
 	return p.by[name]
 }
 
+// Accounts returns the current accounts sorted by name.
+func (p *Pool) Accounts() []*Account {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make([]*Account, 0, len(p.accts))
+	for _, a := range p.accts {
+		out = append(out, a)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
 // Next returns a monotonically increasing counter for round-robin rotation.
 func (p *Pool) Next() uint64 { return p.rr.Add(1) }
 
@@ -165,34 +151,11 @@ func (k *Key) Config() config.Upstream {
 	return k.cfg
 }
 
-// Limits returns the effective (rpm, dailyFree) for the key; 0 = unlimited.
-func (k *Key) Limits(t catalog.FreeTier) (rpm, daily int) {
+// Account returns the key's account.
+func (k *Key) Account() *Account {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	return k.limits(t)
-}
-
-func (k *Key) limits(t catalog.FreeTier) (rpm, daily int) {
-	var tl catalog.TierLimit
-	switch k.cfg.Tier {
-	case "plan":
-		tl = t.Plan
-	case "topup":
-		tl = t.Topup
-	default:
-		tl = t.Free
-	}
-	rpm, daily = tl.RPM, tl.Daily
-	if k.cfg.RPM > 0 {
-		rpm = k.cfg.RPM
-	}
-	switch {
-	case k.cfg.Daily > 0:
-		daily = k.cfg.Daily
-	case k.cfg.Daily < 0:
-		daily = 0
-	}
-	return
+	return k.acct
 }
 
 func prune(ts []int64, cut int64) []int64 {
@@ -221,47 +184,24 @@ func (k *Key) allowed(id string) bool {
 	return true
 }
 
-// Covered reports whether the model is billed to the key's plan right now.
+// Covered reports whether the model is billed to the account's plan right now.
 func (k *Key) Covered(m *catalog.Model, snap *catalog.Snapshot, now time.Time) bool {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	return k.covered(m, snap, now)
+	a := k.Account()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.covered(m, snap, now)
 }
 
-func (k *Key) covered(m *catalog.Model, snap *catalog.Snapshot, now time.Time) bool {
-	if k.cfg.Tier != "plan" || now.Before(k.planBlocked) {
-		return false
-	}
-	pl := snap.Plan(k.cfg.Plan)
-	if pl == nil || !config.MatchAny(pl.Scope, m.ID) {
-		return false
-	}
-	s5, sw, sm := k.led.Sums(now)
-	over := func(spent, budget float64) bool { return budget > 0 && spent >= budget*0.97 }
-	return !(over(s5, pl.Budget5h) || over(sw, pl.BudgetWeek) || over(sm, pl.BudgetMon))
-}
-
-// FreeCache reports whether cache tokens of the model are free on this key's plan.
+// FreeCache reports whether cache tokens of the model are free on the account's plan.
 func (k *Key) FreeCache(m *catalog.Model, snap *catalog.Snapshot, now time.Time) bool {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	if !k.covered(m, snap, now) {
+	a := k.Account()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.covered(m, snap, now) {
 		return false
 	}
-	pl := snap.Plan(k.cfg.Plan)
+	pl := snap.Plan(a.planName(now))
 	return pl != nil && config.MatchAny(pl.FreeCache, m.ID)
-}
-
-// PlanUsage reports consumed/budget per window for the dashboard.
-func (k *Key) PlanUsage(snap *catalog.Snapshot, now time.Time) (spent [3]float64, budget [3]float64, plan string) {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	pl := snap.Plan(k.cfg.Plan)
-	if k.cfg.Tier != "plan" || pl == nil {
-		return
-	}
-	spent[0], spent[1], spent[2] = k.led.Sums(now)
-	return spent, [3]float64{pl.Budget5h, pl.BudgetWeek, pl.BudgetMon}, pl.Name
 }
 
 // Reason codes returned by Check.
@@ -284,10 +224,16 @@ const (
 func (k *Key) Check(m *catalog.Model, snap *catalog.Snapshot, now time.Time) string {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	return k.check(m, snap, now)
+	if r := k.check(m, now); r != OK {
+		return r
+	}
+	a := k.acct
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.check(m, snap, now)
 }
 
-func (k *Key) check(m *catalog.Model, snap *catalog.Snapshot, now time.Time) string {
+func (k *Key) check(m *catalog.Model, now time.Time) string {
 	switch {
 	case !k.cfg.Enabled:
 		return Disabled
@@ -303,54 +249,38 @@ func (k *Key) check(m *catalog.Model, snap *catalog.Snapshot, now time.Time) str
 	if until, ok := k.blocked[m.ID]; ok && now.Before(until) {
 		return Blocked
 	}
-	inPlan := k.cfg.Tier == "plan" && k.planScope(m, snap)
-	if inPlan && now.Before(k.planBlocked) && !m.Free {
-		return PlanLimit
-	}
-	if !m.Free && !inPlan && now.Before(k.balanceEmpty) {
-		return NoBalance
-	}
-	rpm, daily := k.limits(snap.Tier)
-	if rpm > 0 {
-		k.rpm = prune(k.rpm, now.Add(-time.Minute).UnixMilli())
-		if len(k.rpm) >= rpm {
-			return RPMLimit
-		}
-	}
-	if m.Free && daily > 0 {
-		k.free = prune(k.free, now.Add(-24*time.Hour).UnixMilli())
-		if len(k.free) >= daily {
-			return DailyLimit
-		}
-	}
 	return OK
 }
 
-func (k *Key) planScope(m *catalog.Model, snap *catalog.Snapshot) bool {
-	pl := snap.Plan(k.cfg.Plan)
-	return pl != nil && config.MatchAny(pl.Scope, m.ID)
-}
-
-// Reserve checks and, if usable, counts the request against the limits.
+// Reserve checks and, if usable, counts the request against the account limits.
 func (k *Key) Reserve(m *catalog.Model, snap *catalog.Snapshot, now time.Time) string {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if r := k.check(m, snap, now); r != OK {
+	if r := k.check(m, now); r != OK {
 		return r
 	}
-	k.rpm = append(k.rpm, now.UnixMilli())
-	if m.Free {
-		k.free = append(k.free, now.UnixMilli())
+	a := k.acct
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if r := a.check(m, snap, now); r != OK {
+		return r
 	}
+	a.reserve(m, now)
 	return OK
 }
 
-// RecordSpend adds plan-billed catalog cost to the account ledger.
+// RecordSpend adds plan-billed catalog cost to the account's estimate.
 func (k *Key) RecordSpend(ts time.Time, cost float64) {
-	k.mu.Lock()
-	led := k.led
-	k.mu.Unlock()
-	led.Add(ts, cost)
+	a := k.Account()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.spend = append(a.spend, store.TimedCost{TS: ts.UnixMilli(), Cost: cost})
+	cut := ts.Add(-31 * 24 * time.Hour).UnixMilli()
+	i := 0
+	for i < len(a.spend) && a.spend[i].TS < cut {
+		i++
+	}
+	a.spend = a.spend[i:]
 }
 
 // SetAllowed replaces the learned allow list (nil = unrestricted).
@@ -384,11 +314,15 @@ func ParseAllowed(body []byte) ([]string, bool) {
 // Success clears failure state for the key and (key, model).
 func (k *Key) Success(model string, now time.Time) {
 	k.mu.Lock()
-	defer k.mu.Unlock()
 	k.fails = 0
 	k.lastOK = now
 	delete(k.blockN, model)
 	delete(k.blocked, model)
+	a := k.acct
+	k.mu.Unlock()
+	a.mu.Lock()
+	a.blockN = 0
+	a.mu.Unlock()
 }
 
 func backoff(base, max time.Duration, n int) time.Duration {
@@ -412,10 +346,12 @@ type Verdict struct {
 var allowedRe = regexp.MustCompile(`(?i)allowed models?:\s*(.+)$`)
 
 // Failure applies the effects of a failed attempt and says whether to retry.
+// Error codes follow https://kenari.id/docs/rate-limits.
 func (k *Key) Failure(model string, status int, body []byte, retryAfter time.Duration, res config.Resilience, now time.Time) Verdict {
 	code, msg := errorInfo(body)
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	a := k.acct
 	base := time.Duration(res.CooldownBaseSec) * time.Second
 	max := time.Duration(res.CooldownMaxSec) * time.Second
 	blockModel := func(d time.Duration) {
@@ -428,21 +364,44 @@ func (k *Key) Failure(model string, status int, body []byte, retryAfter time.Dur
 	k.lastErr = trim(code + " " + msg)
 	switch {
 	case status == 429 && code == "plan_limit_reached":
-		k.planBlocked = now.Add(5 * time.Minute)
+		a.mu.Lock()
+		a.planBlocked = now.Add(5 * time.Minute)
+		a.mu.Unlock()
 		return Verdict{true, "plan limit reached", 0}
-	case status == 429:
+	case status == 429 && code == "free_quota_daily":
+		a.mu.Lock()
+		a.freeDailyUntil = startOfUTCDay(now).Add(24 * time.Hour)
+		a.mu.Unlock()
+		return Verdict{true, "free daily quota used (resets 00:00 UTC)", 0}
+	case status == 429 && code == "free_quota_rpm":
 		d := retryAfter
 		if d <= 0 {
-			k.blockN["*"]++
-			d = backoff(base, max, k.blockN["*"])
+			d = 60 * time.Second
+		}
+		a.mu.Lock()
+		a.freeRPMUntil = now.Add(d)
+		a.mu.Unlock()
+		return Verdict{true, "free quota per minute", d}
+	case status == 429 && code == "upstream_error":
+		blockModel(0) // the provider behind this model is rate limiting
+		return Verdict{true, "provider rate limited", 0}
+	case status == 429:
+		d := retryAfter
+		a.mu.Lock()
+		if d <= 0 {
+			a.blockN++
+			d = backoff(base, max, a.blockN)
 		}
 		if d > max {
 			d = max
 		}
-		k.cooldown = now.Add(d)
+		a.cooldown = now.Add(d) // kenari limits per account: every key of it waits
+		a.mu.Unlock()
 		return Verdict{true, "rate limited", retryAfter}
 	case status == 402:
-		k.balanceEmpty = now.Add(10 * time.Minute)
+		a.mu.Lock()
+		a.balanceEmpty = now.Add(10 * time.Minute)
+		a.mu.Unlock()
 		return Verdict{true, "insufficient balance", 0}
 	case status == 401 || status == 403:
 		k.cooldown = now.Add(5 * time.Minute)
@@ -450,10 +409,10 @@ func (k *Key) Failure(model string, status int, body []byte, retryAfter time.Dur
 		return Verdict{true, "key rejected", 0}
 	case status == 400 || status == 404:
 		low := strings.ToLower(msg)
-		if m := allowedRe.FindStringSubmatch(msg); m != nil {
-			k.learned = map[string]struct{}{}
-			for _, id := range strings.FieldsFunc(m[1], func(r rune) bool { return r == ',' || r == ' ' || r == ';' || r == '"' || r == '\'' }) {
-				k.learned[strings.Trim(id, ".")] = struct{}{}
+		if list, ok := ParseAllowed(body); ok {
+			k.learned = make(map[string]struct{}, len(list))
+			for _, id := range list {
+				k.learned[id] = struct{}{}
 			}
 			return Verdict{true, "model not allowed for key (learned allow list)", 0}
 		}
@@ -506,36 +465,25 @@ func errorInfo(body []byte) (code, msg string) {
 
 // Status is the dashboard view of a key.
 type Status struct {
-	Name        string     `json:"name"`
-	Tier        string     `json:"tier"`
-	Plan        string     `json:"plan"`
-	Enabled     bool       `json:"enabled"`
-	HasSecret   bool       `json:"has_secret"`
-	RPMLimit    int        `json:"rpm_limit"`
-	RPMUsed     int        `json:"rpm_used"`
-	DailyLimit  int        `json:"daily_limit"`
-	DailyUsed   int        `json:"daily_used"`
-	CooldownEnd time.Time  `json:"cooldown_until"`
-	BreakerEnd  time.Time  `json:"breaker_until"`
-	PlanBlocked time.Time  `json:"plan_blocked_until"`
-	Blocked     []string   `json:"blocked_models"`
-	Learned     []string   `json:"learned_allow"`
-	Spent       [3]float64 `json:"plan_spent"`
-	Budget      [3]float64 `json:"plan_budget"`
-	LastError   string     `json:"last_error"`
-	LastOK      time.Time  `json:"last_ok"`
+	Name         string    `json:"name"`
+	Account      string    `json:"account"`
+	Tier         string    `json:"tier"`
+	Enabled      bool      `json:"enabled"`
+	HasSecret    bool      `json:"has_secret"`
+	CooldownEnd  time.Time `json:"cooldown_until"`
+	BreakerEnd   time.Time `json:"breaker_until"`
+	Blocked      []string  `json:"blocked_models"`
+	Learned      []string  `json:"learned_allow"`
+	LastError    string    `json:"last_error"`
+	LastOK       time.Time `json:"last_ok"`
+	Unrestricted bool      `json:"unrestricted"` // may read account quota and balance
 }
 
 // Status snapshots the key for display.
-func (k *Key) Status(snap *catalog.Snapshot, now time.Time) Status {
-	spent, budget, _ := k.PlanUsage(snap, now)
+func (k *Key) Status(now time.Time) Status {
 	k.mu.Lock()
-	defer k.mu.Unlock()
-	rpm, daily := k.limits(snap.Tier)
-	k.rpm = prune(k.rpm, now.Add(-time.Minute).UnixMilli())
-	k.free = prune(k.free, now.Add(-24*time.Hour).UnixMilli())
-	st := Status{Name: k.Name, Tier: k.cfg.Tier, Plan: k.cfg.Plan, Enabled: k.cfg.Enabled, HasSecret: k.Secret != "", RPMLimit: rpm, RPMUsed: len(k.rpm),
-		DailyLimit: daily, DailyUsed: len(k.free), CooldownEnd: k.cooldown, BreakerEnd: k.breaker, PlanBlocked: k.planBlocked, Spent: spent, Budget: budget, LastError: k.lastErr, LastOK: k.lastOK}
+	a := k.acct
+	st := Status{Name: k.Name, Account: a.Name, Tier: k.cfg.Tier, Enabled: k.cfg.Enabled, HasSecret: k.Secret != "", CooldownEnd: k.cooldown, BreakerEnd: k.breaker, LastError: k.lastErr, LastOK: k.lastOK}
 	for m, until := range k.blocked {
 		if now.Before(until) {
 			st.Blocked = append(st.Blocked, m)
@@ -544,15 +492,20 @@ func (k *Key) Status(snap *catalog.Snapshot, now time.Time) Status {
 	for m := range k.learned {
 		st.Learned = append(st.Learned, m)
 	}
+	name := k.Name
+	k.mu.Unlock()
+	st.Unrestricted = a.QuotaKey() == name
 	sort.Strings(st.Blocked)
 	sort.Strings(st.Learned)
 	return st
 }
 
-// ResetState clears cooldowns, breakers and blocks (admin action).
+// ResetState clears cooldowns, breakers and blocks of the key and its account.
 func (k *Key) ResetState() {
 	k.mu.Lock()
-	defer k.mu.Unlock()
-	k.cooldown, k.breaker, k.planBlocked, k.balanceEmpty = time.Time{}, time.Time{}, time.Time{}, time.Time{}
+	k.cooldown, k.breaker = time.Time{}, time.Time{}
 	k.blocked, k.blockN, k.learned, k.fails = map[string]time.Time{}, map[string]int{}, nil, 0
+	a := k.acct
+	k.mu.Unlock()
+	a.reset()
 }

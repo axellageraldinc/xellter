@@ -1,5 +1,5 @@
 // Package rank turns the catalog, key state, health stats and JEV scores into
-// an ordered candidate list per shadow model, with an explanation for every
+// an ordered candidate list per preset model, with an explanation for every
 // decision. It is pure: no I/O, so it is cheap to test with fixtures.
 package rank
 
@@ -48,9 +48,9 @@ type Rejected struct {
 	Why   string `json:"why"`
 }
 
-// Ranking is the result for one shadow.
+// Ranking is the result for one preset.
 type Ranking struct {
-	Shadow      string      `json:"shadow"`
+	Preset      string      `json:"preset"`
 	Modality    string      `json:"modality"`
 	Mode        string      `json:"mode"`
 	Candidates  []Candidate `json:"candidates"` // ordered main list
@@ -61,10 +61,10 @@ type Ranking struct {
 	Computed    time.Time   `json:"computed"`
 }
 
-// All computes rankings for every shadow.
+// All computes rankings for every preset.
 func All(in Inputs) map[string]*Ranking {
-	out := make(map[string]*Ranking, len(in.Cfg.Shadows))
-	for name, sh := range in.Cfg.Shadows {
+	out := make(map[string]*Ranking, len(in.Cfg.Presets))
+	for name, sh := range in.Cfg.Presets {
 		out[name] = One(in, name, sh)
 	}
 	return out
@@ -81,9 +81,9 @@ type scored struct {
 	flags     []string
 }
 
-// One ranks a single shadow.
-func One(in Inputs, name string, sh config.Shadow) *Ranking {
-	r := &Ranking{Shadow: name, Modality: sh.Modality, Mode: sh.Mode, Computed: in.Now}
+// One ranks a single preset.
+func One(in Inputs, name string, sh config.Preset) *Ranking {
+	r := &Ranking{Preset: name, Modality: sh.Modality, Mode: sh.Mode, Computed: in.Now}
 	if sh.Mode == "combo" {
 		return combo(in, r, sh)
 	}
@@ -109,7 +109,7 @@ func One(in Inputs, name string, sh config.Shadow) *Ranking {
 		case len(sh.Allow) > 0 && !config.MatchAny(sh.Allow, id):
 			continue // silently out of scope
 		case config.MatchAny(sh.Deny, id):
-			reject(id, "denied by shadow config")
+			reject(id, "denied by preset config")
 			continue
 		case sh.Require.ToolCall && !m.ToolCall:
 			reject(id, "no tool calling")
@@ -340,7 +340,7 @@ func One(in Inputs, name string, sh config.Shadow) *Ranking {
 	return r
 }
 
-func combo(in Inputs, r *Ranking, sh config.Shadow) *Ranking {
+func combo(in Inputs, r *Ranking, sh config.Preset) *Ranking {
 	for i, id := range sh.Models {
 		m := in.Snap.Models[id]
 		if m == nil {
@@ -361,7 +361,7 @@ func combo(in Inputs, r *Ranking, sh config.Shadow) *Ranking {
 	return r
 }
 
-func assignBench(in Inputs, pool []*scored, sh config.Shadow) {
+func assignBench(in Inputs, pool []*scored, sh config.Preset) {
 	// price percentile as a proxy when no configured benchmark exists
 	type pr struct {
 		s *scored

@@ -19,13 +19,13 @@ One YAML file (`xellter -config`, default `xellter.yaml`, or `$XELLTER_CONFIG`).
 `base_url` (`https://kenari.id`), `sync_minutes` (10), `first_byte_timeout_s` (120; non-streaming requests get 3×), `music_timeout_s` (900), `user_agent`.
 
 ## upstreams[]
-`name`, `key_env` (secret name, e.g. `KENARI_KEY_BABU`), `enabled`, `tier` (`free`|`topup`|`plan`), `plan` (kenari plan name for `tier: plan`), `account` (keys of one kenari account share plan budget), `rpm` / `daily_free` (override tier limits; `-1` = unlimited), `allow` (model globs; usually learned by probing), `note`.
+`name`, `key_env` (secret name, e.g. `KENARI_KEY_BABU`), `enabled`, `tier` (`free`|`topup`|`plan`), `plan` (fallback plan name for `tier: plan`; the real one is read from kenari when an unrestricted key of the account exists), `account` (keys of one kenari account share plan budget), `rpm` / `daily_free` (override tier limits; `-1` = unlimited), `allow` (model globs; usually learned by probing), `note`.
 
 ## clients[]
-`name`, `enabled`, `key_hash` (sha256 of the client key; never the key), `key_hint`, `shadows` (`["*"]` = all), `passthrough` (real-model globs the client may call directly; empty = none), `upstreams` (restrict to named upstreams), `daily_budget_idr` (catalog cost; 0 = unlimited), `rtk` (`null` = follow global), `note`.
+`name`, `enabled`, `key_hash` (sha256 of the client key; never the key), `key_hint`, `presets` (`["*"]` = all), `passthrough` (real-model globs the client may call directly; empty = none), `upstreams` (restrict to named upstreams), `daily_budget_idr` (catalog cost; 0 = unlimited), `rtk` (`null` = follow global), `note`.
 
-## shadows{}
-Key = the model name clients send.
+## presets{}
+A **preset model** is a named recipe that clients call like a model (`xl-balanced`); xellter resolves it to a real model per request. Key = the name clients send. (Configs written before the rename use `shadows:`; they are migrated on load.)
 
 | key | meaning |
 |---|---|
@@ -40,7 +40,7 @@ Key = the model name clients send.
 | `weights` | relative weights of `cost`, `benchmark`, `jev`, `reliability`, `context` |
 | `cost_profile` | reference request: `input_tokens`, `output_tokens`, `cached_ratio` (chat); `images`; `seconds`, `variant` (video/STT); `chars` (TTS) |
 
-Defaults: `xl-chat` (30/25/20/15/10), `xl-fast`, `xl-code`, `xl-image`, `xl-video`, `xl-tts`, `xl-stt`, `xl-music`.
+Defaults: `xl-balanced` (everyday chat, weights 30/25/20/15/10), `xl-budget` (cheapest acceptable), `xl-smart` (best answers, cost matters less), `xl-coding` (tool use, long context, quality first), and cheapest-first media presets `xl-image`, `xl-video`, `xl-speech` (text to speech), `xl-transcribe` (speech to text), `xl-music`.
 
 ## rules
 `free_bonus` .10, `plan_bonus` .08, `plan_cost_factor` .3 (a plan-covered request counts for this share of its list price, because plan budget is finite), `promo_bonus_max` .05, `promo_min_remaining_hours` 12, `upcoming_lookahead_hours` 24, `new_model_days` 14, `canary_percent` 5, `canary_min_requests` 20, `canary_min_success` .9, `avoid_sunset_days` 3, `sticky_minutes` 30, `stats_window_hours` 24.

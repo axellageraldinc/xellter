@@ -9,7 +9,7 @@ shrinks tool output before it is paid for. One static Go binary, no runtime depe
 
 ## What it does
 
-- **Shadow models.** Clients call `xl-chat`, `xl-code`, `xl-image`, ...; xellter chooses the real model.
+- **Preset models.** A preset is a named recipe clients call like a model (`xl-balanced`, `xl-budget`, `xl-smart`, `xl-coding`, `xl-image`, ...); xellter chooses the real model behind it.
   Rank is computed from live kenari prices, promos, plans and free tiers, a quality score
   (benchmarks, a System One "JEV" judge, context size) and measured reliability.
 - **Auto rules.** Free models, plan-covered models and models on discount are preferred; new models get
@@ -39,7 +39,7 @@ Point a client at it:
 ```bash
 curl http://127.0.0.1:8480/v1/chat/completions \
   -H "Authorization: Bearer $(cat data/babu.key)" -H 'Content-Type: application/json' \
-  -d '{"model":"xl-chat","messages":[{"role":"user","content":"hello"}]}'
+  -d '{"model":"xl-balanced","messages":[{"role":"user","content":"hello"}]}'
 ```
 
 The response header `X-Xellter-Model` tells which real model answered.
@@ -48,7 +48,7 @@ The response header `X-Xellter-Model` tells which real model answered.
 
 `POST /v1/chat/completions`, `/v1/responses`, `/v1/messages` (Anthropic wire), `/v1/images/*`,
 `/v1/audio/speech`, `/v1/audio/transcriptions` (multipart), `/v1/videos/*` (async jobs follow their key),
-`/v1/music/generations`; `GET /v1/models` (lists the client's shadows), `GET /healthz`.
+`/v1/music/generations`; `GET /v1/models` (lists the client's presets), `GET /healthz`.
 
 ## Documentation
 

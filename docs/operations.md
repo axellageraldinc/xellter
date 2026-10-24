@@ -25,9 +25,10 @@ The tailnet URL is `https://<host>.<tailnet>.ts.net:8445/`; add that host name t
 Expose only what clients need. Because `/admin` answers only for hostnames listed in `admin_hosts`, a public hostname that is not in that list serves `/v1/*` and `/healthz` and returns 404 for the panel. Still prefer Cloudflare Access or a path filter in front of the public name.
 
 ## Day to day
-- Panel: Overview (key quotas, cooldowns), Shadow models ("Why this order?"), Usage (requests, cost), Config (history, restore).
+- Panel: Overview (key quotas, cooldowns), Preset models ("Why this order?"), Usage (requests, cost), Config (history, restore).
 - Add a client: panel -> Clients -> New client, or `xellter client add`. The key is shown once.
 - Rotate a client key: panel -> Clients -> Rotate key (old key dies immediately).
+- Plan numbers: add one *unrestricted* kenari key as an upstream (same `account`). xellter then reads the plan name, budgets, usage, reset times and balance from kenari instead of estimating; the panel shows "plan read from kenari".
 - New kenari key: panel -> Upstreams -> Add key, Save, then "Set key value"; it is probed automatically.
 - A client got `503`/`429`: Overview shows which key is cooling down and why; "Clear cooldowns" resets state.
 - Backup: `data/` (SQLite is WAL: copy with `sqlite3 data/xellter.db ".backup file"`), `xellter.yaml`.

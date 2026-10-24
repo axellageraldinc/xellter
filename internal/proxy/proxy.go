@@ -157,7 +157,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listModels(w http.ResponseWriter, r *http.Request, cl *config.Client, p string) {
-	shadows, real := s.rt.Models(cl)
+	presets, real := s.rt.Models(cl)
 	cfg := s.cfg.Load()
 	type item struct {
 		ID          string `json:"id"`
@@ -166,11 +166,11 @@ func (s *Server) listModels(w http.ResponseWriter, r *http.Request, cl *config.C
 		OwnedBy     string `json:"owned_by"`
 		Modality    string `json:"modality,omitempty"`
 		Description string `json:"description,omitempty"`
-		Shadow      bool   `json:"shadow,omitempty"`
+		Preset      bool   `json:"preset,omitempty"`
 	}
 	var data []item
-	for _, n := range shadows {
-		sh := cfg.Shadows[n]
+	for _, n := range presets {
+		sh := cfg.Presets[n]
 		data = append(data, item{n, "model", s.startedAt.Unix(), "xellter", sh.Modality, sh.Description, true})
 	}
 	snap := s.cat.Snapshot()
@@ -321,7 +321,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 			return
 		}
 		res := s.send(r, at, payload, body.ctype, isStream, cfg)
-		row := store.Request{TS: start.UnixMilli(), Client: cl.Name, Shadow: plan.Shadow, Requested: plan.Requested, Model: at.Model.ID, Upstream: at.Key.Name,
+		row := store.Request{TS: start.UnixMilli(), Client: cl.Name, Preset: plan.Preset, Requested: plan.Requested, Model: at.Model.ID, Upstream: at.Key.Name,
 			Path: r.URL.Path, Stream: isStream, Attempt: i + 1, Canary: at.Canary, RTKSaved: rtkSaved}
 		if res.err == nil && res.resp.StatusCode < 300 {
 			s.relay(w, r, cl, plan, at, res, row, body, isStream, start, snap)
@@ -519,8 +519,8 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, cl *config.Client
 		if row.Billing == "plan" {
 			at.Key.RecordSpend(now, row.CatalogCost)
 		}
-		if plan.Shadow != "" {
-			s.rt.Remember(cl.Name, plan.Shadow, sessionKey(r, body), at.Model.ID, at.Key.Name, now)
+		if plan.Preset != "" {
+			s.rt.Remember(cl.Name, plan.Preset, sessionKey(r, body), at.Model.ID, at.Key.Name, now)
 		}
 		s.addSpend(cl.Name, row.CatalogCost)
 		if strings.HasPrefix(r.URL.Path, "/v1/videos") && total <= 16<<10 { // the whole job JSON is in the tail buffer
@@ -545,7 +545,7 @@ func (s *Server) cost(at route.Attempt, plan *route.Plan, b *reqBody, u usage, c
 		return rank.UsageCost(m, u.in, u.out, u.cached, at.Key.FreeCache(m, snap, now), now)
 	}
 	prof := config.CostProfile{}
-	if sh, ok := s.cfg.Load().Shadows[plan.Shadow]; ok {
+	if sh, ok := s.cfg.Load().Presets[plan.Preset]; ok {
 		prof = sh.Cost
 	}
 	if b.json != nil {

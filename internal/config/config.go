@@ -27,7 +27,8 @@ type Config struct {
 	Kenari     Kenari             `yaml:"kenari" json:"kenari"`
 	Upstreams  []Upstream         `yaml:"upstreams" json:"upstreams"`
 	Clients    []Client           `yaml:"clients" json:"clients"`
-	Shadows    map[string]Shadow  `yaml:"shadows" json:"shadows"`
+	Presets    map[string]Preset  `yaml:"presets" json:"presets"`
+	OldShadows map[string]Preset  `yaml:"shadows,omitempty" json:"-"` // pre-rename name, migrated on load
 	Rules      Rules              `yaml:"rules" json:"rules"`
 	Resilience Resilience         `yaml:"resilience" json:"resilience"`
 	JEV        JEV                `yaml:"jev" json:"jev"`
@@ -80,7 +81,8 @@ type Client struct {
 	Enabled     bool     `yaml:"enabled" json:"enabled"`
 	KeyHash     string   `yaml:"key_hash" json:"key_hash"`
 	KeyHint     string   `yaml:"key_hint" json:"key_hint"`
-	Shadows     []string `yaml:"shadows" json:"shadows"`                   // shadow models this client may call; "*" = all
+	Presets     []string `yaml:"presets" json:"presets"`                   // preset models this client may call; "*" = all
+	OldShadows  []string `yaml:"shadows,omitempty" json:"-"`               // pre-rename name, migrated on load
 	Passthrough []string `yaml:"passthrough" json:"passthrough"`           // real model globs allowed directly; empty = none
 	Upstreams   []string `yaml:"upstreams" json:"upstreams"`               // restrict to these upstream names; empty = all
 	DailyBudget float64  `yaml:"daily_budget_idr" json:"daily_budget_idr"` // 0 = unlimited
@@ -116,9 +118,9 @@ type CostProfile struct {
 	Variant      string  `yaml:"variant" json:"variant"`
 }
 
-// Shadow is a virtual model exposed to clients. Mode "auto" ranks the catalog;
+// Preset is a virtual model exposed to clients. Mode "auto" ranks the catalog;
 // mode "combo" uses Models as an explicit ordered list.
-type Shadow struct {
+type Preset struct {
 	Description   string      `yaml:"description" json:"description"`
 	Modality      string      `yaml:"modality" json:"modality"` // chat | images | videos | audio_speech | audio_transcription | music
 	Mode          string      `yaml:"mode" json:"mode"`         // auto | combo
@@ -134,7 +136,7 @@ type Shadow struct {
 	Cost          CostProfile `yaml:"cost_profile" json:"cost_profile"`
 }
 
-// Rules are the auto-route policy knobs shared by all auto shadows.
+// Rules are the auto-route policy knobs shared by all auto presets.
 type Rules struct {
 	FreeBonus            float64 `yaml:"free_bonus" json:"free_bonus"`
 	PlanBonus            float64 `yaml:"plan_bonus" json:"plan_bonus"`
@@ -184,7 +186,7 @@ type RTK struct {
 	DiffContext int  `yaml:"diff_context" json:"diff_context"`
 }
 
-// Modalities are the endpoint kinds a shadow can serve.
+// Modalities are the endpoint kinds a preset can serve.
 var Modalities = []string{"chat", "images", "videos", "audio_speech", "audio_transcription", "music"}
 
 // Default returns the built-in configuration (no upstreams, no clients).
@@ -216,23 +218,25 @@ func Default() *Config {
 	return c
 }
 
-// DefaultShadows is the starter set used when a config has no shadows.
-func DefaultShadows() map[string]Shadow {
+// DefaultPresets is the starter set used when a config has no presets.
+func DefaultPresets() map[string]Preset {
 	chat := Weights{Cost: 30, Benchmark: 25, JEV: 20, Reliability: 15, Context: 10}
 	cp := CostProfile{InputTokens: 4000, OutputTokens: 600, CachedRatio: 0.7}
 	media := Weights{Cost: 70, Benchmark: 10, Reliability: 20}
-	return map[string]Shadow{
-		"xl-chat": {Description: "General assistant chat", Modality: "chat", Mode: "auto", Require: Require{ToolCall: true, MinContext: 32000},
+	return map[string]Preset{
+		"xl-balanced": {Description: "Everyday chat: good answers at a fair price", Modality: "chat", Mode: "auto", Require: Require{ToolCall: true, MinContext: 32000},
 			MinQuality: 0.45, MaxCandidates: 4, Strategy: "round_robin", RRBand: 0.04, Weights: chat, Cost: cp},
-		"xl-fast": {Description: "Cheap and quick answers", Modality: "chat", Mode: "auto", Require: Require{MinContext: 16000},
+		"xl-budget": {Description: "Cheapest acceptable model for simple tasks", Modality: "chat", Mode: "auto", Require: Require{MinContext: 16000},
 			MinQuality: 0.30, MaxCandidates: 4, Strategy: "round_robin", RRBand: 0.05, Weights: Weights{Cost: 50, Benchmark: 15, JEV: 10, Reliability: 20, Context: 5}, Cost: cp},
-		"xl-code": {Description: "Coding agents", Modality: "chat", Mode: "auto", Require: Require{ToolCall: true, MinContext: 64000},
+		"xl-smart": {Description: "Best answers; cost matters less", Modality: "chat", Mode: "auto", Require: Require{ToolCall: true, MinContext: 64000},
+			MinQuality: 0.6, MaxCandidates: 3, Strategy: "priority", RRBand: 0.03, Weights: Weights{Cost: 10, Benchmark: 35, JEV: 30, Reliability: 15, Context: 10}, Cost: cp},
+		"xl-coding": {Description: "Coding agents: tool use, long context, quality first", Modality: "chat", Mode: "auto", Require: Require{ToolCall: true, MinContext: 64000},
 			MinQuality: 0.55, MaxCandidates: 4, Strategy: "priority", RRBand: 0.03, Weights: Weights{Cost: 20, Benchmark: 35, JEV: 20, Reliability: 15, Context: 10}, Cost: cp},
-		"xl-image": {Description: "Image generation, cheapest first", Modality: "images", Mode: "auto", MaxCandidates: 4, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Images: 1}},
-		"xl-video": {Description: "Video generation, cheapest first", Modality: "videos", Mode: "auto", MaxCandidates: 3, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Seconds: 5, Variant: "720p"}},
-		"xl-tts":   {Description: "Text to speech, cheapest first", Modality: "audio_speech", Mode: "auto", MaxCandidates: 3, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Chars: 1000}},
-		"xl-stt":   {Description: "Speech to text, cheapest first", Modality: "audio_transcription", Mode: "auto", MaxCandidates: 3, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Seconds: 60}},
-		"xl-music": {Description: "Music generation, cheapest first", Modality: "music", Mode: "auto", MaxCandidates: 2, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{}},
+		"xl-image":      {Description: "Image generation, cheapest first", Modality: "images", Mode: "auto", MaxCandidates: 4, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Images: 1}},
+		"xl-video":      {Description: "Video generation, cheapest first", Modality: "videos", Mode: "auto", MaxCandidates: 3, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Seconds: 5, Variant: "720p"}},
+		"xl-speech":     {Description: "Text to speech, cheapest first", Modality: "audio_speech", Mode: "auto", MaxCandidates: 3, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Chars: 1000}},
+		"xl-transcribe": {Description: "Speech to text, cheapest first", Modality: "audio_transcription", Mode: "auto", MaxCandidates: 3, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Seconds: 60}},
+		"xl-music":      {Description: "Music generation, cheapest first", Modality: "music", Mode: "auto", MaxCandidates: 2, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{}},
 	}
 }
 
@@ -242,8 +246,9 @@ func Parse(data []byte) (*Config, error) {
 	if err := yaml.Unmarshal(data, c); err != nil {
 		return nil, fmt.Errorf("parse yaml: %w", err)
 	}
-	if len(c.Shadows) == 0 {
-		c.Shadows = DefaultShadows()
+	c.migrate()
+	if len(c.Presets) == 0 {
+		c.Presets = DefaultPresets()
 	}
 	if c.Benchmarks == nil {
 		c.Benchmarks = map[string]float64{}
@@ -255,11 +260,25 @@ func Parse(data []byte) (*Config, error) {
 	return c, nil
 }
 
+// migrate moves the pre-rename "shadows" keys into "presets".
+func (c *Config) migrate() {
+	if len(c.Presets) == 0 && len(c.OldShadows) > 0 {
+		c.Presets = c.OldShadows
+	}
+	c.OldShadows = nil
+	for i := range c.Clients {
+		if len(c.Clients[i].Presets) == 0 && len(c.Clients[i].OldShadows) > 0 {
+			c.Clients[i].Presets = c.Clients[i].OldShadows
+		}
+		c.Clients[i].OldShadows = nil
+	}
+}
+
 // Normalize fills defaults and validates a config built outside Parse (for
 // example decoded from the admin panel's JSON).
 func Normalize(c *Config) error {
-	if len(c.Shadows) == 0 {
-		c.Shadows = DefaultShadows()
+	if len(c.Presets) == 0 {
+		c.Presets = DefaultPresets()
 	}
 	if c.Benchmarks == nil {
 		c.Benchmarks = map[string]float64{}
@@ -348,7 +367,7 @@ func (c *Config) fillDefaults() {
 			c.Upstreams[i].Tier = "free"
 		}
 	}
-	for name, s := range c.Shadows {
+	for name, s := range c.Presets {
 		if s.Mode == "" {
 			s.Mode = "auto"
 		}
@@ -361,7 +380,7 @@ func (c *Config) fillDefaults() {
 		if s.RRBand < 0 {
 			s.RRBand = 0
 		}
-		c.Shadows[name] = s
+		c.Presets[name] = s
 	}
 }
 
@@ -407,9 +426,9 @@ func (c *Config) Validate() error {
 		if cl.KeyHash != "" && !hashRe.MatchString(cl.KeyHash) {
 			bad("client %q: key_hash must be sha256 hex", cl.Name)
 		}
-		for _, s := range cl.Shadows {
-			if _, ok := c.Shadows[s]; !ok && s != "*" {
-				bad("client %q: unknown shadow %q", cl.Name, s)
+		for _, s := range cl.Presets {
+			if _, ok := c.Presets[s]; !ok && s != "*" {
+				bad("client %q: unknown preset %q", cl.Name, s)
 			}
 		}
 		for _, un := range cl.Upstreams {
@@ -419,34 +438,34 @@ func (c *Config) Validate() error {
 		}
 		checkGlobs(&errs, "client "+cl.Name+".passthrough", cl.Passthrough)
 	}
-	for name, s := range c.Shadows {
+	for name, s := range c.Presets {
 		if !nameRe.MatchString(name) {
-			bad("shadow name %q is invalid", name)
+			bad("preset name %q is invalid", name)
 		}
 		if !contains(Modalities, s.Modality) {
-			bad("shadow %q: modality must be one of %v", name, Modalities)
+			bad("preset %q: modality must be one of %v", name, Modalities)
 		}
 		if s.Mode != "auto" && s.Mode != "combo" {
-			bad("shadow %q: mode must be auto or combo", name)
+			bad("preset %q: mode must be auto or combo", name)
 		}
 		if s.Mode == "combo" && len(s.Models) == 0 {
-			bad("shadow %q: combo needs models", name)
+			bad("preset %q: combo needs models", name)
 		}
 		if s.Strategy != "round_robin" && s.Strategy != "priority" {
-			bad("shadow %q: strategy must be round_robin or priority", name)
+			bad("preset %q: strategy must be round_robin or priority", name)
 		}
 		w := s.Weights
 		if w.Cost < 0 || w.Benchmark < 0 || w.JEV < 0 || w.Reliability < 0 || w.Context < 0 {
-			bad("shadow %q: weights must be >= 0", name)
+			bad("preset %q: weights must be >= 0", name)
 		}
 		if s.Mode == "auto" && w.Cost+w.Benchmark+w.JEV+w.Reliability+w.Context <= 0 {
-			bad("shadow %q: at least one weight must be > 0", name)
+			bad("preset %q: at least one weight must be > 0", name)
 		}
 		if s.MinQuality < 0 || s.MinQuality > 1 {
-			bad("shadow %q: min_quality must be 0..1", name)
+			bad("preset %q: min_quality must be 0..1", name)
 		}
-		checkGlobs(&errs, "shadow "+name+".allow", s.Allow)
-		checkGlobs(&errs, "shadow "+name+".deny", s.Deny)
+		checkGlobs(&errs, "preset "+name+".allow", s.Allow)
+		checkGlobs(&errs, "preset "+name+".deny", s.Deny)
 	}
 	if c.Rules.CanaryPercent < 0 || c.Rules.CanaryPercent > 100 {
 		bad("rules.canary_percent must be 0..100")

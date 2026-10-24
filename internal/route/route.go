@@ -1,5 +1,5 @@
 // Package route turns a request (client + model name) into an ordered list of
-// attempts (model x upstream key), applying shadow rankings, round-robin
+// attempts (model x upstream key), applying preset rankings, round-robin
 // rotation, session stickiness and canary traffic.
 package route
 
@@ -38,7 +38,7 @@ func (e *Error) Error() string { return e.Message }
 
 // Plan is the outcome of routing one request.
 type Plan struct {
-	Shadow      string // empty for passthrough
+	Preset      string // empty for passthrough
 	Requested   string
 	Attempts    []Attempt
 	Passthrough bool
@@ -58,7 +58,7 @@ type Router struct {
 	sticky map[string]stickyEntry
 
 	rrMu sync.Mutex
-	rr   map[string]uint64 // per-shadow rotation counters (kept apart from key rotation)
+	rr   map[string]uint64 // per-preset rotation counters (kept apart from key rotation)
 }
 
 type stickyEntry struct {
@@ -117,7 +117,7 @@ func (r *Router) MarkSeen(snap *catalog.Snapshot) {
 	r.st.MarkSeen(fresh, time.Now().Unix())
 }
 
-// Recompute rebuilds every shadow ranking from current state.
+// Recompute rebuilds every preset ranking from current state.
 func (r *Router) Recompute(now time.Time) {
 	snap := r.cat.Snapshot()
 	if snap == nil {
@@ -143,15 +143,15 @@ func (r *Router) Rankings() map[string]*rank.Ranking {
 	return nil
 }
 
-// Models returns the model ids a client may list: its shadows plus passthrough models.
-func (r *Router) Models(cl *config.Client) (shadows []string, real []string) {
+// Models returns the model ids a client may list: its presets plus passthrough models.
+func (r *Router) Models(cl *config.Client) (presets []string, real []string) {
 	cfg := r.cfg.Load()
-	for name := range cfg.Shadows {
-		if config.MatchAny(cl.Shadows, name) {
-			shadows = append(shadows, name)
+	for name := range cfg.Presets {
+		if config.MatchAny(cl.Presets, name) {
+			presets = append(presets, name)
 		}
 	}
-	sort.Strings(shadows)
+	sort.Strings(presets)
 	if snap := r.cat.Snapshot(); snap != nil && len(cl.Passthrough) > 0 {
 		for _, id := range snap.IDs() {
 			if config.MatchAny(cl.Passthrough, id) {
@@ -176,14 +176,14 @@ func (r *Router) Plan(cl *config.Client, requested, session, path string, now ti
 	reasons := map[string]string{}
 
 	var order []orderItem
-	if sh, ok := cfg.Shadows[requested]; ok {
-		if !config.MatchAny(cl.Shadows, requested) {
+	if sh, ok := cfg.Presets[requested]; ok {
+		if !config.MatchAny(cl.Presets, requested) {
 			return nil, &Error{403, "model_not_allowed", fmt.Sprintf("client %q may not use %q", cl.Name, requested), 0}
 		}
 		if want := modalityOfPath(path); want != "" && want != sh.Modality {
 			return nil, &Error{400, "bad_request", fmt.Sprintf("%s is a %s model; this endpoint serves %s", requested, sh.Modality, want), 0}
 		}
-		p.Shadow, p.Modality = requested, sh.Modality
+		p.Preset, p.Modality = requested, sh.Modality
 		rk := r.Rankings()[requested]
 		if rk == nil || len(rk.Candidates)+len(rk.Trial) == 0 {
 			return nil, &Error{503, "no_candidates", fmt.Sprintf("no eligible model for %q right now", requested), 30 * time.Second}
@@ -195,7 +195,7 @@ func (r *Router) Plan(cl *config.Client, requested, session, path string, now ti
 			return nil, &Error{404, "model_not_found", fmt.Sprintf("unknown model %q", requested), 0}
 		}
 		if !config.MatchAny(cl.Passthrough, requested) {
-			return nil, &Error{403, "model_not_allowed", fmt.Sprintf("client %q may not call %q directly; use one of its shadow models", cl.Name, requested), 0}
+			return nil, &Error{403, "model_not_allowed", fmt.Sprintf("client %q may not call %q directly; use one of its preset models", cl.Name, requested), 0}
 		}
 		p.Passthrough, p.Modality = true, m.Endpoint
 		order = []orderItem{{model: m}}
@@ -232,7 +232,7 @@ type orderItem struct {
 	key    string // preferred key (sticky)
 }
 
-func (r *Router) order(cfg *config.Config, cl *config.Client, rk *rank.Ranking, sh config.Shadow, session string, now time.Time) []orderItem {
+func (r *Router) order(cfg *config.Config, cl *config.Client, rk *rank.Ranking, sh config.Preset, session string, now time.Time) []orderItem {
 	snap := r.cat.Snapshot()
 	var out []orderItem
 	seen := map[string]bool{}
@@ -244,7 +244,7 @@ func (r *Router) order(cfg *config.Config, cl *config.Client, rk *rank.Ranking, 
 	}
 	// stickiness keeps one session on one model/key so provider caches stay warm
 	if session != "" && cfg.Rules.StickyMinutes > 0 && sh.Modality == "chat" {
-		if e, ok := r.stickyGet(cl.Name+"|"+rk.Shadow+"|"+session, now); ok {
+		if e, ok := r.stickyGet(cl.Name+"|"+rk.Preset+"|"+session, now); ok {
 			for _, c := range rk.Candidates {
 				if c.Model == e.model {
 					add(e.model, false, e.key)
@@ -253,7 +253,7 @@ func (r *Router) order(cfg *config.Config, cl *config.Client, rk *rank.Ranking, 
 		}
 	}
 	if len(rk.Trial) > 0 && cfg.Rules.CanaryPercent > 0 && r.rnd()*100 < cfg.Rules.CanaryPercent {
-		t := rk.Trial[int(r.rotation(rk.Shadow+"/trial"))%len(rk.Trial)]
+		t := rk.Trial[int(r.rotation(rk.Preset+"/trial"))%len(rk.Trial)]
 		add(t.Model, true, "")
 	}
 	front := rk.Front
@@ -261,7 +261,7 @@ func (r *Router) order(cfg *config.Config, cl *config.Client, rk *rank.Ranking, 
 		front = len(rk.Candidates)
 	}
 	if front > 1 {
-		off := int(r.rotation(rk.Shadow) % uint64(front))
+		off := int(r.rotation(rk.Preset) % uint64(front))
 		for i := 0; i < front; i++ {
 			add(rk.Candidates[(i+off)%front].Model, false, "")
 		}
@@ -329,7 +329,7 @@ func (r *Router) keysFor(cl *config.Client, m *catalog.Model, snap *catalog.Snap
 }
 
 // Remember stores the successful model/key for a session.
-func (r *Router) Remember(cl, shadow, session, model, key string, now time.Time) {
+func (r *Router) Remember(cl, preset, session, model, key string, now time.Time) {
 	cfg := r.cfg.Load()
 	if session == "" || cfg.Rules.StickyMinutes <= 0 {
 		return
@@ -343,7 +343,7 @@ func (r *Router) Remember(cl, shadow, session, model, key string, now time.Time)
 			}
 		}
 	}
-	r.sticky[cl+"|"+shadow+"|"+session] = stickyEntry{model, key, now.Add(time.Duration(cfg.Rules.StickyMinutes) * time.Minute)}
+	r.sticky[cl+"|"+preset+"|"+session] = stickyEntry{model, key, now.Add(time.Duration(cfg.Rules.StickyMinutes) * time.Minute)}
 }
 
 func (r *Router) stickyGet(k string, now time.Time) (stickyEntry, bool) {

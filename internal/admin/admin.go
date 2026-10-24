@@ -197,18 +197,23 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 		"requests": map[string]any{"total": h.a.Px.Total.Load(), "failed": h.a.Px.Failed.Load(), "inflight": h.a.Px.Inflight.Load(), "rtk_saved_chars": h.a.Px.RTKSaved.Load()},
 	}
 	var keys []upstream.Status
+	var accts []upstream.AccountStatus
 	if snap != nil {
 		out["catalog"] = map[string]any{"models": len(snap.Models), "age_s": int(now.Sub(snap.Fetched).Seconds()), "degraded": snap.Degraded, "plans": len(snap.Plans), "tier": snap.Tier, "usd_idr": snap.USDIDR}
 		for _, k := range h.a.Pool.Keys() {
-			keys = append(keys, k.Status(snap, now))
+			keys = append(keys, k.Status(now))
+		}
+		for _, a := range h.a.Pool.Accounts() {
+			accts = append(accts, a.Status(snap, now))
 		}
 	}
+	out["accounts"] = accts
 	out["keys"] = keys
 	spent, limit := h.a.Judge.Budget()
 	out["jev"] = map[string]any{"enabled": h.a.Cfg().JEV.Enabled, "spent_idr": spent, "budget_idr": limit}
 	since := now.Add(-24 * time.Hour)
 	out["by_client"], _ = h.a.St.Usage("client", since)
-	out["by_shadow"], _ = h.a.St.Usage("shadow", since)
+	out["by_preset"], _ = h.a.St.Usage("preset", since)
 	var clients []map[string]any
 	for _, c := range h.a.Cfg().Clients {
 		clients = append(clients, map[string]any{"name": c.Name, "enabled": c.Enabled, "spent_today": h.a.Px.SpentToday(c.Name), "budget": c.DailyBudget})
@@ -329,8 +334,8 @@ func (h *Handler) clients(w http.ResponseWriter, r *http.Request) {
 		c := in.Client
 		c.Enabled = true
 		c.KeyHash, c.KeyHint = proxy.HashKey(key), "…"+key[len(key)-4:]
-		if len(c.Shadows) == 0 {
-			c.Shadows = []string{"*"}
+		if len(c.Presets) == 0 {
+			c.Presets = []string{"*"}
 		}
 		next.Clients = append(next.Clients, c)
 	case "rotate":
@@ -410,12 +415,12 @@ func (h *Handler) probeKeys(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) ranking(w http.ResponseWriter, r *http.Request) {
 	rk := h.a.Rt.Rankings()
-	if s := r.URL.Query().Get("shadow"); s != "" {
+	if s := r.URL.Query().Get("preset"); s != "" {
 		if x := rk[s]; x != nil {
 			jok(w, x)
 			return
 		}
-		jerr(w, 404, "no such shadow")
+		jerr(w, 404, "no such preset")
 		return
 	}
 	jok(w, rk)

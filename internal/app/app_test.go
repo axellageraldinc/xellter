@@ -27,7 +27,9 @@ type fake struct {
 	calls []call
 	// chat decides the response for a chat call; default is 200.
 	chat func(c call, n int) (int, string)
-	srv  *httptest.Server
+	// account answers /v1/account/quota; default: 403 like a restricted key.
+	account func(auth string) (int, string)
+	srv     *httptest.Server
 }
 
 type call struct {
@@ -128,6 +130,22 @@ func newFake(t testing.TB) *fake {
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1000,"completion_tokens":50,"prompt_tokens_details":{"cached_tokens":400}}}`)
 	})
+	mux.HandleFunc("/v1/account/quota", func(w http.ResponseWriter, r *http.Request) {
+		st, body := 403, `{"error":{"code":"restricted_key_not_allowed","message":"restricted"}}`
+		if f.account != nil {
+			st, body = f.account(r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(st)
+		io.WriteString(w, body)
+	})
+	mux.HandleFunc("/v1/account/balance", func(w http.ResponseWriter, r *http.Request) {
+		if f.account == nil {
+			w.WriteHeader(403)
+			return
+		}
+		io.WriteString(w, `{"object":"account.balance","balance_micro_idr":25000000000,"reserved_micro_idr":1500000,"available_micro_idr":24998500000,"currency":"IDR"}`)
+	})
 	mux.HandleFunc("/v1/systemone", func(w http.ResponseWriter, r *http.Request) {
 		rec(w, r)
 		io.WriteString(w, `{"model":"jev-1.13.0","answers":{"q":{"type":"noul","noul":0.9}},"usage":{"input_tokens":120,"output_tokens":4}}`)
@@ -149,7 +167,7 @@ type env struct {
 	a     *app.App
 	f     *fake
 	px    *httptest.Server
-	keyCl string // client key with all shadows
+	keyCl string // client key with all presets
 }
 
 func setup(t testing.TB, mutate func(*config.Config)) *env {
@@ -168,12 +186,12 @@ func setup(t testing.TB, mutate func(*config.Config)) *env {
 	}
 	key := "xl-testkey"
 	cfg.Clients = []config.Client{
-		{Name: "babu", Enabled: true, KeyHash: proxy.HashKey(key), Shadows: []string{"*"}},
-		{Name: "locked", Enabled: true, KeyHash: proxy.HashKey("xl-locked"), Shadows: []string{"xl-fast"}},
-		{Name: "off", Enabled: false, KeyHash: proxy.HashKey("xl-off"), Shadows: []string{"*"}},
-		{Name: "direct", Enabled: true, KeyHash: proxy.HashKey("xl-direct"), Shadows: []string{"xl-chat"}, Passthrough: []string{"cheap-*"}},
+		{Name: "babu", Enabled: true, KeyHash: proxy.HashKey(key), Presets: []string{"*"}},
+		{Name: "locked", Enabled: true, KeyHash: proxy.HashKey("xl-locked"), Presets: []string{"xl-budget"}},
+		{Name: "off", Enabled: false, KeyHash: proxy.HashKey("xl-off"), Presets: []string{"*"}},
+		{Name: "direct", Enabled: true, KeyHash: proxy.HashKey("xl-direct"), Presets: []string{"xl-balanced"}, Passthrough: []string{"cheap-*"}},
 	}
-	cfg.Shadows = config.DefaultShadows()
+	cfg.Presets = config.DefaultPresets()
 	if mutate != nil {
 		mutate(cfg)
 	}
@@ -228,17 +246,17 @@ const chatBody = `{"model":"%s","messages":[{"role":"user","content":"hi"}]}`
 
 func TestAuthAndModelAccess(t *testing.T) {
 	e := setup(t, nil)
-	if r, _ := e.post(t, "", "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-chat")); r.StatusCode != 401 {
+	if r, _ := e.post(t, "", "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-balanced")); r.StatusCode != 401 {
 		t.Fatalf("no key: %d", r.StatusCode)
 	}
-	if r, _ := e.post(t, "xl-wrong", "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-chat")); r.StatusCode != 401 {
+	if r, _ := e.post(t, "xl-wrong", "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-balanced")); r.StatusCode != 401 {
 		t.Fatalf("bad key: %d", r.StatusCode)
 	}
-	if r, _ := e.post(t, "xl-off", "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-chat")); r.StatusCode != 403 {
+	if r, _ := e.post(t, "xl-off", "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-balanced")); r.StatusCode != 403 {
 		t.Fatalf("disabled client: %d", r.StatusCode)
 	}
-	if r, _ := e.post(t, "xl-locked", "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-chat")); r.StatusCode != 403 {
-		t.Fatalf("shadow not allowed: %d", r.StatusCode)
+	if r, _ := e.post(t, "xl-locked", "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-balanced")); r.StatusCode != 403 {
+		t.Fatalf("preset not allowed: %d", r.StatusCode)
 	}
 	if r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "cheap-b")); r.StatusCode != 403 {
 		t.Fatalf("passthrough must be off by default: %d", r.StatusCode)
@@ -252,14 +270,14 @@ func TestAuthAndModelAccess(t *testing.T) {
 	if r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "nope")); r.StatusCode != 404 {
 		t.Fatalf("unknown model: %d", r.StatusCode)
 	}
-	if r, _ := e.post(t, e.keyCl, "/v1/images/generations", fmt.Sprintf(chatBody, "xl-chat")); r.StatusCode != 400 {
+	if r, _ := e.post(t, e.keyCl, "/v1/images/generations", fmt.Sprintf(chatBody, "xl-balanced")); r.StatusCode != 400 {
 		t.Fatalf("modality mismatch must be 400: %d", r.StatusCode)
 	}
 }
 
-func TestShadowRoutesToFreeOrPlanFirstAndRewritesModel(t *testing.T) {
+func TestPresetRoutesToFreeOrPlanFirstAndRewritesModel(t *testing.T) {
 	e := setup(t, nil)
-	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-chat"))
+	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-balanced"))
 	if resp.StatusCode != 200 {
 		t.Fatalf("status %d %s", resp.StatusCode, body)
 	}
@@ -273,7 +291,7 @@ func TestShadowRoutesToFreeOrPlanFirstAndRewritesModel(t *testing.T) {
 	if strings.Contains(e.f.last().Auth, "xl-") {
 		t.Fatal("client key leaked upstream")
 	}
-	rk := e.a.Rt.Rankings()["xl-chat"]
+	rk := e.a.Rt.Rankings()["xl-balanced"]
 	for _, c := range rk.Candidates {
 		if c.Model == "pro-c" && rk.Candidates[0].Model == "pro-c" {
 			t.Fatalf("expensive model must not lead: %+v", rk.Candidates)
@@ -283,9 +301,9 @@ func TestShadowRoutesToFreeOrPlanFirstAndRewritesModel(t *testing.T) {
 
 func TestFallbackOnUpstreamErrorAndRateLimit(t *testing.T) {
 	e := setup(t, func(c *config.Config) {
-		sh := c.Shadows["xl-chat"]
+		sh := c.Presets["xl-balanced"]
 		sh.Mode, sh.Models, sh.Strategy = "combo", []string{"free-a:free", "cheap-b"}, "priority"
-		c.Shadows["xl-chat"] = sh
+		c.Presets["xl-balanced"] = sh
 	})
 	e.f.chat = func(c call, n int) (int, string) {
 		if c.Model == "free-a:free" {
@@ -293,13 +311,13 @@ func TestFallbackOnUpstreamErrorAndRateLimit(t *testing.T) {
 		}
 		return 0, ""
 	}
-	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-chat"))
+	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-balanced"))
 	if resp.StatusCode != 200 || resp.Header.Get("X-Xellter-Model") != "cheap-b" {
 		t.Fatalf("expected fallback to cheap-b, got %d %s model=%s", resp.StatusCode, body, resp.Header.Get("X-Xellter-Model"))
 	}
 	// the failing model is now blocked: next request goes straight to cheap-b
 	before := e.f.count("free-a:free")
-	e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-chat"))
+	e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-balanced"))
 	if e.f.count("free-a:free") > before+0 && e.f.count("free-a:free") > 2 {
 		t.Fatalf("blocked model kept being retried: %d calls", e.f.count("free-a:free"))
 	}
@@ -307,9 +325,9 @@ func TestFallbackOnUpstreamErrorAndRateLimit(t *testing.T) {
 
 func TestRateLimitedKeyCoolsDownAndOtherKeyServes(t *testing.T) {
 	e := setup(t, func(c *config.Config) {
-		sh := c.Shadows["xl-chat"]
+		sh := c.Presets["xl-balanced"]
 		sh.Mode, sh.Models, sh.Strategy = "combo", []string{"free-a:free"}, "priority"
-		c.Shadows["xl-chat"] = sh
+		c.Presets["xl-balanced"] = sh
 	})
 	e.f.chat = func(c call, n int) (int, string) {
 		if c.Auth == "Bearer secret-plan" || c.Auth == "Bearer secret-topup" {
@@ -319,7 +337,7 @@ func TestRateLimitedKeyCoolsDownAndOtherKeyServes(t *testing.T) {
 		}
 		return 0, ""
 	}
-	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-chat"))
+	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-balanced"))
 	if resp.StatusCode != 200 {
 		t.Fatalf("second key should have served: %d %s", resp.StatusCode, body)
 	}
@@ -330,11 +348,11 @@ func TestRateLimitedKeyCoolsDownAndOtherKeyServes(t *testing.T) {
 
 func TestStreamingAndUsageAccounting(t *testing.T) {
 	e := setup(t, func(c *config.Config) {
-		sh := c.Shadows["xl-chat"]
+		sh := c.Presets["xl-balanced"]
 		sh.Mode, sh.Models, sh.Strategy = "combo", []string{"cheap-b"}, "priority"
-		c.Shadows["xl-chat"] = sh
+		c.Presets["xl-balanced"] = sh
 	})
-	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", `{"model":"xl-chat","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", `{"model":"xl-balanced","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
 	if resp.StatusCode != 200 || !strings.Contains(body, "t0") || !strings.Contains(body, "[DONE]") {
 		t.Fatalf("stream not relayed: %d %q", resp.StatusCode, body)
 	}
@@ -354,14 +372,14 @@ func TestStreamingAndUsageAccounting(t *testing.T) {
 func TestClientBudget(t *testing.T) {
 	e := setup(t, func(c *config.Config) {
 		c.Clients[0].DailyBudget = 0.0001
-		sh := c.Shadows["xl-chat"]
+		sh := c.Presets["xl-balanced"]
 		sh.Mode, sh.Models, sh.Strategy = "combo", []string{"pro-c"}, "priority"
-		c.Shadows["xl-chat"] = sh
+		c.Presets["xl-balanced"] = sh
 	})
-	if r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-chat")); r.StatusCode != 200 {
+	if r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-balanced")); r.StatusCode != 200 {
 		t.Fatalf("first call: %d", r.StatusCode)
 	}
-	if r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-chat")); r.StatusCode != 429 {
+	if r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-balanced")); r.StatusCode != 429 {
 		t.Fatalf("budget not enforced: %d", r.StatusCode)
 	}
 }
@@ -375,7 +393,7 @@ func TestRTKCompressesToolOutput(t *testing.T) {
 	}
 	diff.WriteString("-old\n+new\n")
 	tool, _ := json.Marshal(diff.String())
-	body := fmt.Sprintf(`{"model":"xl-chat","messages":[{"role":"user","content":"diff?"},{"role":"tool","tool_call_id":"1","content":%s}]}`, tool)
+	body := fmt.Sprintf(`{"model":"xl-balanced","messages":[{"role":"user","content":"diff?"},{"role":"tool","tool_call_id":"1","content":%s}]}`, tool)
 	if r, b := e.post(t, e.keyCl, "/v1/chat/completions", body); r.StatusCode != 200 {
 		t.Fatalf("%d %s", r.StatusCode, b)
 	}
@@ -402,7 +420,7 @@ func TestMediaRoutingPrefersFreeAndMultipartModelRewrite(t *testing.T) {
 	}
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
-	mw.WriteField("model", "xl-stt")
+	mw.WriteField("model", "xl-transcribe")
 	fw, _ := mw.CreateFormFile("file", "a.mp3")
 	fw.Write([]byte("AUDIO"))
 	mw.Close()
@@ -419,23 +437,23 @@ func TestMediaRoutingPrefersFreeAndMultipartModelRewrite(t *testing.T) {
 	}
 }
 
-func TestModelListShowsOnlyAllowedShadows(t *testing.T) {
+func TestModelListShowsOnlyAllowedPresets(t *testing.T) {
 	e := setup(t, nil)
 	req, _ := http.NewRequest("GET", e.px.URL+"/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer xl-locked")
 	r, _ := http.DefaultClient.Do(req)
 	var out struct{ Data []struct{ ID string } }
 	json.NewDecoder(r.Body).Decode(&out)
-	if len(out.Data) != 1 || out.Data[0].ID != "xl-fast" {
+	if len(out.Data) != 1 || out.Data[0].ID != "xl-budget" {
 		t.Fatalf("got %+v", out.Data)
 	}
 }
 
 func TestLearnsAllowedModelsFromRestrictedKey(t *testing.T) {
 	e := setup(t, func(c *config.Config) {
-		sh := c.Shadows["xl-chat"]
+		sh := c.Presets["xl-balanced"]
 		sh.Mode, sh.Models, sh.Strategy = "combo", []string{"pro-c", "cheap-b"}, "priority"
-		c.Shadows["xl-chat"] = sh
+		c.Presets["xl-balanced"] = sh
 		c.Upstreams = c.Upstreams[:1]
 	})
 	e.f.chat = func(c call, n int) (int, string) {
@@ -444,12 +462,12 @@ func TestLearnsAllowedModelsFromRestrictedKey(t *testing.T) {
 		}
 		return 0, ""
 	}
-	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-chat"))
+	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-balanced"))
 	if resp.StatusCode != 200 || resp.Header.Get("X-Xellter-Model") != "cheap-b" {
 		t.Fatalf("expected cheap-b after learning: %d %s", resp.StatusCode, body)
 	}
 	e.a.Rt.Recompute(time.Now())
-	st := e.a.Pool.Keys()[0].Status(e.a.Cat.Snapshot(), time.Now())
+	st := e.a.Pool.Keys()[0].Status(time.Now())
 	if len(st.Learned) != 2 {
 		t.Fatalf("allow list not learned: %+v", st.Learned)
 	}

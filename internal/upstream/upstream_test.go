@@ -149,7 +149,7 @@ func TestSeededFromStoreAndConfigAllowList(t *testing.T) {
 	p := NewPool()
 	p.Reload(cfg, map[string]string{"K": "s"}, st)
 	k := p.Keys()[0]
-	if k.Status(snap(), time.Now()).DailyUsed != 1 {
+	if k.Account().Status(snap(), time.Now()).DailyUsed != 1 {
 		t.Fatal("counters must be rebuilt from the request log after a restart")
 	}
 	if k.AllowedModel("glm-5") || !k.AllowedModel("deepseek-v4") {

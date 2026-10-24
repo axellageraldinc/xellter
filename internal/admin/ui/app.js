@@ -3,7 +3,7 @@
 
 const $ = (s, e = document) => e.querySelector(s);
 const S = { cfg: null, yaml: '', history: [], tab: 'overview', dirty: false, timer: null };
-const TABS = [['overview', 'Overview'], ['shadows', 'Shadow models'], ['upstreams', 'Upstreams'], ['clients', 'Clients'], ['policy', 'Policy'], ['usage', 'Usage'], ['config', 'Config']];
+const TABS = [['overview', 'Overview'], ['presets', 'Preset models'], ['upstreams', 'Upstreams'], ['clients', 'Clients'], ['policy', 'Policy'], ['usage', 'Usage'], ['config', 'Config']];
 
 function h(tag, attrs, ...kids) {
   const el = document.createElement(tag);
@@ -77,7 +77,7 @@ function field(obj, key, o = {}) {
 async function loadCfg() {
   const j = await api('config');
   S.cfg = j.config; S.yaml = j.yaml; S.history = j.history || []; S.dirty = false; $('#savebar').hidden = true;
-  S.cfg.upstreams ||= []; S.cfg.clients ||= []; S.cfg.shadows ||= {}; S.cfg.benchmarks ||= {};
+  S.cfg.upstreams ||= []; S.cfg.clients ||= []; S.cfg.presets ||= {}; S.cfg.benchmarks ||= {};
 }
 
 async function saveCfg() {
@@ -101,24 +101,36 @@ views.overview = async function (root) {
         h('button', { class: 'ghost', onclick: () => api('catalog/refresh', { method: 'POST' }).then(() => { toast('Catalog refreshed'); render(); }, fail) }, 'Refresh now')),
       h('div', { class: 'card' }, h('div', { class: 'muted' }, 'RTK saved'), h('div', { class: 'stat' }, Math.round(o.requests.rtk_saved_chars / 1000), h('small', {}, ' k chars removed'))),
       h('div', { class: 'card' }, h('div', { class: 'muted' }, 'JEV budget today'), h('div', { class: 'stat' }, idr(o.jev.spent_idr), h('small', {}, ` / Rp${idr(o.jev.budget_idr)}`)), chip(o.jev.enabled ? 'enabled' : 'disabled', o.jev.enabled ? 'ok' : ''))),
+    h('h2', {}, 'Kenari accounts'),
+    h('p', { class: 'muted' }, 'Rate limits, free quota and plan budget belong to the account, so keys of one account share them. Plan numbers come from kenari when one key of the account is unrestricted; otherwise they are estimated from the request log.'),
+    h('div', { class: 'grid wide' }, (o.accounts || []).map(ac => {
+      const pb = until(ac.plan_blocked_until), cd = until(ac.cooldown_until), fb = until(ac.free_blocked_until);
+      const wins = ac.windows ? Object.entries(ac.windows) : [['5h', null], ['week', null], ['month', null]].filter((_, i) => ac.plan_budget[i] > 0).map(([n], i) => [n, null]);
+      return h('div', { class: 'card' },
+        h('div', { class: 'row spread' }, h('strong', {}, ac.name), h('span', {}, chip(ac.tier + (ac.plan ? ' · ' + ac.plan : '')), ac.plan && chip(ac.plan_source === 'kenari' ? 'plan read from kenari' : 'plan from config (estimated)', ac.plan_source === 'kenari' ? 'ok' : 'warn'))),
+        h('div', { class: 'help' }, `rpm ${ac.rpm_used}/${ac.rpm_limit || '∞'}`), bar(ac.rpm_used, ac.rpm_limit),
+        ac.daily_limit > 0 && [h('div', { class: 'help' }, `free requests today (UTC) ${ac.daily_used}/${ac.daily_limit}`), bar(ac.daily_used, ac.daily_limit)],
+        ac.windows ? Object.entries(ac.windows).map(([n, w]) => [h('div', { class: 'help' }, `plan ${n}: Rp${idr(w.used_rp)} / Rp${idr(w.budget_rp)} · resets ${w.resets_at ? new Date(w.resets_at).toLocaleString() : '?'}`), bar(w.used_rp, w.budget_rp)])
+          : ['5h', 'week', 'month'].map((n, i) => ac.plan_budget[i] > 0 && [h('div', { class: 'help' }, `plan ${n} (estimate): Rp${idr(ac.estimated_spend[i])} / Rp${idr(ac.plan_budget[i])}`), bar(ac.estimated_spend[i], ac.plan_budget[i])]),
+        ac.balance_at && !ac.balance_at.startsWith('0001') && h('div', { class: 'help' }, `balance Rp${idr(ac.balance_idr)}`),
+        h('div', {}, cd && chip('rate limited ' + cd, 'warn'), fb && chip('free models paused ' + fb, 'warn'), pb && chip('plan limit ' + pb, 'warn'),
+          !ac.quota_key && chip('no unrestricted key: add one to read the real plan quota', '')));
+    })),
     h('h2', {}, 'Upstream keys'),
     h('div', { class: 'grid wide' }, (o.keys || []).map(k => {
-      const cd = until(k.cooldown_until), br = until(k.breaker_until), pb = until(k.plan_blocked_until);
+      const cd = until(k.cooldown_until), br = until(k.breaker_until);
       return h('div', { class: 'card' },
-        h('div', { class: 'row spread' }, h('strong', {}, k.name), h('span', {}, chip(k.tier + (k.plan ? ' · ' + k.plan : '')), !k.enabled && chip('disabled', 'bad'), !k.has_secret && chip('no key value', 'bad'))),
-        h('div', { class: 'help' }, `rpm ${k.rpm_used}/${k.rpm_limit || '∞'}`), bar(k.rpm_used, k.rpm_limit),
-        k.daily_limit > 0 && [h('div', { class: 'help' }, `free requests (24h) ${k.daily_used}/${k.daily_limit}`), bar(k.daily_used, k.daily_limit)],
-        k.plan && ['5h', 'week', 'month'].map((w, i) => k.plan_budget[i] > 0 && [h('div', { class: 'help' }, `plan ${w}: Rp${idr(k.plan_spent[i])} / Rp${idr(k.plan_budget[i])}`), bar(k.plan_spent[i], k.plan_budget[i])]),
-        h('div', {}, cd && chip('cooldown ' + cd, 'warn'), br && chip('breaker open ' + br, 'bad'), pb && chip('plan limit ' + pb, 'warn'),
-          (k.blocked_models || []).map(m => chip('blocked ' + m, 'warn')), k.learned_allow?.length ? chip(`restricted to ${k.learned_allow.length} models`) : null),
+        h('div', { class: 'row spread' }, h('strong', {}, k.name), h('span', {}, chip('account ' + k.account), k.unrestricted && chip('unrestricted', 'ok'), !k.enabled && chip('disabled', 'bad'), !k.has_secret && chip('no key value', 'bad'))),
+        h('div', {}, cd && chip('rejected, cooling ' + cd, 'warn'), br && chip('breaker open ' + br, 'bad'),
+          (k.blocked_models || []).map(m => chip('blocked ' + m, 'warn')), k.learned_allow?.length ? chip(`restricted to ${k.learned_allow.length} models`) : chip('can use every model', 'ok')),
         k.last_error && h('div', { class: 'help bad' }, k.last_error),
         h('div', { class: 'row' },
           h('button', { class: 'ghost', onclick: () => api('keys/reset', { method: 'POST', body: { name: k.name } }).then(() => { toast('State cleared'); render(); }, fail) }, 'Clear cooldowns'),
-          h('button', { class: 'ghost', onclick: () => api('keys/probe', { method: 'POST', body: {} }).then(() => { toast('Re-checked which models each key may use'); render(); }, fail) }, 'Re-probe models')));
+          h('button', { class: 'ghost', onclick: () => api('keys/probe', { method: 'POST', body: {} }).then(() => { toast('Re-checked models and plan quota'); render(); }, fail) }, 'Re-probe')));
     })),
     h('h2', {}, 'Last 24 hours'),
     h('div', { class: 'grid wide' },
-      usageCard('By client', o.by_client), usageCard('By shadow model', o.by_shadow)),
+      usageCard('By client', o.by_client), usageCard('By preset model', o.by_preset)),
     h('h2', {}, 'Clients today'),
     h('div', { class: 'card scroll' }, h('table', {}, h('thead', {}, h('tr', {}, ['Client', 'Spent today (Rp)', 'Budget', 'State'].map(x => h('th', {}, x)))),
       h('tbody', {}, (o.clients || []).map(cl => h('tr', {}, h('td', {}, cl.name), h('td', { class: 'num' }, idr(cl.spent_today)), h('td', {}, cl.budget > 0 ? [`Rp${idr(cl.budget)}`, bar(cl.spent_today, cl.budget)] : 'unlimited'), h('td', {}, chip(cl.enabled ? 'enabled' : 'disabled', cl.enabled ? 'ok' : 'bad'))))))));
@@ -129,14 +141,14 @@ function usageCard(title, rows) {
     h('tbody', {}, (rows || []).filter(r => r.key).map(r => h('tr', {}, h('td', {}, r.key), h('td', { class: 'num' }, r.requests), h('td', { class: 'num' }, r.errors), h('td', { class: 'num' }, r.in_tok), h('td', { class: 'num' }, r.out_tok), h('td', { class: 'num' }, idr(r.cost_idr)))))));
 }
 
-views.shadows = async function (root) {
+views.presets = async function (root) {
   await ensureCfg();
   const rk = await api('ranking');
-  const kids = [h('div', { class: 'row spread' }, h('h2', {}, 'Shadow models'),
-    h('button', { onclick: addShadow }, '+ New shadow'))];
+  const kids = [h('div', { class: 'row spread' }, h('h2', {}, 'Preset models'),
+    h('button', { onclick: addPreset }, '+ New preset'))];
   kids.push(h('p', { class: 'muted' }, 'Clients call these names; xellter picks the real model. "auto" ranks the catalog by cost, benchmark, JEV score, reliability and context; "combo" is an explicit ordered list.'));
-  for (const name of Object.keys(S.cfg.shadows).sort()) {
-    const sh = S.cfg.shadows[name], r = rk[name];
+  for (const name of Object.keys(S.cfg.presets).sort()) {
+    const sh = S.cfg.presets[name], r = rk[name];
     sh.require ||= {}; sh.weights ||= {}; sh.cost_profile ||= {};
     const top = r && r.candidates && r.candidates[0];
     kids.push(h('details', { class: 'card' },
@@ -162,22 +174,22 @@ views.shadows = async function (root) {
       h('div', { class: 'grid' }, [['input_tokens', 'num'], ['output_tokens', 'num'], ['cached_ratio', 'num'], ['images', 'num'], ['seconds', 'num'], ['chars', 'num'], ['variant', 'text']].map(([k, t]) => field(sh.cost_profile, k, { type: t }))),
       h('div', { class: 'row', style: 'margin-top:12px' },
         h('button', { onclick: () => showRanking(name) }, 'Why this order?'),
-        h('button', { class: 'danger', onclick: () => { if (confirm('Delete shadow ' + name + '?')) { delete S.cfg.shadows[name]; markDirty(); render(); } } }, 'Delete'))));
+        h('button', { class: 'danger', onclick: () => { if (confirm('Delete preset ' + name + '?')) { delete S.cfg.presets[name]; markDirty(); render(); } } }, 'Delete'))));
   }
   root.replaceChildren(...kids);
 };
 
-function addShadow() {
-  const name = (prompt('Name of the new shadow model (for example xl-research):') || '').trim();
+function addPreset() {
+  const name = (prompt('Name of the new preset model (for example xl-research):') || '').trim();
   if (!name) return;
-  if (S.cfg.shadows[name]) return toast('That name exists', true);
-  S.cfg.shadows[name] = JSON.parse(JSON.stringify(S.cfg.shadows['xl-chat'] || Object.values(S.cfg.shadows)[0]));
-  S.cfg.shadows[name].description = ''; markDirty(); render();
+  if (S.cfg.presets[name]) return toast('That name exists', true);
+  S.cfg.presets[name] = JSON.parse(JSON.stringify(S.cfg.presets['xl-balanced'] || Object.values(S.cfg.presets)[0]));
+  S.cfg.presets[name].description = ''; markDirty(); render();
 }
 
 async function showRanking(name) {
   try {
-    const r = await api('ranking?shadow=' + encodeURIComponent(name));
+    const r = await api('ranking?preset=' + encodeURIComponent(name));
     const row = (c, i) => h('tr', {}, h('td', { class: 'num' }, i + 1), h('td', { class: 'mono' }, c.model), h('td', { class: 'num' }, c.score.toFixed(3)), h('td', { class: 'num' }, c.quality.toFixed(2)),
       h('td', { class: 'num' }, c.cost_idr ? idr(c.cost_idr) : 'free/plan'), h('td', {}, (c.flags || []).map(f => chip(f, /free|plan|promo|proven/.test(f) ? 'ok' : 'warn'))),
       h('td', { class: 'help' }, Object.entries(c.components || {}).map(([k, v]) => `${k} ${v}`).join(' · '), c.bench_source !== 'configured' ? ` · bench:${c.bench_source}` : ''));
@@ -224,7 +236,7 @@ views.clients = async function (root) {
       h('div', { class: 'row spread' }, h('strong', {}, c.name), h('span', { class: 'mono muted' }, 'key ' + (c.key_hint || '–'))),
       h('div', { class: 'grid' }, field(c, 'daily_budget_idr', { type: 'num', label: 'Daily budget (Rp, 0 = none)' }), field(c, 'rtk', { type: 'optbool', label: 'RTK compression' })),
       h('div', { class: 'grid wide' },
-        field(c, 'shadows', { type: 'list', label: 'Allowed shadow models', ph: '* or xl-chat, xl-image' }),
+        field(c, 'presets', { type: 'list', label: 'Allowed preset models', ph: '* or xl-balanced, xl-image' }),
         field(c, 'passthrough', { type: 'list', label: 'Direct model globs (real models)', ph: 'empty = none; e.g. deepseek-v4-1-flash' }),
         field(c, 'upstreams', { type: 'list', label: 'Restrict to upstreams', ph: 'empty = all (' + names + ')' }),
         field(c, 'note')),
@@ -243,8 +255,8 @@ function showKey(name, key) {
 
 function newClient() {
   if (S.dirty) return toast('Save or discard pending changes first', true);
-  const c = { name: '', shadows: ['*'], passthrough: [], upstreams: [], daily_budget_idr: 0, note: '' };
-  showDialog(h('h2', {}, 'New client'), field(c, 'name', { ph: 'e.g. babu' }), field(c, 'shadows', { type: 'list', label: 'Allowed shadow models' }), field(c, 'passthrough', { type: 'list', label: 'Direct model globs' }), field(c, 'daily_budget_idr', { type: 'num', label: 'Daily budget (Rp)' }),
+  const c = { name: '', presets: ['*'], passthrough: [], upstreams: [], daily_budget_idr: 0, note: '' };
+  showDialog(h('h2', {}, 'New client'), field(c, 'name', { ph: 'e.g. babu' }), field(c, 'presets', { type: 'list', label: 'Allowed preset models' }), field(c, 'passthrough', { type: 'list', label: 'Direct model globs' }), field(c, 'daily_budget_idr', { type: 'num', label: 'Daily budget (Rp)' }),
     h('button', { class: 'primary', onclick: async () => { try { const r = await api('clients', { method: 'POST', body: { action: 'create', client: c } }); await loadCfg(); S.dirty = false; $('#savebar').hidden = true; showKey(c.name, r.key); render(); } catch (e) { fail(e); } } }, 'Create'));
 }
 
@@ -282,12 +294,12 @@ views.usage = async function (root) {
   const group = root._g || 'model', hours = root._h || 24;
   const [rows, reqs] = await Promise.all([api(`usage?group=${group}&hours=${hours}`), api('requests?limit=100')]);
   const sel = (opts, cur, on) => h('select', { style: 'width:auto', onchange: e => on(e.target.value) }, opts.map(o => h('option', { value: o, selected: String(o) === String(cur) }, o)));
-  root.replaceChildren(h('div', { class: 'row' }, h('h2', { style: 'margin:0' }, 'Usage'), sel(['model', 'client', 'upstream', 'shadow', 'hour'], group, v => { root._g = v; render(); }), sel([1, 6, 24, 72, 168, 720], hours, v => { root._h = +v; render(); }), h('span', { class: 'muted' }, 'hours')),
+  root.replaceChildren(h('div', { class: 'row' }, h('h2', { style: 'margin:0' }, 'Usage'), sel(['model', 'client', 'upstream', 'preset', 'hour'], group, v => { root._g = v; render(); }), sel([1, 6, 24, 72, 168, 720], hours, v => { root._h = +v; render(); }), h('span', { class: 'muted' }, 'hours')),
     h('div', { class: 'card scroll' }, h('table', {}, h('thead', {}, h('tr', {}, [group, 'requests', 'errors', 'in tok', 'out tok', 'avg ms', 'Rp (catalog)'].map((x, i) => h('th', { class: i ? 'num' : '' }, x)))),
       h('tbody', {}, rows.map(r => h('tr', {}, h('td', { class: 'mono' }, r.key || '–'), h('td', { class: 'num' }, r.requests), h('td', { class: 'num' }, r.errors), h('td', { class: 'num' }, r.in_tok), h('td', { class: 'num' }, r.out_tok), h('td', { class: 'num' }, Math.round(r.avg_latency_ms)), h('td', { class: 'num' }, idr(r.cost_idr))))))),
     h('h2', {}, 'Recent requests'),
     h('div', { class: 'card scroll' }, h('table', {}, h('thead', {}, h('tr', {}, ['age', 'client', 'asked', 'served by', 'key', 'status', 'ms', 'ttft', 'in/out', 'Rp', 'billing', 'notes'].map(x => h('th', {}, x)))),
-      h('tbody', {}, reqs.map(r => h('tr', {}, h('td', {}, ago(r.ts)), h('td', {}, r.client), h('td', { class: 'mono' }, r.requested || r.shadow), h('td', { class: 'mono' }, r.model), h('td', {}, r.upstream), h('td', { class: r.ok ? 'ok' : 'bad' }, r.status || 'err'),
+      h('tbody', {}, reqs.map(r => h('tr', {}, h('td', {}, ago(r.ts)), h('td', {}, r.client), h('td', { class: 'mono' }, r.requested || r.preset), h('td', { class: 'mono' }, r.model), h('td', {}, r.upstream), h('td', { class: r.ok ? 'ok' : 'bad' }, r.status || 'err'),
         h('td', { class: 'num' }, r.latency_ms), h('td', { class: 'num' }, r.ttft_ms || ''), h('td', { class: 'num' }, `${r.in_tok}/${r.out_tok}`), h('td', { class: 'num' }, idr(r.cost_idr)), h('td', {}, r.billing),
         h('td', {}, r.attempt > 1 && chip('attempt ' + r.attempt, 'warn'), r.canary && chip('canary'), r.rtk_saved > 0 && chip('rtk -' + r.rtk_saved), r.err && h('span', { class: 'help bad' }, r.err))))))));
 };

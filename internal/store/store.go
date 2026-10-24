@@ -18,7 +18,7 @@ import (
 type Request struct {
 	TS          int64 // unix ms
 	Client      string
-	Shadow      string
+	Preset      string
 	Requested   string
 	Model       string
 	Upstream    string
@@ -65,7 +65,7 @@ type Store struct {
 
 const schema = `
 CREATE TABLE IF NOT EXISTS requests(
- id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, client TEXT, shadow TEXT, requested TEXT, model TEXT, upstream TEXT, path TEXT,
+ id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, client TEXT, preset TEXT, requested TEXT, model TEXT, upstream TEXT, path TEXT,
  status INTEGER, ok INTEGER, latency_ms INTEGER, ttft_ms INTEGER, in_tok INTEGER, out_tok INTEGER, cached_tok INTEGER,
  cost REAL, billing TEXT, stream INTEGER, attempt INTEGER, canary INTEGER, rtk_saved INTEGER, err TEXT);
 CREATE INDEX IF NOT EXISTS req_ts ON requests(ts);
@@ -92,6 +92,13 @@ func Open(dir string) (*Store, error) {
 	db.SetMaxOpenConns(4)
 	if _, err := db.Exec(schema); err != nil {
 		return nil, err
+	}
+	// databases created before the "shadow" -> "preset" rename
+	var n int
+	if db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('requests') WHERE name='shadow'`).Scan(&n) == nil && n > 0 {
+		if _, err := db.Exec(`ALTER TABLE requests RENAME COLUMN shadow TO preset`); err != nil {
+			return nil, err
+		}
 	}
 	s := &Store{db: db, logC: make(chan Request, 1024), stop: make(chan struct{})}
 	s.wg.Add(1)
@@ -128,10 +135,10 @@ func (s *Store) writer() {
 			batch = batch[:0]
 			return
 		}
-		st, err := tx.Prepare(`INSERT INTO requests(ts,client,shadow,requested,model,upstream,path,status,ok,latency_ms,ttft_ms,in_tok,out_tok,cached_tok,cost,billing,stream,attempt,canary,rtk_saved,err) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		st, err := tx.Prepare(`INSERT INTO requests(ts,client,preset,requested,model,upstream,path,status,ok,latency_ms,ttft_ms,in_tok,out_tok,cached_tok,cost,billing,stream,attempt,canary,rtk_saved,err) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 		if err == nil {
 			for _, r := range batch {
-				_, _ = st.Exec(r.TS, r.Client, r.Shadow, r.Requested, r.Model, r.Upstream, r.Path, r.Status, b2i(r.OK), r.LatencyMS, r.TTFTMS, r.InTok, r.OutTok, r.CachedTok, r.CatalogCost, r.Billing, b2i(r.Stream), r.Attempt, b2i(r.Canary), r.RTKSaved, r.Err)
+				_, _ = st.Exec(r.TS, r.Client, r.Preset, r.Requested, r.Model, r.Upstream, r.Path, r.Status, b2i(r.OK), r.LatencyMS, r.TTFTMS, r.InTok, r.OutTok, r.CachedTok, r.CatalogCost, r.Billing, b2i(r.Stream), r.Attempt, b2i(r.Canary), r.RTKSaved, r.Err)
 			}
 			st.Close()
 		}
@@ -289,9 +296,9 @@ type UsageRow struct {
 	AvgLat   float64 `json:"avg_latency_ms"`
 }
 
-// Usage groups requests by client, model, upstream, shadow or hour.
+// Usage groups requests by client, model, upstream, preset or hour.
 func (s *Store) Usage(group string, since time.Time) ([]UsageRow, error) {
-	col := map[string]string{"client": "client", "model": "model", "upstream": "upstream", "shadow": "shadow", "hour": "strftime('%Y-%m-%d %H:00', ts/1000, 'unixepoch')"}[group]
+	col := map[string]string{"client": "client", "model": "model", "upstream": "upstream", "preset": "preset", "hour": "strftime('%Y-%m-%d %H:00', ts/1000, 'unixepoch')"}[group]
 	if col == "" {
 		return nil, errors.New("bad group")
 	}
@@ -317,7 +324,7 @@ func (s *Store) Usage(group string, since time.Time) ([]UsageRow, error) {
 type RecentRow struct {
 	TS        int64   `json:"ts"`
 	Client    string  `json:"client"`
-	Shadow    string  `json:"shadow"`
+	Preset    string  `json:"preset"`
 	Requested string  `json:"requested"`
 	Model     string  `json:"model"`
 	Upstream  string  `json:"upstream"`
@@ -337,7 +344,7 @@ type RecentRow struct {
 
 // Recent returns the newest rows first.
 func (s *Store) Recent(limit int) ([]RecentRow, error) {
-	rows, err := s.db.Query(`SELECT ts,client,shadow,requested,model,upstream,status,ok,latency_ms,ttft_ms,in_tok,out_tok,cost,billing,attempt,canary,rtk_saved,err FROM requests ORDER BY id DESC LIMIT ?`, limit)
+	rows, err := s.db.Query(`SELECT ts,client,preset,requested,model,upstream,status,ok,latency_ms,ttft_ms,in_tok,out_tok,cost,billing,attempt,canary,rtk_saved,err FROM requests ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -350,7 +357,7 @@ func (s *Store) Recent(limit int) ([]RecentRow, error) {
 		if err := rows.Scan(&r.TS, &cl, &sh, &rq, &mo, &up, &r.Status, &ok, &r.LatencyMS, &r.TTFTMS, &r.InTok, &r.OutTok, &r.Cost, &bi, &r.Attempt, &canary, &r.RTKSaved, &er); err != nil {
 			return nil, err
 		}
-		r.Client, r.Shadow, r.Requested, r.Model, r.Upstream, r.Billing, r.Err = cl.String, sh.String, rq.String, mo.String, up.String, bi.String, er.String
+		r.Client, r.Preset, r.Requested, r.Model, r.Upstream, r.Billing, r.Err = cl.String, sh.String, rq.String, mo.String, up.String, bi.String, er.String
 		r.OK, r.Canary = ok == 1, canary == 1
 		out = append(out, r)
 	}

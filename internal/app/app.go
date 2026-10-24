@@ -4,6 +4,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -155,6 +156,83 @@ func (a *App) ProbeKeys(ctx context.Context) {
 			k.SetAllowed(nil)
 			a.Logf("probe %s: no model restriction", k.Name)
 		}
+		if a.readAccount(ctx, k) {
+			a.Logf("probe %s: unrestricted key, plan %q read from kenari", k.Name, k.Account().Status(a.Cat.Snapshot(), time.Now()).Plan)
+		}
+	}
+	a.Rt.Recompute(time.Now())
+}
+
+type quotaResp struct {
+	Plan *struct {
+		Name    string `json:"name"`
+		Windows map[string]struct {
+			BudgetRP    float64 `json:"budget_rp"`
+			UsedRP      float64 `json:"used_rp"`
+			RemainingRP float64 `json:"remaining_rp"`
+			UsedFrac    float64 `json:"used_frac"`
+			ResetsAt    string  `json:"resets_at"`
+		} `json:"windows"`
+	} `json:"plan"`
+}
+
+// readAccount asks kenari for the account's plan quota and balance. Only an
+// unrestricted key may; restricted keys get 403 and are simply not used for this.
+func (a *App) readAccount(ctx context.Context, k *upstream.Key) bool {
+	cfg := a.Cfg()
+	hc := &http.Client{Timeout: 20 * time.Second}
+	get := func(path string) (int, []byte) {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, cfg.Kenari.BaseURL+path, nil)
+		req.Header.Set("Authorization", "Bearer "+k.Secret)
+		req.Header.Set("User-Agent", cfg.Kenari.UserAgent)
+		resp, err := hc.Do(req)
+		if err != nil {
+			return 0, nil
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return resp.StatusCode, b
+	}
+	acct := k.Account()
+	code, raw := get("/v1/account/quota")
+	if code != 200 {
+		if code == 403 && acct.QuotaKey() == k.Name {
+			acct.SetInfo(nil, "") // the key lost its right to read quota
+		}
+		return false
+	}
+	var q quotaResp
+	if json.Unmarshal(raw, &q) != nil {
+		return false
+	}
+	info := &upstream.PlanInfo{Fetched: time.Now(), Windows: map[string]upstream.Window{}}
+	if q.Plan != nil {
+		info.Name = q.Plan.Name
+		for name, w := range q.Plan.Windows {
+			t, _ := time.Parse(time.RFC3339, w.ResetsAt)
+			info.Windows[name] = upstream.Window{BudgetRP: w.BudgetRP, UsedRP: w.UsedRP, RemainingRP: w.RemainingRP, UsedFrac: w.UsedFrac, ResetsAt: t}
+		}
+	}
+	acct.SetInfo(info, k.Name)
+	if code, raw := get("/v1/account/balance"); code == 200 {
+		var b struct {
+			Available float64 `json:"available_micro_idr"`
+		}
+		if json.Unmarshal(raw, &b) == nil {
+			acct.SetBalance(b.Available/1e6, time.Now())
+		}
+	}
+	return true
+}
+
+// RefreshAccounts re-reads quota and balance from every account that has an unrestricted key.
+func (a *App) RefreshAccounts(ctx context.Context) {
+	for _, acct := range a.Pool.Accounts() {
+		if name := acct.QuotaKey(); name != "" {
+			if k := a.Pool.Get(name); k != nil {
+				a.readAccount(ctx, k)
+			}
+		}
 	}
 	a.Rt.Recompute(time.Now())
 }
@@ -172,13 +250,19 @@ func (a *App) Start(ctx context.Context) {
 	a.Rt.MarkSeen(a.Cat.Snapshot())
 	a.ProbeKeys(ctx)
 	go func() {
+		probe := time.NewTicker(6 * time.Hour)
+		quota := time.NewTicker(5 * time.Minute)
+		defer probe.Stop()
+		defer quota.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(6 * time.Hour):
+			case <-probe.C:
+				a.ProbeKeys(ctx)
+			case <-quota.C:
+				a.RefreshAccounts(ctx)
 			}
-			a.ProbeKeys(ctx)
 		}
 	}()
 	go func() {
@@ -222,5 +306,5 @@ func (a *App) Describe() string {
 	if s := a.Cat.Snapshot(); s != nil {
 		n = len(s.Models)
 	}
-	return fmt.Sprintf("xellter %s: %d upstreams, %d clients, %d shadows, %d catalog models, listening on %s", Version, len(c.Upstreams), len(c.Clients), len(c.Shadows), n, c.Server.Listen)
+	return fmt.Sprintf("xellter %s: %d upstreams, %d clients, %d presets, %d catalog models, listening on %s", Version, len(c.Upstreams), len(c.Clients), len(c.Presets), n, c.Server.Listen)
 }
