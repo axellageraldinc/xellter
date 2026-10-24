@@ -54,6 +54,7 @@ benchmarks: {}
 
 jev:
   enabled: false                  # System One quality judge; costs a little, capped by daily_budget_idr
+  judges: [jev-1-13:free]         # tried top to bottom; other free judges follow automatically
   daily_budget_idr: 1000
 
 rtk:

@@ -403,7 +403,8 @@ func (h *Handler) jevInfo(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	jok(w, map[string]any{"enabled": h.a.Cfg().JEV.Enabled, "model": h.a.Cfg().JEV.Model, "scores": scores, "spent_idr": spent, "budget_idr": limit, "judges": judges, "system_key": h.a.Pool.SystemKey() != nil, "last": h.a.Judge.Last()})
+	cfg := h.a.Cfg()
+	jok(w, map[string]any{"enabled": cfg.JEV.Enabled, "judges": judges, "chain": h.a.Judge.Chain(), "scores": scores, "spent_idr": spent, "budget_idr": limit, "system_key": h.a.Pool.SystemKey() != nil, "last": h.a.Judge.Last()})
 }
 
 func (h *Handler) jevRun(w http.ResponseWriter, r *http.Request) {

@@ -55,6 +55,44 @@ func TestValidationCatchesMistakes(t *testing.T) {
 	}
 }
 
+func TestOldSingleJudgeKeyMovesIntoTheOrder(t *testing.T) {
+	c, err := Parse([]byte("jev:\n  enabled: true\n  model: clef:free\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.JEV.Judges) != 1 || c.JEV.Judges[0] != "clef:free" || c.JEV.Model != "" {
+		t.Fatalf("migration: %+v", c.JEV)
+	}
+	if c.JEV.Model != "" {
+		t.Fatal("the old key must not be written back")
+	}
+	// an explicit order wins, and the old key is prepended to it
+	c, err = Parse([]byte("jev:\n  judges: [clef:free, jev-1-13:free]\n  model: jev-1-14\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.JEV.Judges) != 3 || c.JEV.Judges[0] != "jev-1-14" || c.JEV.Judges[1] != "clef:free" {
+		t.Fatalf("judges: %v", c.JEV.Judges)
+	}
+	if _, err := Parse([]byte("jev:\n  judges: [\"\"]\n")); err == nil {
+		t.Fatal("an empty judge id must be rejected")
+	}
+	if _, err := Parse([]byte("jev:\n  judges: [clef:free, clef:free]\n")); err == nil {
+		t.Fatal("a repeated judge id must be rejected")
+	}
+	// saving writes the new shape and drops the old key
+	dir := t.TempDir()
+	file := filepath.Join(dir, "xellter.yaml")
+	c.Server.DataDir = filepath.Join(dir, "data")
+	if err := Save(file, c); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(file)
+	if !strings.Contains(string(b), "judges:") || strings.Contains(string(b), "model: jev-1-14") {
+		t.Fatalf("saved config:\n%s", b)
+	}
+}
+
 func TestSaveKeepsHistoryAndNeverStoresSecrets(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "xellter.yaml")

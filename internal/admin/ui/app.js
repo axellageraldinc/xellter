@@ -31,7 +31,7 @@ function icon(name, cls = '') {
   s.innerHTML = ICONS[name] || ''; // static markup from icons.js
   return s;
 }
-const iconBtn = (title, ic, onclick) => h('button', { class: 'btn btn-sm btn-ghost-secondary btn-icon', title, 'aria-label': title, onclick }, icon(ic));
+const iconBtn = (title, ic, onclick, off) => h('button', { class: 'btn btn-sm btn-ghost-secondary px-1 flex-shrink-0', title, 'aria-label': title, onclick, disabled: off }, icon(ic));
 const btn = (label, cls, onclick, ic) => h('button', { class: 'btn ' + cls, onclick }, ic && icon(ic, label ? 'me-1' : ''), label);
 
 async function api(path, opt = {}, retried) {
@@ -428,6 +428,37 @@ views.usage = async function (_, q) {
           h('td', {}, r.attempt > 1 && badge('retry ' + r.attempt, 'orange'), r.canary && badge('trial', 'azure'), r.rtk_saved > 0 && badge('saved ' + r.rtk_saved, 'green'), r.err && h('span', { class: 'text-danger small' }, r.err))))))) : empty('Nothing to show.'))));
 };
 
+// savedOrderDiffers is true while the edited list differs from the chain in effect.
+function savedOrderDiffers(jev, j) {
+  const live = (j.chain || []).filter(x => x.configured).map(x => x.id);
+  const now = jev.judges || [];
+  return live.length !== now.length || live.some((id, i) => id !== now[i]);
+}
+
+// judgeOrder edits jev.judges: the judges are tried from top to bottom, so the
+// owner orders them instead of picking one.
+function judgeOrder(jev, j) {
+  jev.judges ||= [];
+  const meta = id => (j.judges || []).find(x => x.id === id);
+  const label = id => { const m = meta(id); return !m ? id : m.free ? `${id} (free)` : `${id} (Rp ${idr(m.in_idr)} per 1M input tokens)`; };
+  const move = (i, by) => { const a = jev.judges, k = i + by; if (k < 0 || k >= a.length) return; [a[i], a[k]] = [a[k], a[i]]; markDirty(); render(); };
+  const known = new Set(jev.judges);
+  const addable = (j.judges || []).filter(x => !known.has(x.id));
+  const picker = h('select', { class: 'form-select form-select-sm', style: 'max-width:22rem' },
+    addable.length ? addable.map(x => h('option', { value: x.id }, label(x.id))) : h('option', { value: '' }, 'No other judge in the catalog'));
+  return h('div', { class: 'mb-3' },
+    h('label', { class: 'form-label' }, 'Judges, in order'),
+    jev.judges.length ? h('ol', { class: 'list-unstyled mb-2' }, jev.judges.map((id, i) => h('li', { class: 'd-flex align-items-center gap-1 py-1' },
+      h('span', { class: 'text-secondary mono me-1' }, i + 1 + '.'),
+      h('span', { class: 'mono me-auto' + (meta(id) ? '' : ' text-warning') }, label(id), !meta(id) && h('span', { class: 'small' }, ' · not in the catalog right now')),
+      i === 0 && badge('tried first', 'blue'),
+      iconBtn('Move up', 'arrow-up', () => move(i, -1), i === 0),
+      iconBtn('Move down', 'arrow-down', () => move(i, 1), i === jev.judges.length - 1),
+      iconBtn('Remove', 'trash', () => { jev.judges.splice(i, 1); markDirty(); render(); })))) : empty('No judge chosen yet.'),
+    h('div', { class: 'd-flex gap-2' }, picker, btn('Add', 'btn-outline-primary btn-sm', () => { if (picker.value) { jev.judges.push(picker.value); markDirty(); render(); } }, 'plus')),
+    h('div', { class: 'form-hint' }, 'The judge at the top scores every answer. If kenari cannot serve it (down or too slow), the next one in this list takes over, and after that any other free System One judge. A judge that is not free costs money from the daily limit, so keep free ones first.'));
+}
+
 // ---------- Settings ----------
 views.settings = async function () {
   await ensureCfg();
@@ -450,7 +481,8 @@ views.settings = async function () {
     h('div', { class: 'col-lg-6' }, card('Quality judge (JEV)', h('div', {}, h('p', { class: 'text-secondary' }, 'Candidate models answer a few test questions and kenari\'s System One model scores each answer. The score decides which models are good enough for a preset. Judging costs a little, so a daily limit applies.'),
       h('div', { class: 'mb-2' }, badge(j.enabled ? 'on' : 'off', j.enabled ? 'green' : 'secondary'), badge(`today Rp ${idr(j.spent_idr)} of Rp ${idr(j.budget_idr)}`)),
       field(c.jev, 'enabled', { type: 'switch', label: 'Judge models automatically' }),
-      field(c.jev, 'model', { type: 'select', label: 'First judge to try', opts: (j.judges || []).map(x => [x.id, x.free ? `${x.id} (free)` : `${x.id} (Rp ${idr(x.in_idr)} per 1M input tokens)`]), help: 'If it is down, the other free System One judges are tried in turn, so a failure here does not stop judging.' }),
+      judgeOrder(c.jev, j),
+      (j.chain || []).length > 1 && h('div', { class: 'small text-secondary mb-3' }, savedOrderDiffers(c.jev, j) ? 'Saved order (press Save to apply your changes): ' : 'In effect now: ', j.chain.map((x, i) => h('span', {}, (i ? ' → ' : ''), h('span', { class: 'mono' + (x.configured ? '' : ' text-secondary') }, x.id), x.configured ? '' : ' (automatic)'))),
       j.system_key ? h('div', { class: 'small text-secondary mb-3' }, icon('shield-check', 'me-1 text-green'), 'Uses the dashboard\'s own account key (the one that reads plan and balance), never a client\'s key. Judging calls show up as "_system" in the request list.')
         : h('div', { class: 'alert alert-warning py-2' }, 'Judging needs the account key. Add it on the ', h('a', { class: 'clickable', onclick: () => go('overview') }, 'Overview'), ' page, under Kenari plan & balance.'),
       field(c.jev, 'daily_budget_idr', { type: 'num', label: 'Daily limit (Rp)' }),

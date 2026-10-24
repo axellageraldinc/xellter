@@ -343,6 +343,38 @@ func TestJudgeFallsBackToTheNextSystemOneModel(t *testing.T) {
 	}
 }
 
+func TestJudgeOrderIsTheConfiguredOrder(t *testing.T) {
+	e := setup(t, func(c *config.Config) {
+		c.JEV.Enabled = true
+		c.JEV.Prompts = []string{"say hi"}
+		c.JEV.Judges = []string{"clef:free", "jev-1-13:free"} // the owner puts clef first
+	})
+	e.a.Judge.HC = e.f.srv.Client()
+	e.f.judge = func(model string) (int, string) {
+		if model == "clef:free" {
+			return 503, `{"error":{"code":"all_providers_failed","message":"upstream unavailable"}}`
+		}
+		return 200, `{"model":"` + model + `","answers":{"q":{"type":"noul","noul":0.7}},"usage":{"input_tokens":50,"output_tokens":0}}`
+	}
+	chain := e.a.Judge.Chain()
+	if len(chain) < 2 || chain[0].ID != "clef:free" || !chain[0].Configured || chain[1].ID != "jev-1-13:free" {
+		t.Fatalf("chain: %+v", chain)
+	}
+	score, err := e.a.Judge.Evaluate(context.Background(), "free-a:free")
+	if err != nil || score < 0.69 || score > 0.71 {
+		t.Fatalf("score=%v err=%v", score, err)
+	}
+	var tried []string
+	for _, c := range e.f.calls {
+		if c.Path == "/v1/systemone" {
+			tried = append(tried, c.Model)
+		}
+	}
+	if len(tried) != 2 || tried[0] != "clef:free" || tried[1] != "jev-1-13:free" {
+		t.Fatalf("judges must be tried in the configured order: %v", tried)
+	}
+}
+
 func TestLeaderboardScoresReplaceThePriceGuess(t *testing.T) {
 	e := setup(t, func(c *config.Config) { c.Benchmarks = map[string]float64{} })
 	hf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

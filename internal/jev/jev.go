@@ -60,6 +60,33 @@ func (j *Judge) Last() RunInfo {
 	return j.last
 }
 
+// ChainEntry is one judge in the order they are tried.
+type ChainEntry struct {
+	ID         string  `json:"id"`
+	Configured bool    `json:"configured"` // listed in jev.judges, not an automatic fallback
+	Free       bool    `json:"free"`
+	InIDR      float64 `json:"in_idr"`
+}
+
+// Chain returns the judges that will be tried, in order, for the panel.
+func (j *Judge) Chain() []ChainEntry {
+	cfg := j.Cfg()
+	snap := j.Cat.Snapshot()
+	if snap == nil {
+		return nil
+	}
+	want := map[string]bool{}
+	for _, id := range cfg.JEV.Judges {
+		want[id] = true
+	}
+	chain := j.judgeChain(cfg, snap)
+	out := make([]ChainEntry, 0, len(chain))
+	for _, m := range chain {
+		out = append(out, ChainEntry{ID: m.ID, Configured: want[m.ID], Free: m.Free, InIDR: m.InIDR})
+	}
+	return out
+}
+
 func (j *Judge) note(judged int, err error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -211,7 +238,7 @@ func (j *Judge) Evaluate(ctx context.Context, model string) (float64, error) {
 	}
 	chain := j.judgeChain(cfg, snap)
 	if len(chain) == 0 {
-		return 0, fmt.Errorf("judge model %q not in catalog", cfg.JEV.Model)
+		return 0, fmt.Errorf("no judge in jev.judges (%s) is a System One model in the catalog", strings.Join(cfg.JEV.Judges, ", "))
 	}
 	var sum float64
 	n := 0
@@ -353,16 +380,21 @@ func (j *Judge) judge(ctx context.Context, cfg *config.Config, key *upstream.Key
 	return a.Noul, out.Usage.In, nil
 }
 
-// judgeChain is the configured judge followed by the other free System One models (jev first, then clef), the same
-// idea as aixell's classifier chain: when one judge is down at kenari the next one answers.
+// judgeChain is the configured judge order (jev.judges) followed by any other free System One model, the same idea as
+// aixell's classifier chain: when one judge is down at kenari the next one answers. Judges in the configured list are
+// tried even when they are not free, because the owner put them there on purpose; the automatic tail only adds free ones.
 func (j *Judge) judgeChain(cfg *config.Config, snap *catalog.Snapshot) []*catalog.Model {
 	var chain []*catalog.Model
-	if m := snap.Models[cfg.JEV.Model]; m != nil && m.Endpoint == "systemone" {
-		chain = append(chain, m)
+	seen := map[string]bool{}
+	for _, id := range cfg.JEV.Judges {
+		if m := snap.Models[id]; m != nil && m.Endpoint == "systemone" && !seen[id] {
+			seen[id] = true
+			chain = append(chain, m)
+		}
 	}
 	var rest []*catalog.Model
 	for _, id := range snap.IDs() {
-		if m := snap.Models[id]; m.Endpoint == "systemone" && m.Free && id != cfg.JEV.Model {
+		if m := snap.Models[id]; m.Endpoint == "systemone" && m.Free && !seen[id] {
 			rest = append(rest, m)
 		}
 	}

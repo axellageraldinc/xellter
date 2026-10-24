@@ -67,7 +67,9 @@ Sticky sessions are keyed by `X-Xellter-Session` (also `X-Session-Id`, `X-Claude
 `max_attempts` 4, `cooldown_base_s` 30, `cooldown_max_s` 900, `breaker_failures` 5, `breaker_open_s` 120.
 
 ## jev
-`enabled` (false), `model` (`jev-1-13:free`; pick a System One model in the panel), `daily_budget_idr` (1000), `every_hours` (24), `pass_threshold` (.6), `prompts` (golden prompts). Judging uses the dashboard's account key, never a client's key. Candidates answer the prompts, the judge answers one `noul` question per answer ("is this correct, complete, on-topic, right language?"); the average is stored per model.
+`enabled` (false), `judges` (`[jev-1-13:free]`; an ordered list of System One models, reorder it in the panel), `daily_budget_idr` (1000), `every_hours` (24), `pass_threshold` (.6), `prompts` (golden prompts). Judging uses the dashboard's account key, never a client's key. Candidates answer the prompts, the judge answers one `noul` question per answer ("is this correct, complete, on-topic, right language?"); the average is stored per model.
+
+The first judge in `judges` scores every answer. When kenari cannot serve it (5xx or a timeout) the next one in the list takes over, and after the configured ones any other free System One judge is appended automatically, so a single outage never stops a round. The old single-judge key `model` is still read and moved to the front of `judges` on load; it is never written back.
 
 ## rtk
 `enabled`, `min_chars` (2000), `max_chars` (12000), `git_diff`, `grep`, `ls`, `logs`, `truncate`, `diff_context` (1). Per request: header `X-Xellter-RTK: off`.

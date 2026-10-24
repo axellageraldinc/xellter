@@ -24,6 +24,8 @@ const ICONS = {
  "volume": "<path d=\"M15 8a5 5 0 0 1 0 8\" />\n  <path d=\"M17.7 5a9 9 0 0 1 0 14\" />\n  <path d=\"M6 15h-2a1 1 0 0 1 -1 -1v-4a1 1 0 0 1 1 -1h2l3.5 -4.5a.8 .8 0 0 1 1.5 .5v14a.8 .8 0 0 1 -1.5 .5l-3.5 -4.5\" />",
  "microphone": "<path d=\"M9 2m0 3a3 3 0 0 1 3 -3h0a3 3 0 0 1 3 3v5a3 3 0 0 1 -3 3h0a3 3 0 0 1 -3 -3z\" />\n  <path d=\"M5 10a7 7 0 0 0 14 0\" />\n  <path d=\"M8 21l8 0\" />\n  <path d=\"M12 17l0 4\" />",
  "music": "<path d=\"M3 17a3 3 0 1 0 6 0a3 3 0 0 0 -6 0\" />\n  <path d=\"M13 17a3 3 0 1 0 6 0a3 3 0 0 0 -6 0\" />\n  <path d=\"M9 17v-13h10v13\" />\n  <path d=\"M9 8h10\" />",
+ "arrow-up": "<path d=\"M12 5l0 14\" />\n  <path d=\"M16 9l-4 -4\" />\n  <path d=\"M8 9l4 -4\" />",
+ "arrow-down": "<path d=\"M12 5l0 14\" />\n  <path d=\"M16 15l-4 4\" />\n  <path d=\"M8 15l4 4\" />",
  "chevron-right": "<path d=\"M9 6l6 6l-6 6\" />",
  "pencil": "<path d=\"M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4\" />\n  <path d=\"M13.5 6.5l4 4\" />",
  "shield-check": "<path d=\"M11.46 20.846a12 12 0 0 1 -7.96 -14.846a12 12 0 0 0 8.5 -3a12 12 0 0 0 8.5 3a12 12 0 0 1 -.09 7.06\" />\n  <path d=\"M15 19l2 2l4 -4\" />",

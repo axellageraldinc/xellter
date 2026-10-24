@@ -165,8 +165,14 @@ type Resilience struct {
 
 // JEV configures the System One quality judge.
 type JEV struct {
-	Enabled        bool     `yaml:"enabled" json:"enabled"`
-	Model          string   `yaml:"model" json:"model"`
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// Judges is the ordered chain of System One models that score an answer: the
+	// first one is used, the next one takes over when it is unavailable at
+	// kenari. Any other free System One judge is appended as a last resort.
+	Judges []string `yaml:"judges" json:"judges"`
+	// Model is the single-judge setting from before the chain existed. It is
+	// migrated into Judges on load and never written back.
+	Model          string   `yaml:"model,omitempty" json:"model,omitempty"`
 	DailyBudgetIDR float64  `yaml:"daily_budget_idr" json:"daily_budget_idr"`
 	EveryHours     int      `yaml:"every_hours" json:"every_hours"`
 	PassThreshold  float64  `yaml:"pass_threshold" json:"pass_threshold"`
@@ -189,6 +195,9 @@ type RTK struct {
 // Modalities are the endpoint kinds a preset can serve.
 var Modalities = []string{"chat", "images", "videos", "audio_speech", "audio_transcription", "music"}
 
+// DefaultJEVJudge is the judge used when the config names none.
+const DefaultJEVJudge = "jev-1-13:free"
+
 // Default returns the built-in configuration (no upstreams, no clients).
 func Default() *Config {
 	c := &Config{
@@ -205,7 +214,7 @@ func Default() *Config {
 		},
 		Resilience: Resilience{MaxAttempts: 4, CooldownBaseSec: 30, CooldownMaxSec: 900, BreakerFailures: 5, BreakerOpenSec: 120},
 		JEV: JEV{
-			Enabled: false, Model: "jev-1-13:free", DailyBudgetIDR: 1000, EveryHours: 24, PassThreshold: 0.6,
+			Enabled: false, DailyBudgetIDR: 1000, EveryHours: 24, PassThreshold: 0.6,
 			Prompts: []string{
 				"Explain in two sentences why the sky is blue.",
 				"Tulis fungsi Python untuk membalik string tanpa slicing, lengkap dengan contoh pemakaian.",
@@ -366,8 +375,16 @@ func (c *Config) fillDefaults() {
 	if c.RTK.MaxChars <= 0 {
 		c.RTK.MaxChars = d.RTK.MaxChars
 	}
-	if c.JEV.Model == "" {
-		c.JEV.Model = d.JEV.Model
+	if c.JEV.Model != "" {
+		// older configs name one judge; it becomes the head of the chain
+		c.JEV.Judges = append([]string{c.JEV.Model}, c.JEV.Judges...)
+		c.JEV.Model = ""
+	}
+	for i, id := range c.JEV.Judges {
+		c.JEV.Judges[i] = strings.TrimSpace(id) // Validate reports empty and repeated ids
+	}
+	if len(c.JEV.Judges) == 0 {
+		c.JEV.Judges = []string{DefaultJEVJudge}
 	}
 	if c.JEV.PassThreshold <= 0 {
 		c.JEV.PassThreshold = d.JEV.PassThreshold
@@ -489,6 +506,20 @@ func (c *Config) Validate() error {
 	}
 	if c.Rules.CanaryPercent < 0 || c.Rules.CanaryPercent > 100 {
 		bad("rules.canary_percent must be 0..100")
+	}
+	for _, m := range c.JEV.Judges {
+		if strings.TrimSpace(m) == "" {
+			bad("jev.judges must not contain an empty model id")
+			break
+		}
+	}
+	seenJudge := map[string]bool{}
+	for _, m := range c.JEV.Judges {
+		if seenJudge[m] {
+			bad("jev.judges: %q is listed twice", m)
+			break
+		}
+		seenJudge[m] = true
 	}
 	for m, v := range c.Benchmarks {
 		if v < 0 || v > 100 {
