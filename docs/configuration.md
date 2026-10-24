@@ -38,7 +38,7 @@ A client is one app that calls xellter. It has its own kenari keys and its own p
 `name`, `key_env` (name of the secret that holds the key value in `data/secrets.env`; unique across clients), `enabled`, `tier` (`auto` detects it; `free`/`topup`/`plan` override), `plan` (only needed when no account key is set and the tier is `plan`), `account` (default `main`: keys of one kenari account share its limits and plan), `rpm` / `daily_free` (override kenari defaults; `-1` = unlimited), `allow` (model globs; normally detected by probing), `note`.
 
 ### Generated presets
-For each kind that has at least one model callable by the client's keys, xellter creates one preset once: `text` (chat), `image`, `video`, `tts` (text to speech), `stt` (speech to text), `music`. A client is only seeded after all its enabled keys have been probed. Add more presets by hand (for example `coding` next to `text`); preset names take precedence over real model names.
+For each kind that has at least one model callable by the client's keys, xellter creates one preset once: `text` (chat), `image`, `video`, `tts` (text to speech), `stt` (speech to text), `music`. A client is only seeded after all its enabled keys have been probed. Preset names are predefined and a client has each at most once: the admin API refuses any other name or a kind that does not match its name. A preset can be edited or deleted (it is not recreated) and added back from the panel ("Add preset" lists only the missing ones). Preset names take precedence over real model names.
 
 ## presets (per client)
 Key = the name the app sends as `model`.

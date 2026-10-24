@@ -321,6 +321,7 @@ const MEDIA_OBJECTIVES = {
 };
 const objectivesFor = p => p.modality === 'chat' ? OBJECTIVES : MEDIA_OBJECTIVES;
 const objectiveOf = p => Object.entries(objectivesFor(p)).find(([, o]) => Object.entries(o.w).every(([k, v]) => (p.weights || {})[k] === v))?.[0] || 'custom';
+const PRESET_NAME = { chat: 'text', images: 'image', videos: 'video', audio_speech: 'tts', audio_transcription: 'stt', music: 'music' };
 const MODALITIES = { chat: 'Text', images: 'Image', videos: 'Video', audio_speech: 'Text to speech', audio_transcription: 'Speech to text', music: 'Music' };
 
 function presetCard(client, name, p, r) {
@@ -341,14 +342,14 @@ function presetCard(client, name, p, r) {
       field(p.require, 'tool_call', { type: 'switch', label: 'Tool calling (agents, function calls)' }), field(p.require, 'vision', { type: 'switch', label: 'Image input' }),
       field(p.require, 'min_context', { type: 'select', label: 'Context size', cast: Number, custom: v => `${Math.round(v / 1000)}k tokens (custom)`, opts: [[0, 'Any'], [32000, 'at least 32k tokens'], [64000, 'at least 64k tokens'], [128000, 'at least 128k tokens'], [256000, 'at least 256k tokens']] })),
     advanced(cols(
-      field(p, 'description'), field(p, 'modality', { type: 'select', label: 'Kind', opts: Object.entries(MODALITIES) }), field(p, 'mode', { type: 'select', label: 'How it picks', opts: [['auto', 'Automatically (ranking)'], ['combo', 'Fixed list, in order']] }),
+      field(p, 'description'), field(p, 'mode', { type: 'select', label: 'How it picks', opts: [['auto', 'Automatically (ranking)'], ['combo', 'Fixed list, in order']] }),
       field(p, 'models', { type: 'list', label: 'Fixed list of models', help: 'only used for "Fixed list"' }), field(p, 'allow', { type: 'list', label: 'Only consider models matching', ph: 'e.g. deepseek-*, glm-*' }), field(p, 'deny', { type: 'list', label: 'Never use models matching' }),
       field(p, 'min_quality', { type: 'num', step: '0.01', label: 'Minimum quality (0-1)' }), field(p, 'max_candidates', { type: 'num', label: 'How many models to keep' }), field(p, 'rr_band', { type: 'num', step: '0.01', label: '"Equally good" means within' }),
       ['cost', 'benchmark', 'jev', 'reliability', 'context'].map(k => field(p.weights, k, { type: 'num', label: `Weight: ${k}` })),
       [['input_tokens', 'Typical input tokens'], ['output_tokens', 'Typical output tokens'], ['cached_ratio', 'Share of input served from cache'], ['images', 'Images per request'], ['seconds', 'Seconds of audio/video'], ['chars', 'Characters of speech']].map(([k, l]) => field(p.cost_profile, k, { type: 'num', label: l }))),
-      btn('Delete this preset', 'btn-outline-danger btn-sm', () => { const cl = S.cfg.clients.find(c => c.name === client); if (confirm(`Delete preset "${name}"? Apps calling it will get an error, and it is not created again.`)) { delete cl.presets[name]; markDirty(); render(); } }, 'trash')));
+  ));
   return card(h('span', { class: 'd-flex align-items-center gap-2' }, h('span', { class: 'kind-icon' }, icon(ic)), h('span', {}, name, h('div', { class: 'text-secondary small fw-normal' }, `${kind} · ${r ? r.callable : 0} model${r?.callable === 1 ? '' : 's'} available`))), body,
-    { actions: btn('Why this order?', 'btn-sm btn-ghost-secondary', () => showRanking(client, name)), class: 'h-100' });
+    { actions: h('div', { class: 'd-flex gap-1' }, btn('Why this order?', 'btn-sm btn-ghost-secondary', () => showRanking(client, name)), btn('Delete', 'btn-sm btn-ghost-danger', () => { const cl = S.cfg.clients.find(c => c.name === client); if (confirm(`Delete preset "${name}" of ${client}? Apps calling it will get an error until you add it again with "Add preset".`)) { delete cl.presets[name]; markDirty(); render(); } }, 'trash')), class: 'h-100' });
 }
 
 // modelPicker lists every model the client's keys can call for this preset and lets the owner untick the ones it must never use.
@@ -366,15 +367,15 @@ function modelPicker(p, r) {
 }
 
 function addPreset(cl) {
-  const f = { name: '', from: '@chat' };
-  dialog(h('h3', {}, 'Add a preset'), h('p', { class: 'text-secondary' }, 'A second recipe next to the generated ones, for example "coding" next to "text". Start from an existing preset or from the defaults.'),
-    h('div', { class: 'mb-3' }, h('label', { class: 'form-label' }, 'Name'), h('input', { class: 'form-control', placeholder: 'coding', oninput: e => f.name = e.target.value.trim() })),
-    h('div', { class: 'mb-3' }, h('label', { class: 'form-label' }, 'Start from'), h('select', { class: 'form-select', onchange: e => f.from = e.target.value },
-      Object.keys(MODALITIES).map(k => h('option', { value: '@' + k }, `defaults for ${MODALITIES[k].toLowerCase()}`)), Object.keys(cl.presets).sort().map(n => h('option', { value: n }, `copy of ${n}`)))),
+  // Presets are predefined (text, image, ...) and a client has each at most once, so only the missing ones are offered.
+  const missing = Object.keys(MODALITIES).filter(k => !cl.presets[PRESET_NAME[k]]);
+  if (!missing.length) return toast('This client already has every preset', true);
+  const f = { kind: missing[0] };
+  dialog(h('h3', {}, 'Add a preset'), h('p', { class: 'text-secondary' }, 'Presets are predefined, one of each kind. Pick one that was deleted or not created yet; it starts from the defaults.'),
+    h('div', { class: 'mb-3' }, h('label', { class: 'form-label' }, 'Preset'), h('select', { class: 'form-select', onchange: e => f.kind = e.target.value },
+      missing.map(k => h('option', { value: k }, `${PRESET_NAME[k]} (${MODALITIES[k].toLowerCase()})`)))),
     dialogButtons(btn('Add', 'btn-primary', () => {
-      if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$/.test(f.name)) return toast('Use letters, digits, dot, dash or underscore', true);
-      if (cl.presets[f.name]) return toast('That name is already used', true);
-      cl.presets[f.name] = f.from.startsWith('@') ? newDefault(f.from.slice(1)) : JSON.parse(JSON.stringify(cl.presets[f.from]));
+      cl.presets[PRESET_NAME[f.kind]] = newDefault(f.kind);
       markDirty(); closeDialog(); render();
     })));
 }
@@ -449,7 +450,7 @@ views.settings = async function () {
     h('div', { class: 'col-lg-6' }, card('Quality judge (JEV)', h('div', {}, h('p', { class: 'text-secondary' }, 'Candidate models answer a few test questions and kenari\'s System One model scores each answer. The score decides which models are good enough for a preset. Judging costs a little, so a daily limit applies.'),
       h('div', { class: 'mb-2' }, badge(j.enabled ? 'on' : 'off', j.enabled ? 'green' : 'secondary'), badge(`today Rp ${idr(j.spent_idr)} of Rp ${idr(j.budget_idr)}`)),
       field(c.jev, 'enabled', { type: 'switch', label: 'Judge models automatically' }),
-      field(c.jev, 'model', { type: 'select', label: 'Judge model', opts: (j.judges || []).map(x => [x.id, x.free ? `${x.id} (free)` : `${x.id} (Rp ${idr(x.in_idr)} per 1M input tokens)`]), help: 'a System One model from kenari' }),
+      field(c.jev, 'model', { type: 'select', label: 'First judge to try', opts: (j.judges || []).map(x => [x.id, x.free ? `${x.id} (free)` : `${x.id} (Rp ${idr(x.in_idr)} per 1M input tokens)`]), help: 'If it is down, the other free System One judges are tried in turn, so a failure here does not stop judging.' }),
       j.system_key ? h('div', { class: 'small text-secondary mb-3' }, icon('shield-check', 'me-1 text-green'), 'Uses the dashboard\'s own account key (the one that reads plan and balance), never a client\'s key. Judging calls show up as "_system" in the request list.')
         : h('div', { class: 'alert alert-warning py-2' }, 'Judging needs the account key. Add it on the ', h('a', { class: 'clickable', onclick: () => go('overview') }, 'Overview'), ' page, under Kenari plan & balance.'),
       field(c.jev, 'daily_budget_idr', { type: 'num', label: 'Daily limit (Rp)' }),

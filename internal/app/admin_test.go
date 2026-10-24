@@ -215,8 +215,19 @@ func TestAdminConfigClientsAndRollback(t *testing.T) {
 		t.Fatal("invalid config was applied")
 	}
 
-	// a valid edit applies live and is reversible
+	// presets are predefined: a made-up name is refused, and once it is gone the config is accepted
 	text()["strategy"] = "priority"
+	presetsOf := func(i int) map[string]any {
+		return cur.Config["clients"].([]any)[i].(map[string]any)["presets"].(map[string]any)
+	}
+	if r, b := ae.do(t, ck, "PUT", "/admin/api/config", map[string]any{"config": cur.Config}); r.StatusCode != 422 || !strings.Contains(string(b), "not a preset name") {
+		t.Fatalf("custom preset name accepted: %d %s", r.StatusCode, b)
+	}
+	for i := range cur.Config["clients"].([]any) {
+		delete(presetsOf(i), "budget")
+	}
+
+	// a valid edit applies live and is reversible
 	if r, b := ae.do(t, ck, "PUT", "/admin/api/config", map[string]any{"config": cur.Config}); r.StatusCode != 200 {
 		t.Fatalf("valid config rejected: %d %s", r.StatusCode, b)
 	}

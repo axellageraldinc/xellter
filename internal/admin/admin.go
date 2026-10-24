@@ -229,6 +229,10 @@ func (h *Handler) config(w http.ResponseWriter, r *http.Request) {
 			jerr(w, 400, "send {config} or {yaml}")
 			return
 		}
+		if err := config.CheckPresetNames(next); err != nil {
+			jerr(w, 422, err.Error())
+			return
+		}
 		if err := h.a.Apply(next); err != nil {
 			jerr(w, 422, err.Error())
 			return

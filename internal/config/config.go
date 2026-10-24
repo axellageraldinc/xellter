@@ -226,6 +226,28 @@ func PresetName(modality string) string {
 	return map[string]string{"chat": "text", "images": "image", "videos": "video", "audio_speech": "tts", "audio_transcription": "stt", "music": "music"}[modality]
 }
 
+// CheckPresetNames enforces that every preset is one of the predefined kinds under its own name (text is chat,
+// image is images, ...). A client therefore never has two presets of one kind, and apps can rely on the names.
+func CheckPresetNames(c *Config) error {
+	for _, cl := range c.Clients {
+		for name, p := range cl.Presets {
+			kind := ""
+			for _, m := range PresetModalities {
+				if PresetName(m) == name {
+					kind = m
+				}
+			}
+			if kind == "" {
+				return fmt.Errorf("client %s: %q is not a preset name; use one of text, image, video, tts, stt, music", cl.Name, name)
+			}
+			if p.Modality != kind {
+				return fmt.Errorf("client %s: preset %q must be of kind %s", cl.Name, name, kind)
+			}
+		}
+	}
+	return nil
+}
+
 // DefaultPreset returns the generated preset for a modality.
 func DefaultPreset(modality string) Preset {
 	media := Weights{Cost: 70, Benchmark: 10, Reliability: 20}
