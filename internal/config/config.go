@@ -540,7 +540,13 @@ func Save(file string, c *Config) error {
 	if old, err := os.ReadFile(file); err == nil {
 		dir := filepath.Join(c.Server.DataDir, "config-history")
 		if err := os.MkdirAll(dir, 0o700); err == nil {
-			_ = os.WriteFile(filepath.Join(dir, time.Now().UTC().Format("20060102-150405.000")+".yaml"), old, 0o600)
+			t := time.Now().UTC()
+			name := filepath.Join(dir, t.Format("20060102-150405.000")+".yaml")
+			for _, err := os.Stat(name); err == nil; _, err = os.Stat(name) { // saves within one millisecond must not overwrite each other
+				t = t.Add(time.Millisecond)
+				name = filepath.Join(dir, t.Format("20060102-150405.000")+".yaml")
+			}
+			_ = os.WriteFile(name, old, 0o600)
 			pruneHistory(dir, 50)
 		}
 	}
