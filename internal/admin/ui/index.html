@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>xellter admin</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Cpath d='M8 9l16 14M24 9L8 23' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<section id="login" hidden>
+  <form id="loginform" class="card login" autocomplete="on">
+    <h1>xellter</h1>
+    <p class="muted">Sign in to the admin panel</p>
+    <label class="f"><span>Username</span><input name="username" autocomplete="username" required></label>
+    <label class="f"><span>Password</span><input name="password" type="password" autocomplete="current-password" required></label>
+    <label class="f"><span>Authenticator or recovery code</span><input name="code" inputmode="numeric" autocomplete="one-time-code" required></label>
+    <button class="primary" type="submit">Sign in</button>
+    <p id="loginerr" class="err" role="alert"></p>
+  </form>
+</section>
+<div id="app" hidden>
+  <header>
+    <div class="brand">xellter</div>
+    <nav id="nav"></nav>
+    <button id="logout" class="ghost" title="Sign out">Sign out</button>
+  </header>
+  <main id="view"></main>
+  <div id="savebar" hidden>
+    <span>Unsaved changes</span>
+    <button id="discard" class="ghost">Discard</button>
+    <button id="save" class="primary">Save &amp; apply</button>
+  </div>
+</div>
+<dialog id="dlg"><div id="dlgbody"></div><form method="dialog"><button class="ghost">Close</button></form></dialog>
+<div id="toast" role="status"></div>
+<script src="app.js"></script>
+</body>
+</html>

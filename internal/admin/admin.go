@@ -1,0 +1,531 @@
+// Package admin serves the dashboard UI and its JSON API under /admin.
+//
+// Access rules: the Host header must be in server.admin_hosts (so a public
+// hostname that only fronts /v1 never exposes the panel), every API call needs
+// a session cookie, and state-changing calls need the X-Xellter header
+// (cookie is SameSite=Strict as well).
+package admin
+
+import (
+	"context"
+	"crypto/rand"
+	"embed"
+	"encoding/hex"
+	"encoding/json"
+	"io"
+	"io/fs"
+	"net"
+	"net/http"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/axellageraldinc/xellter/internal/app"
+	"github.com/axellageraldinc/xellter/internal/auth"
+	"github.com/axellageraldinc/xellter/internal/config"
+	"github.com/axellageraldinc/xellter/internal/proxy"
+	"github.com/axellageraldinc/xellter/internal/upstream"
+)
+
+//go:embed ui
+var uiFS embed.FS
+
+const cookieName = "xl_session"
+
+// Handler is the admin HTTP handler (mount it at /admin/).
+type Handler struct {
+	a   *app.App
+	mux *http.ServeMux
+	ui  http.Handler
+}
+
+// New builds the admin handler.
+func New(a *app.App) *Handler {
+	sub, _ := fs.Sub(uiFS, "ui")
+	h := &Handler{a: a, mux: http.NewServeMux(), ui: http.StripPrefix("/admin/", http.FileServer(http.FS(sub)))}
+	api := func(p string, f http.HandlerFunc) { h.mux.HandleFunc("/admin/api/"+p, h.guard(f)) }
+	h.mux.HandleFunc("/admin/api/login", h.login)
+	api("logout", h.logout)
+	api("logout-all", h.logoutAll)
+	api("me", h.me)
+	api("overview", h.overview)
+	api("config", h.config)
+	api("rollback", h.rollback)
+	api("clients", h.clients)
+	api("secret", h.secret)
+	api("keys/reset", h.resetKey)
+	api("keys/probe", h.probeKeys)
+	api("ranking", h.ranking)
+	api("recompute", h.recompute)
+	api("catalog", h.catalog)
+	api("catalog/refresh", h.refreshCatalog)
+	api("usage", h.usage)
+	api("requests", h.requests)
+	api("jev", h.jevInfo)
+	api("jev/run", h.jevRun)
+	h.mux.HandleFunc("/admin/", h.static)
+	return h
+}
+
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	host := r.Host
+	if hh, _, err := net.SplitHostPort(host); err == nil {
+		host = hh
+	}
+	if !config.MatchAny(h.a.Cfg().Server.AdminHosts, strings.ToLower(host)) {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'")
+	h.mux.ServeHTTP(w, r)
+}
+
+func (h *Handler) static(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-cache")
+	h.ui.ServeHTTP(w, r)
+}
+
+func (h *Handler) clientIP(r *http.Request) string {
+	if h.a.Cfg().Server.TrustedProxy {
+		if x := r.Header.Get("X-Forwarded-For"); x != "" {
+			return strings.TrimSpace(strings.Split(x, ",")[0])
+		}
+	}
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	return ip
+}
+
+func (h *Handler) secure(r *http.Request) bool {
+	return r.TLS != nil || (h.a.Cfg().Server.TrustedProxy && r.Header.Get("X-Forwarded-Proto") == "https")
+}
+
+func (h *Handler) guard(f http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		c, err := r.Cookie(cookieName)
+		if err != nil || !h.a.St.SessionValid(auth.HashToken(c.Value)) {
+			jerr(w, 401, "login required")
+			return
+		}
+		if r.Method != http.MethodGet && r.Header.Get("X-Xellter") == "" {
+			jerr(w, 403, "missing X-Xellter header")
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 4<<20)
+		f(w, r)
+	}
+}
+
+func jerr(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+func jok(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func readJSON(r *http.Request, v any) error {
+	return json.NewDecoder(r.Body).Decode(v)
+}
+
+// ---- session ----
+
+func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || r.Header.Get("X-Xellter") == "" {
+		jerr(w, 405, "POST with X-Xellter header required")
+		return
+	}
+	if h.a.Auth == nil {
+		jerr(w, 503, "admin login is not set up; run `xellter admin init` on the server")
+		return
+	}
+	var in struct{ Username, Password, Code string }
+	if err := readJSON(r, &in); err != nil {
+		jerr(w, 400, "bad request")
+		return
+	}
+	res := h.a.Auth.Verify(in.Username, in.Password, in.Code, h.clientIP(r))
+	if res.RetryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(int(res.RetryAfter.Seconds())+1))
+		jerr(w, 429, "too many attempts; try again later")
+		return
+	}
+	if !res.OK {
+		jerr(w, 401, "invalid credentials or code")
+		return
+	}
+	tok, hash := auth.NewToken()
+	ttl := time.Duration(h.a.Cfg().Server.SessionHours) * time.Hour
+	h.a.St.PutSession(hash, time.Now().Add(ttl), h.clientIP(r), r.UserAgent())
+	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: tok, Path: "/admin", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: h.secure(r), MaxAge: int(ttl.Seconds())})
+	jok(w, map[string]any{"ok": true})
+}
+
+func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie(cookieName); err == nil {
+		h.a.St.DeleteSession(auth.HashToken(c.Value))
+	}
+	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/admin", MaxAge: -1})
+	jok(w, map[string]any{"ok": true})
+}
+
+func (h *Handler) logoutAll(w http.ResponseWriter, r *http.Request) {
+	h.a.St.DeleteAllSessions()
+	jok(w, map[string]any{"ok": true})
+}
+
+func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
+	jok(w, map[string]any{"user": h.a.Auth.Username(), "version": app.Version, "sessions": h.a.St.SessionCount()})
+}
+
+// ---- overview ----
+
+func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
+	snap := h.a.Cat.Snapshot()
+	now := time.Now()
+	out := map[string]any{
+		"uptime_s": int(now.Sub(h.a.Started).Seconds()),
+		"requests": map[string]any{"total": h.a.Px.Total.Load(), "failed": h.a.Px.Failed.Load(), "inflight": h.a.Px.Inflight.Load(), "rtk_saved_chars": h.a.Px.RTKSaved.Load()},
+	}
+	var keys []upstream.Status
+	if snap != nil {
+		out["catalog"] = map[string]any{"models": len(snap.Models), "age_s": int(now.Sub(snap.Fetched).Seconds()), "degraded": snap.Degraded, "plans": len(snap.Plans), "tier": snap.Tier, "usd_idr": snap.USDIDR}
+		for _, k := range h.a.Pool.Keys() {
+			keys = append(keys, k.Status(snap, now))
+		}
+	}
+	out["keys"] = keys
+	spent, limit := h.a.Judge.Budget()
+	out["jev"] = map[string]any{"enabled": h.a.Cfg().JEV.Enabled, "spent_idr": spent, "budget_idr": limit}
+	since := now.Add(-24 * time.Hour)
+	out["by_client"], _ = h.a.St.Usage("client", since)
+	out["by_shadow"], _ = h.a.St.Usage("shadow", since)
+	var clients []map[string]any
+	for _, c := range h.a.Cfg().Clients {
+		clients = append(clients, map[string]any{"name": c.Name, "enabled": c.Enabled, "spent_today": h.a.Px.SpentToday(c.Name), "budget": c.DailyBudget})
+	}
+	out["clients"] = clients
+	jok(w, out)
+}
+
+// ---- config ----
+
+func (h *Handler) config(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		c := h.a.Cfg()
+		y, _ := yaml.Marshal(c)
+		jok(w, map[string]any{"config": c, "yaml": string(y), "history": config.History(c.Server.DataDir)})
+	case http.MethodPut:
+		var in struct {
+			Config *config.Config  `json:"config"`
+			YAML   *string         `json:"yaml"`
+			Raw    json.RawMessage `json:"-"`
+		}
+		if err := readJSON(r, &in); err != nil {
+			jerr(w, 400, "bad JSON: "+err.Error())
+			return
+		}
+		var next *config.Config
+		switch {
+		case in.YAML != nil:
+			c, err := config.Parse([]byte(*in.YAML))
+			if err != nil {
+				jerr(w, 422, err.Error())
+				return
+			}
+			next = c
+			keepPaths(next, h.a.Cfg())
+		case in.Config != nil:
+			next = in.Config
+			if err := config.Normalize(next); err != nil {
+				jerr(w, 422, err.Error())
+				return
+			}
+		default:
+			jerr(w, 400, "send {config} or {yaml}")
+			return
+		}
+		if err := h.a.Apply(next); err != nil {
+			jerr(w, 422, err.Error())
+			return
+		}
+		jok(w, map[string]any{"ok": true})
+	default:
+		jerr(w, 405, "GET or PUT")
+	}
+}
+
+// keepPaths keeps the resolved absolute paths when a YAML edit leaves them relative.
+func keepPaths(next, cur *config.Config) {
+	s := &next.Server
+	if s.DataDir == "" || s.DataDir == "data" || !strings.HasPrefix(s.DataDir, "/") {
+		s.DataDir = cur.Server.DataDir
+	}
+	if s.SecretsFile == "" || !strings.HasPrefix(s.SecretsFile, "/") {
+		s.SecretsFile = cur.Server.SecretsFile
+	}
+	if s.AuthRecord == "" || !strings.HasPrefix(s.AuthRecord, "/") {
+		s.AuthRecord = cur.Server.AuthRecord
+	}
+}
+
+func (h *Handler) rollback(w http.ResponseWriter, r *http.Request) {
+	var in struct{ ID string }
+	if r.Method != http.MethodPost || readJSON(r, &in) != nil {
+		jerr(w, 400, "POST {id}")
+		return
+	}
+	b, err := config.ReadHistory(h.a.Cfg().Server.DataDir, in.ID)
+	if err != nil {
+		jerr(w, 404, "no such version")
+		return
+	}
+	c, err := config.Parse(b)
+	if err != nil {
+		jerr(w, 422, err.Error())
+		return
+	}
+	keepPaths(c, h.a.Cfg())
+	if err := h.a.Apply(c); err != nil {
+		jerr(w, 422, err.Error())
+		return
+	}
+	jok(w, map[string]any{"ok": true})
+}
+
+// ---- clients ----
+
+func newKey() string {
+	b := make([]byte, 24)
+	_, _ = rand.Read(b)
+	return "xl-" + hex.EncodeToString(b)
+}
+
+func (h *Handler) clients(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Action string        `json:"action"` // create | rotate
+		Client config.Client `json:"client"`
+		Name   string        `json:"name"`
+	}
+	if r.Method != http.MethodPost || readJSON(r, &in) != nil {
+		jerr(w, 400, "POST {action, client|name}")
+		return
+	}
+	next := *h.a.Cfg()
+	next.Clients = append([]config.Client(nil), next.Clients...)
+	key := newKey()
+	switch in.Action {
+	case "create":
+		c := in.Client
+		c.Enabled = true
+		c.KeyHash, c.KeyHint = proxy.HashKey(key), "…"+key[len(key)-4:]
+		if len(c.Shadows) == 0 {
+			c.Shadows = []string{"*"}
+		}
+		next.Clients = append(next.Clients, c)
+	case "rotate":
+		found := false
+		for i := range next.Clients {
+			if next.Clients[i].Name == in.Name {
+				next.Clients[i].KeyHash, next.Clients[i].KeyHint = proxy.HashKey(key), "…"+key[len(key)-4:]
+				found = true
+			}
+		}
+		if !found {
+			jerr(w, 404, "no such client")
+			return
+		}
+	default:
+		jerr(w, 400, "action must be create or rotate")
+		return
+	}
+	if err := config.Normalize(&next); err != nil {
+		jerr(w, 422, err.Error())
+		return
+	}
+	if err := h.a.Apply(&next); err != nil {
+		jerr(w, 422, err.Error())
+		return
+	}
+	jok(w, map[string]any{"ok": true, "key": key, "note": "shown once; store it in the client's environment"})
+}
+
+func (h *Handler) secret(w http.ResponseWriter, r *http.Request) {
+	var in struct{ Name, Value string }
+	if r.Method != http.MethodPut || readJSON(r, &in) != nil || in.Value == "" {
+		jerr(w, 400, "PUT {name, value}")
+		return
+	}
+	known := false
+	for _, u := range h.a.Cfg().Upstreams {
+		if u.KeyEnv == in.Name {
+			known = true
+		}
+	}
+	if !known {
+		jerr(w, 422, "no upstream uses key_env "+in.Name)
+		return
+	}
+	if err := h.a.SetSecret(in.Name, strings.TrimSpace(in.Value)); err != nil {
+		jerr(w, 422, err.Error())
+		return
+	}
+	jok(w, map[string]any{"ok": true})
+}
+
+func (h *Handler) resetKey(w http.ResponseWriter, r *http.Request) {
+	var in struct{ Name string }
+	if readJSON(r, &in) != nil {
+		jerr(w, 400, "POST {name}")
+		return
+	}
+	k := h.a.Pool.Get(in.Name)
+	if k == nil {
+		jerr(w, 404, "no such upstream")
+		return
+	}
+	k.ResetState()
+	h.a.Rt.Recompute(time.Now())
+	jok(w, map[string]any{"ok": true})
+}
+
+func (h *Handler) probeKeys(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	h.a.ProbeKeys(ctx)
+	jok(w, map[string]any{"ok": true})
+}
+
+// ---- ranking / catalog ----
+
+func (h *Handler) ranking(w http.ResponseWriter, r *http.Request) {
+	rk := h.a.Rt.Rankings()
+	if s := r.URL.Query().Get("shadow"); s != "" {
+		if x := rk[s]; x != nil {
+			jok(w, x)
+			return
+		}
+		jerr(w, 404, "no such shadow")
+		return
+	}
+	jok(w, rk)
+}
+
+func (h *Handler) recompute(w http.ResponseWriter, r *http.Request) {
+	h.a.Rt.Recompute(time.Now())
+	jok(w, map[string]any{"ok": true})
+}
+
+func (h *Handler) refreshCatalog(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if err := h.a.RefreshCatalog(ctx); err != nil {
+		jerr(w, 502, err.Error())
+		return
+	}
+	jok(w, map[string]any{"ok": true})
+}
+
+func (h *Handler) catalog(w http.ResponseWriter, r *http.Request) {
+	snap := h.a.Cat.Snapshot()
+	if snap == nil {
+		jok(w, []any{})
+		return
+	}
+	mod := r.URL.Query().Get("modality")
+	type row struct {
+		ID       string  `json:"id"`
+		Endpoint string  `json:"endpoint"`
+		Free     bool    `json:"free"`
+		Context  int     `json:"context"`
+		In       float64 `json:"in_idr"`
+		Out      float64 `json:"out_idr"`
+		Promo    float64 `json:"promo_off"`
+		Tool     bool    `json:"tool_call"`
+		Vision   bool    `json:"vision"`
+	}
+	var rows []row
+	for _, id := range snap.IDs() {
+		m := snap.Models[id]
+		if mod != "" && m.Endpoint != mod {
+			continue
+		}
+		x := row{ID: id, Endpoint: m.Endpoint, Free: m.Free, Context: m.Context, In: m.InIDR, Out: m.OutIDR, Tool: m.ToolCall, Vision: m.Vision}
+		if m.PromoActive(time.Now(), 0) {
+			x.Promo = m.Promo.PercentOff
+		}
+		rows = append(rows, x)
+	}
+	jok(w, rows)
+}
+
+// ---- usage ----
+
+func (h *Handler) usage(w http.ResponseWriter, r *http.Request) {
+	hours, _ := strconv.Atoi(r.URL.Query().Get("hours"))
+	if hours <= 0 || hours > 24*90 {
+		hours = 24
+	}
+	g := r.URL.Query().Get("group")
+	if g == "" {
+		g = "model"
+	}
+	rows, err := h.a.St.Usage(g, time.Now().Add(-time.Duration(hours)*time.Hour))
+	if err != nil {
+		jerr(w, 400, err.Error())
+		return
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Requests > rows[j].Requests })
+	jok(w, rows)
+}
+
+func (h *Handler) requests(w http.ResponseWriter, r *http.Request) {
+	n, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if n <= 0 || n > 500 {
+		n = 100
+	}
+	rows, _ := h.a.St.Recent(n)
+	jok(w, rows)
+}
+
+// ---- JEV ----
+
+func (h *Handler) jevInfo(w http.ResponseWriter, r *http.Request) {
+	scores, _ := h.a.St.JEVScores()
+	spent, limit := h.a.Judge.Budget()
+	jok(w, map[string]any{"enabled": h.a.Cfg().JEV.Enabled, "model": h.a.Cfg().JEV.Model, "scores": scores, "spent_idr": spent, "budget_idr": limit})
+}
+
+func (h *Handler) jevRun(w http.ResponseWriter, r *http.Request) {
+	var in struct{ Model string }
+	_ = readJSON(r, &in)
+	if r.Method != http.MethodPost {
+		jerr(w, 405, "POST")
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		if in.Model != "" {
+			if _, err := h.a.Judge.Evaluate(ctx, in.Model); err != nil {
+				h.a.Logf("jev evaluate %s: %v", in.Model, err)
+			}
+		} else if _, err := h.a.Judge.RunDue(ctx, 6); err != nil {
+			h.a.Logf("jev run: %v", err)
+		}
+		h.a.Rt.Recompute(time.Now())
+	}()
+	jok(w, map[string]any{"ok": true, "started": true})
+}
+
+var _ = io.EOF
