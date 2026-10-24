@@ -47,6 +47,7 @@ type clientRow struct {
 	Requests   int               `json:"requests_24h"`
 	Errors     int               `json:"errors_24h"`
 	Cost       float64           `json:"cost_24h"`
+	RTKSaved   int64             `json:"rtk_saved_24h"`
 }
 
 func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
@@ -86,13 +87,13 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 	usage := map[string]clientRow{}
 	if rows, err := h.a.St.Usage("client", now.Add(-24*time.Hour), ""); err == nil {
 		for _, u := range rows {
-			usage[u.Key] = clientRow{Requests: u.Requests, Errors: u.Errors, Cost: u.Cost}
+			usage[u.Key] = clientRow{Requests: u.Requests, Errors: u.Errors, Cost: u.Cost, RTKSaved: u.RTKSaved}
 		}
 	}
 	rows := make([]clientRow, 0, len(cfg.Clients))
 	for _, c := range cfg.Clients {
 		u := usage[c.Name]
-		rows = append(rows, clientRow{Name: c.Name, Enabled: c.Enabled, KeyHint: c.KeyHint, Keys: statuses[c.Name], Presets: h.presetRows(&c), SpentToday: h.a.Px.SpentToday(c.Name), Budget: c.DailyBudget, Requests: u.Requests, Errors: u.Errors, Cost: u.Cost})
+		rows = append(rows, clientRow{Name: c.Name, Enabled: c.Enabled, KeyHint: c.KeyHint, Keys: statuses[c.Name], Presets: h.presetRows(&c), SpentToday: h.a.Px.SpentToday(c.Name), Budget: c.DailyBudget, Requests: u.Requests, Errors: u.Errors, Cost: u.Cost, RTKSaved: u.RTKSaved})
 	}
 	out["clients"] = rows
 	out["alerts"], out["status"] = h.alerts(snap, rows, accts, now)

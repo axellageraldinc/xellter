@@ -27,8 +27,25 @@ dialog#dlg::backdrop { background: rgba(0, 0, 0, .5); }
 .clickable { cursor: pointer; }
 tr.clickable:hover td { background: var(--tblr-bg-surface-secondary); }
 .nowrap { white-space: nowrap; }
-.chart { width: 100%; height: 130px; display: block; }
-.chart rect { fill: var(--tblr-primary); opacity: .85; } .chart rect.err { fill: var(--tblr-danger); opacity: 1; } .chart text { fill: var(--tblr-secondary); font-size: 10px; }
+.chart-wrap { position: relative; }
+.chart-canvas { width: 100%; overflow: hidden; }
+.chart-canvas svg { display: block; }
+.chart-grid { stroke: var(--tblr-border-color); stroke-width: 1; }
+.chart-axis { fill: var(--tblr-secondary); font-size: 10px; }
+.chart-bar { fill: var(--tblr-primary); }
+.chart-bar.err { fill: var(--tblr-danger); }
+.chart-bar:hover { fill: var(--tblr-primary-dark); }
+.chart-tip { position: absolute; top: 0; z-index: 5; pointer-events: none; min-width: 10rem; padding: .4rem .55rem; font-size: .75rem; line-height: 1.35; background: var(--tblr-bg-surface); color: var(--tblr-body-color); border: 1px solid var(--tblr-border-color); border-radius: 6px; box-shadow: 0 4px 14px rgba(0, 0, 0, .16); transform: translateX(-50%); }
+.chart-legend { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; font-size: .78rem; color: var(--tblr-secondary); }
+.chart-legend .sw { display: inline-block; width: .65rem; height: .65rem; margin-right: .35rem; border-radius: 2px; vertical-align: -1px; }
+.chart-summary { font-size: .78rem; color: var(--tblr-secondary); }
+.chart-summary .text-danger { font-weight: 600; }
+.stat-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: 1fr; gap: .75rem; margin-bottom: 1rem; }
+@media (min-width: 992px) { .stat-row { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+.stat-card { height: 100%; }
+.stat-card > .card-body { padding: .8rem 1rem; }
+.stat-value { font-size: 1.15rem; font-weight: 650; letter-spacing: -.02em; line-height: 1.25; min-height: 1.45rem; }
+.stat-label { font-size: .78rem; line-height: 1.3; min-height: 2.05rem; }
 .progress-sm { height: .45rem; }
 details.adv > summary { cursor: pointer; color: var(--tblr-secondary); list-style: none; padding: .25rem 0; font-size: .85rem; }
 details.adv > summary::-webkit-details-marker { display: none; }

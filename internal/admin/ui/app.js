@@ -79,8 +79,19 @@ const card = (title, body, o = {}) => h('div', { class: 'card ' + (o.class || ''
 const pl = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 const empty = text => h('div', { class: 'text-secondary py-2' }, text);
 const flags = fl => (fl || []).filter(f => /^(free|plan|promo)/.test(f)).map(f => badge(f.startsWith('promo') ? f.split(' until')[0] : f, f === 'free' ? 'green' : f === 'plan' ? 'blue' : 'orange'));
-const stat = (ic, color, value, label) => h('div', { class: 'col-6 col-lg-3' }, h('div', { class: 'card card-sm' }, h('div', { class: 'card-body' }, h('div', { class: 'row align-items-center' },
-  h('div', { class: 'col-auto' }, h('span', { class: `bg-${color} text-white avatar` }, icon(ic))), h('div', { class: 'col' }, h('div', { class: 'fw-bold' }, value), h('div', { class: 'text-secondary small' }, label))))));
+// stat is a top-line number card. The cards sit in a .stat-row grid with
+// equal rows, so a card with a longer label never makes its row taller than
+// the others.
+const stat = (ic, color, value, label) => h('div', { class: 'card card-sm stat-card' },
+  h('div', { class: 'card-body d-flex' }, h('div', { class: 'row g-2 w-100 align-items-center' },
+    h('div', { class: 'col-auto' }, h('span', { class: `bg-${color} text-white avatar` }, icon(ic))),
+    h('div', { class: 'col' },
+      h('div', { class: 'stat-value' }, value),
+      h('div', { class: 'stat-label text-secondary' }, label)))));
+
+// statRow lays the stat cards out on a grid: two per row on a phone, four on
+// a desktop, and every row has the same height.
+const statRow = cards => h('div', { class: 'stat-row' }, cards.map(c => stat(c[0], c[1], c[2], c[3])));
 
 function setHead({ crumbs, title, sub, actions }) {
   $('#head').replaceChildren(h('div', { class: 'head-row' },
@@ -157,7 +168,7 @@ const views = {};
 views.overview = async function () {
   const [o, hoursRaw] = await Promise.all([api('overview'), api('usage?group=hour&hours=24')]);
   const hours = hoursRaw || [];
-  const t = hours.reduce((a, r) => ({ req: a.req + r.requests, err: a.err + r.errors, cost: a.cost + r.cost_idr, tok: a.tok + r.in_tok + r.out_tok }), { req: 0, err: 0, cost: 0, tok: 0 });
+  const t = hours.reduce((a, r) => ({ req: a.req + r.requests, err: a.err + r.errors, cost: a.cost + r.cost_idr, rtk: a.rtk + (r.rtk_saved || 0) }), { req: 0, err: 0, cost: 0, rtk: 0 });
   const lvl = { info: ['info-circle', 'azure'], warn: ['alert-triangle', 'orange'], bad: ['alert-triangle', 'red'] };
   const color = o.status === 'bad' ? 'danger' : o.status === 'warn' ? 'warning' : 'success';
   setHead({ title: 'Overview', sub: `Up ${human(o.uptime_s)} · ${o.catalog?.models || 0} models known to kenari`, actions: btn('Refresh catalog', 'btn-outline-secondary btn-sm', () => act(api('catalog/refresh', { method: 'POST' }), 'Catalog refreshed'), 'refresh') });
@@ -165,9 +176,9 @@ views.overview = async function () {
     h('div', { class: `alert alert-${color} mb-3` }, h('div', { class: 'd-flex align-items-center' }, dot(o.status === 'bad' ? 'red' : o.status === 'warn' ? 'orange' : 'green'),
       h('strong', {}, o.status === 'ok' ? 'Everything is running normally' : o.status === 'bad' ? 'Something needs your attention' : 'Running, with warnings')),
       (o.alerts || []).map(a => h('div', { class: 'alert-row' }, icon(lvl[a.level][0], 'text-' + lvl[a.level][1]), h('div', { class: 'me-auto' }, a.text), a.client && h('a', { class: 'clickable text-nowrap', onclick: () => go('clients/' + a.client) }, 'Open')))),
-    h('div', { class: 'row row-cards mb-3' },
-      stat('bolt', 'blue', num(t.req), 'requests in 24 h'), stat('alert-triangle', t.err ? 'orange' : 'green', t.req ? (t.err / t.req * 100).toFixed(1) + '%' : '0%', 'errors in 24 h'),
-      stat('coin', 'azure', 'Rp ' + idr(t.cost), 'at list price, 24 h'), stat('wallet', 'green', num(Math.round(o.requests.rtk_saved_chars / 1000)) + ' k', 'characters saved by RTK')),
+    statRow([
+      ['bolt', 'blue', num(t.req), 'requests in 24 h'], ['alert-triangle', t.err ? 'orange' : 'green', t.req ? (t.err / t.req * 100).toFixed(1) + '%' : '0%', 'failed in 24 h'],
+      ['coin', 'azure', 'Rp ' + idr(t.cost), 'at list price, 24 h'], ['wallet', 'green', num(Math.round(t.rtk / 1000)) + ' k', 'saved by RTK, 24 h']]),
     h('div', { class: 'row row-cards' },
       h('div', { class: 'col-lg-5' }, card('Kenari plan & balance', planCard(o), { class: 'h-100' })),
       h('div', { class: 'col-lg-7' }, h('div', { class: 'mb-3' }, card('Requests in the last 24 hours', chart(hours, 24))),
@@ -202,22 +213,168 @@ function setAccountKey() {
     dialogButtons(btn('Save', 'btn-primary', async () => { try { await api('account-key', { method: 'POST', body: { key: f.key } }); closeDialog(); toast('Account key saved'); S.cfg = null; render(); } catch (e) { fail(e); } })));
 }
 
-function chart(series, hours) {
-  const byDay = hours > 72, map = new Map();
-  for (const r of series || []) { const k = byDay ? r.key.slice(0, 10) : r.key.slice(11, 16); const o = map.get(k) || { req: 0, err: 0 }; o.req += r.requests; o.err += r.errors; map.set(k, o); }
-  const pts = [...map.entries()];
-  if (!pts.length) return empty('No traffic in this period.');
-  const W = 600, H = 100, bw = W / pts.length, max = Math.max(1, ...pts.map(([, v]) => v.req));
-  const NS = 'http://www.w3.org/2000/svg', svg = document.createElementNS(NS, 'svg');
-  svg.setAttribute('viewBox', `0 0 ${W} ${H + 14}`); svg.setAttribute('class', 'chart'); svg.setAttribute('preserveAspectRatio', 'none');
-  pts.forEach(([k, v], i) => {
-    const hh = v.req / max * H, r = document.createElementNS(NS, 'rect');
-    r.setAttribute('x', i * bw + 1); r.setAttribute('width', Math.max(1, bw - 2)); r.setAttribute('y', H - hh); r.setAttribute('height', hh); r.setAttribute('rx', 2); if (v.err && v.err / v.req > .2) r.setAttribute('class', 'err');
-    const t = document.createElementNS(NS, 'title'); t.textContent = `${k}: ${v.req} requests, ${v.err} errors`; r.append(t); svg.append(r);
-  });
-  [0, pts.length - 1].forEach(i => { const tx = document.createElementNS(NS, 'text'); tx.setAttribute('x', i === 0 ? 0 : W); tx.setAttribute('y', H + 12); tx.setAttribute('text-anchor', i === 0 ? 'start' : 'end'); tx.textContent = pts[i][0]; svg.append(tx); });
-  return svg;
+// ---------- charts ----------
+// One bar per time bucket, split into succeeded and failed requests.
+// The axis is completed with empty buckets, so a quiet hour reads as zero
+// instead of vanishing; the y axis prints the scale and every bar explains
+// itself in a tooltip.
+const CHARTS = new Set();
+const pad2 = n => String(n).padStart(2, '0');
+
+function niceMax(v) {
+  if (v <= 1) return 1;
+  const mag = 10 ** Math.floor(Math.log10(v)), n = v / mag;
+  return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * mag;
 }
+
+// bucketKey builds the key the store uses: "YYYY-MM-DD", "YYYY-MM-DD HH:00"
+// or "YYYY-MM-DD HH:MM" (all UTC, the store groups in UTC too).
+function bucketKey(d, unit) {
+  const day = `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+  if (unit === 'day') return day;
+  if (unit === 'minute') return `${day} ${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`;
+  return `${day} ${pad2(d.getUTCHours())}:00`;
+}
+
+// chartBuckets groups the rows into buckets and fills the gaps, so the axis
+// covers the whole period even when nothing happened in a bucket. The window
+// matches the server: only whole buckets count, so the first bucket lies
+// fully inside the period.
+function chartBuckets(series, unit, hours) {
+  const map = new Map();
+  for (const r of series || []) {
+    const key = r.key;
+    const o = map.get(key) || { key, req: 0, err: 0, tin: 0, tout: 0, cost: 0 };
+    o.req += r.requests; o.err += r.errors; o.tin += r.in_tok; o.tout += r.out_tok; o.cost += r.cost_idr;
+    map.set(key, o);
+  }
+  const now = new Date(), out = [];
+  const add = key => out.push(map.get(key) || { key, req: 0, err: 0, tin: 0, tout: 0, cost: 0 });
+  const stepMs = unit === 'minute' ? 60000 : unit === 'hour' ? 3600000 : 86400000;
+  const count = unit === 'day' ? Math.ceil(hours / 24) : hours * (unit === 'minute' ? 60 : 1);
+  // the first bucket must lie fully inside the window: round the start up
+  const start = Math.ceil((now.getTime() - hours * 3600000) / stepMs) * stepMs;
+  const end = unit === 'day'
+    ? Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
+    : Math.floor(now.getTime() / stepMs) * stepMs;
+  for (let i = count - 1; i >= 0; i--) add(bucketKey(new Date(end - i * stepMs), unit));
+  // buckets before the window are dropped: the server does the same
+  return out.filter(p => p.key >= bucketKey(new Date(start), unit));
+}
+
+// bucketLabel turns a bucket key into something readable.
+function bucketLabel(key, unit, wide) {
+  if (unit === 'day') return key.slice(8, 10) + '/' + key.slice(5, 7);
+  const hm = key.slice(11);
+  if (unit === 'minute') return hm;
+  return wide ? key.slice(8, 10) + '/' + key.slice(5, 7) + ' ' + hm : hm;
+}
+
+// chartUnit picks the bucket size from the window.
+const chartUnit = hours => (hours <= 6 ? 'minute' : hours <= 72 ? 'hour' : 'day');
+
+function chart(series, hours, o = {}) {
+  const unit = o.unit || chartUnit(hours);
+  const pts = chartBuckets(series, unit, hours);
+  const total = pts.reduce((a, p) => ({ req: a.req + p.req, err: a.err + p.err, cost: a.cost + p.cost }), { req: 0, err: 0, cost: 0 });
+  if (!total.req) return empty('No traffic in this period.');
+  const unitName = { minute: 'minute', hour: 'hour', day: 'day' }[unit];
+  const busiest = pts.reduce((a, p) => p.req > a.req ? p : a, pts[0]);
+  const errPct = total.req ? (total.err / total.req * 100) : 0;
+  const avg = total.req / pts.length;
+  const avgTxt = avg >= 10 ? Math.round(avg) : avg.toFixed(1);
+
+  const wrap = h('div', { class: 'chart-wrap' });
+  const canvas = h('div', { class: 'chart-canvas' });
+  const tip = h('div', { class: 'chart-tip', hidden: true });
+  wrap.append(canvas, tip);
+  const ctl = { wrap, canvas, tip, pts, unit, hours };
+  CHARTS.add(ctl);
+  requestAnimationFrame(() => drawChart(ctl));
+
+  return h('div', {},
+    h('div', { class: 'chart-summary mb-2' },
+      h('span', {}, `${num(total.req)} requests`),
+      h('span', { class: 'mx-1' }, '·'),
+      h('span', { class: errPct > 0 ? 'text-danger' : '' }, `${num(total.err)} failed (${errPct.toFixed(1)}%)`),
+      h('span', { class: 'mx-1' }, '·'),
+      h('span', {}, `busiest ${bucketLabel(busiest.key, unit, hours > 24)} with ${num(busiest.req)}`),
+      h('span', { class: 'mx-1' }, '·'),
+      h('span', {}, `average ${avgTxt} per ${unitName}`)),
+    h('div', { class: 'chart-legend mb-2' },
+      h('span', {}, h('span', { class: 'sw', style: 'background: var(--tblr-primary)' }), 'succeeded'),
+      h('span', {}, h('span', { class: 'sw', style: 'background: var(--tblr-danger)' }), 'failed'),
+      h('span', { class: 'ms-auto' }, `one bar per ${unitName} (UTC)`)),
+    wrap);
+}
+
+function drawChart(ctl) {
+  const pts = ctl.pts, unit = ctl.unit, n = pts.length;
+  const w = Math.max(240, Math.round(ctl.wrap.clientWidth || 640));
+  const padL = 38, padR = 6, padT = 8, padB = 20;
+  const plotH = Math.round(Math.min(200, Math.max(130, w * 0.32)));
+  const W = w, H = plotH + padT + padB, plotW = W - padL - padR;
+  const max = niceMax(Math.max(1, ...pts.map(p => p.req)));
+  const bw = plotW / n, gap = bw > 6 ? 1 : 0;
+  const NS = 'http://www.w3.org/2000/svg', svg = document.createElementNS(NS, 'svg');
+  const mk = (t, attrs) => { const e = document.createElementNS(NS, t); for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v); return e; };
+  svg.setAttribute('width', W); svg.setAttribute('height', H); svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', `Requests per ${unit}: ${pts.reduce((a, p) => a + p.req, 0)} requests, ${pts.reduce((a, p) => a + p.err, 0)} failed, in ${n} ${unit} buckets`);
+
+  [0, 0.5, 1].forEach(f => { // grid lines with the value they stand for
+    const y = padT + plotH - f * plotH;
+    svg.append(mk('line', { x1: padL, x2: W - padR, y1: y, y2: y, class: 'chart-grid' }));
+    const t = mk('text', { x: padL - 6, y, class: 'chart-axis', 'text-anchor': 'end', 'dominant-baseline': 'middle' });
+    t.textContent = num(max * f);
+    svg.append(t);
+  });
+
+  pts.forEach((p, i) => {
+    const x = padL + i * bw, g = mk('g', {});
+    const barX = x + gap, barW = Math.max(1, bw - gap * 2);
+    const ok = Math.max(0, p.req - p.err);
+    const yOk = padT + plotH - ok / max * plotH;
+    if (ok > 0) g.append(mk('rect', { x: barX, y: yOk, width: barW, height: Math.max(1, ok / max * plotH), rx: 2, class: 'chart-bar' }));
+    if (p.err > 0) { // the failed part sits on top of the succeeded one
+      const hErr = Math.max(1, p.err / max * plotH);
+      g.append(mk('rect', { x: barX, y: yOk - hErr, width: barW, height: hErr, rx: 2, class: 'chart-bar err' }));
+    }
+    const hit = mk('rect', { x, y: padT, width: bw, height: plotH, fill: 'transparent' });
+    const show = () => {
+      ctl.tip.replaceChildren(
+        h('div', { class: 'fw-bold' }, bucketLabel(p.key, unit, ctl.hours > 24)),
+        h('div', {}, `${num(p.req)} requests`),
+        h('div', { class: p.err ? 'text-danger' : 'text-secondary' }, `${num(p.err)} failed${p.req ? ' (' + (p.err / p.req * 100).toFixed(0) + '%)' : ''}`),
+        h('div', { class: 'text-secondary' }, `${num(p.tin)} in / ${num(p.tout)} out tokens`),
+        h('div', { class: 'text-secondary' }, 'Rp ' + idr(p.cost)));
+      ctl.tip.hidden = false;
+      // keep the tooltip inside the card: it is centred on the bar
+      const w = ctl.wrap.clientWidth, tw = ctl.tip.offsetWidth;
+      const cx = padL + i * bw + bw / 2;
+      ctl.tip.style.left = Math.max(tw / 2 + 2, Math.min(w - tw / 2 - 2, cx)) + 'px';
+    };
+    hit.addEventListener('mouseenter', show);
+    hit.addEventListener('click', show);
+    hit.addEventListener('mouseleave', () => { ctl.tip.hidden = true; });
+    g.append(hit);
+    svg.append(g);
+  });
+
+  const ticks = new Set([0, n - 1]); // a few labels on the time axis, first and last always
+  const step = Math.max(1, Math.round(n / 5));
+  for (let i = 0; i < n; i += step) ticks.add(i);
+  [...ticks].sort((a, b) => a - b).forEach(i => {
+    const t = mk('text', { x: padL + i * bw + bw / 2, y: H - 5, class: 'chart-axis', 'text-anchor': i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle' });
+    t.textContent = bucketLabel(pts[i].key, unit, ctl.hours > 24);
+    svg.append(t);
+  });
+
+  ctl.canvas.replaceChildren(svg);
+}
+
+// Charts are redrawn on resize so the bars keep their real pixel width.
+window.addEventListener('resize', () => { for (const c of CHARTS) drawChart(c); });
 
 // ---------- Clients ----------
 views.clients = async function () {
@@ -403,7 +560,8 @@ async function showRanking(client, name) {
 views.usage = async function (_, q) {
   const client = q.get('client') || '', dim = q.get('by') || 'preset', hours = +(q.get('h') || 24), filter = q.get('f') || 'all';
   const cq = client ? '&client=' + encodeURIComponent(client) : '';
-  const [o, rows0, series0, reqs0] = await Promise.all([api('overview'), api(`usage?group=${dim}&hours=${hours}${cq}`), api(`usage?group=hour&hours=${hours}${cq}`), api(`requests?limit=200${cq}`)]);
+  const unit = chartUnit(hours); // minute buckets for a short window, hours, then days
+  const [o, rows0, series0, reqs0] = await Promise.all([api('overview'), api(`usage?group=${dim}&hours=${hours}${cq}`), api(`usage?group=${unit}&hours=${hours}${cq}`), api(`requests?limit=200${cq}`)]);
   const rows = rows0 || [], series = series0 || [], reqs = reqs0 || [];
   const t = series.reduce((a, r) => ({ req: a.req + r.requests, err: a.err + r.errors, cost: a.cost + r.cost_idr, tin: a.tin + r.in_tok, tout: a.tout + r.out_tok, lat: a.lat + r.avg_latency_ms * r.requests }), { req: 0, err: 0, cost: 0, tin: 0, tout: 0, lat: 0 });
   const to = patch => { const n = new URLSearchParams(q); for (const [k, v] of Object.entries(patch)) v === '' ? n.delete(k) : n.set(k, v); return 'usage?' + n; };
@@ -415,11 +573,12 @@ views.usage = async function (_, q) {
     seg([[1, '1 h'], [24, '24 h'], [168, '7 d'], [720, '30 d']], hours, v => to({ h: v }))] });
   const DIMS = [['preset', 'Preset'], ['model', 'Model'], ['client', 'Client'], ['upstream', 'Kenari key']];
   return h('div', {},
-    h('div', { class: 'row row-cards mb-3' }, stat('bolt', 'blue', num(t.req), `requests · ${num(t.tin)} in / ${num(t.tout)} out tokens`), stat('alert-triangle', t.err ? 'orange' : 'green', t.req ? (t.err / t.req * 100).toFixed(1) + '%' : '0%', `errors (${num(t.err)})`),
-      stat('clock', 'azure', t.req ? Math.round(t.lat / t.req) + ' ms' : '–', 'average time per request'), stat('coin', 'green', 'Rp ' + idr(t.cost), 'at list price, free and plan included')),
-    h('div', { class: 'mb-3' }, card('Requests over time', chart(series, hours))),
+    statRow([
+      ['bolt', 'blue', num(t.req), `requests · ${num(t.tin)} in / ${num(t.tout)} out tokens`], ['alert-triangle', t.err ? 'orange' : 'green', t.req ? (t.err / t.req * 100).toFixed(1) + '%' : '0%', `failed (${num(t.err)} of ${num(t.req)})`],
+      ['clock', 'azure', t.req ? Math.round(t.lat / t.req) + ' ms' : '–', 'average time per request'], ['coin', 'green', 'Rp ' + idr(t.cost), 'at list price, free and plan included']]),
+    h('div', { class: 'mb-3' }, card('Requests over time', chart(series, hours, { unit }))),
     h('div', { class: 'mb-3' }, card('Breakdown', h('div', {}, h('div', { class: 'mb-3' }, seg(DIMS, dim, v => to({ by: v }))),
-      rows.length ? h('div', { class: 'table-responsive' }, h('table', { class: 'table table-vcenter' }, h('thead', {}, h('tr', {}, [DIMS.find(d => d[0] === dim)[1], 'Requests', '', 'Errors', 'Tokens in / out', 'Avg time', 'Rp at list price'].map(x => h('th', {}, x)))),
+      rows.length ? h('div', { class: 'table-responsive' }, h('table', { class: 'table table-vcenter' }, h('thead', {}, h('tr', {}, [DIMS.find(d => d[0] === dim)[1], 'Requests', '', 'Failed', 'Tokens in / out', 'Avg time', 'Rp at list price'].map(x => h('th', {}, x)))),
         h('tbody', {}, rows.filter(r => r.key).map(r => h('tr', {}, h('td', { class: 'mono' }, dim === 'upstream' ? keyLabel(r.key) : r.key), h('td', {}, num(r.requests)), h('td', { style: 'min-width:90px' }, progress(r.requests, max, true)), h('td', { class: r.errors ? 'text-danger' : 'text-secondary' }, r.errors), h('td', {}, `${num(r.in_tok)} / ${num(r.out_tok)}`), h('td', {}, Math.round(r.avg_latency_ms) + ' ms'), h('td', {}, idr(r.cost_idr))))))) : empty('No traffic in this period.')))),
     card('Recent requests', h('div', {}, h('div', { class: 'mb-3' }, seg([['all', 'All'], ['err', 'Errors only']], filter, v => to({ f: v }))),
       shown.length ? h('div', { class: 'table-responsive' }, h('table', { class: 'table table-sm table-vcenter' }, h('thead', {}, h('tr', {}, ['When', 'Client', 'Asked for', 'Served by', 'Key', 'Result', 'Time', 'Tokens in / out', 'Notes'].map(x => h('th', {}, x)))),

@@ -367,13 +367,33 @@ func (h *Handler) usage(w http.ResponseWriter, r *http.Request) {
 	if g == "" {
 		g = "model"
 	}
-	rows, err := h.a.St.Usage(g, time.Now().Add(-time.Duration(hours)*time.Hour), r.URL.Query().Get("client"))
+	since := time.Now().Add(-time.Duration(hours) * time.Hour)
+	// Only whole buckets count: the first bucket must lie fully inside the
+	// window, so a half hour at the left edge never looks like a full one.
+	switch g {
+	case "day":
+		since = ceilTo(since, 24*time.Hour)
+	case "hour":
+		since = ceilTo(since, time.Hour)
+	case "minute":
+		since = ceilTo(since, time.Minute)
+	}
+	rows, err := h.a.St.Usage(g, since, r.URL.Query().Get("client"))
 	if err != nil {
 		jerr(w, 400, err.Error())
 		return
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Requests > rows[j].Requests })
 	jok(w, rows)
+}
+
+// ceilTo rounds t up to the next multiple of step (UTC aligned).
+func ceilTo(t time.Time, step time.Duration) time.Time {
+	c := t.Truncate(step)
+	if c.Before(t) {
+		c = c.Add(step)
+	}
+	return c
 }
 
 func (h *Handler) requests(w http.ResponseWriter, r *http.Request) {

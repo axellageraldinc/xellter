@@ -295,15 +295,19 @@ type UsageRow struct {
 	OutTok   int64   `json:"out_tok"`
 	Cost     float64 `json:"cost_idr"`
 	AvgLat   float64 `json:"avg_latency_ms"`
+	RTKSaved int64   `json:"rtk_saved"`
 }
 
-// Usage groups requests by client, model, upstream, preset or hour.
+// Usage groups requests by client, model, upstream, preset, hour, minute or day.
 func (s *Store) Usage(group string, since time.Time, client string) ([]UsageRow, error) {
-	col := map[string]string{"client": "client", "model": "model", "upstream": "upstream", "preset": "preset", "hour": "strftime('%Y-%m-%d %H:00', ts/1000, 'unixepoch')"}[group]
+	col := map[string]string{"client": "client", "model": "model", "upstream": "upstream", "preset": "preset",
+		"hour":   "strftime('%Y-%m-%d %H:00', ts/1000, 'unixepoch')",
+		"minute": "strftime('%Y-%m-%d %H:%M', ts/1000, 'unixepoch')",
+		"day":    "strftime('%Y-%m-%d', ts/1000, 'unixepoch')"}[group]
 	if col == "" {
 		return nil, errors.New("bad group")
 	}
-	rows, err := s.db.Query(fmt.Sprintf(`SELECT %s k, COUNT(*), COUNT(*)-SUM(ok), COALESCE(SUM(in_tok),0), COALESCE(SUM(out_tok),0), COALESCE(SUM(cost),0), COALESCE(AVG(latency_ms),0) FROM requests WHERE ts>=? AND (?='' OR client=?) AND substr(client,1,1)!='_' GROUP BY k ORDER BY k`, col), since.UnixMilli(), client, client)
+	rows, err := s.db.Query(fmt.Sprintf(`SELECT %s k, COUNT(*), COUNT(*)-SUM(ok), COALESCE(SUM(in_tok),0), COALESCE(SUM(out_tok),0), COALESCE(SUM(cost),0), COALESCE(AVG(latency_ms),0), COALESCE(SUM(rtk_saved),0) FROM requests WHERE ts>=? AND (?='' OR client=?) AND substr(client,1,1)!='_' GROUP BY k ORDER BY k`, col), since.UnixMilli(), client, client)
 	if err != nil {
 		return nil, err
 	}
@@ -312,7 +316,7 @@ func (s *Store) Usage(group string, since time.Time, client string) ([]UsageRow,
 	for rows.Next() {
 		var u UsageRow
 		var k sql.NullString
-		if err := rows.Scan(&k, &u.Requests, &u.Errors, &u.InTok, &u.OutTok, &u.Cost, &u.AvgLat); err != nil {
+		if err := rows.Scan(&k, &u.Requests, &u.Errors, &u.InTok, &u.OutTok, &u.Cost, &u.AvgLat, &u.RTKSaved); err != nil {
 			return nil, err
 		}
 		u.Key = k.String
