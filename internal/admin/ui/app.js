@@ -59,7 +59,15 @@ function toast(msg, bad) {
 const fail = e => toast(e.message || String(e), true);
 const act = (p, okMsg) => p.then(() => { if (okMsg) toast(okMsg); S.cfg = null; return render(); }, fail);
 
-const idr = n => n == null ? '–' : n === 0 ? '0' : n >= 100 ? Math.round(n).toLocaleString('en-US') : n >= 1 ? n.toFixed(2) : n.toFixed(4);
+// idr formats rupiah: whole rupiah for big amounts, and no trailing zeros
+// on the small ones (Rp 0.132 reads better than Rp 0.1320).
+const idr = n => {
+  if (n == null) return '–';
+  if (n === 0) return '0';
+  if (n >= 100) return Math.round(n).toLocaleString('en-US');
+  const s = (n >= 1 ? n.toFixed(2) : n.toFixed(4)).replace(/0+$/, '');
+  return s.endsWith('.') ? s.slice(0, -1) : s;
+};
 const num = n => (n || 0).toLocaleString('en-US');
 const human = s => s < 90 ? Math.round(s) + ' s' : s < 5400 ? Math.round(s / 60) + ' min' : s < 172800 ? Math.round(s / 3600) + ' h' : Math.round(s / 86400) + ' days';
 const ago = t => human(Math.max(0, (Date.now() - new Date(t)) / 1000));
