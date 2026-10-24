@@ -262,3 +262,39 @@ func TestJEVStopsTheRoundWhenTheJudgeIsDown(t *testing.T) {
 		t.Fatal("candidate answers were requested although the judge is down")
 	}
 }
+
+func TestClientsNeverSeeEachOthersModels(t *testing.T) {
+	e := setup(t, func(c *config.Config) {
+		text := config.DefaultPreset("chat")
+		text.MinQuality, text.Require = 0, config.Require{}
+		for _, n := range []string{"one", "two"} {
+			c.Clients = append(c.Clients, config.Client{Name: n, Enabled: true, KeyHash: proxy.HashKey("xl-" + n), Presets: map[string]config.Preset{"text": text}, Seeded: config.PresetModalities,
+				Keys: []config.Upstream{{Name: "k", KeyEnv: "KEY_" + strings.ToUpper(n), Enabled: true, Tier: "topup", Allow: map[string][]string{"one": {"cheap-b"}, "two": {"pro-c", "promo-d"}}[n]}}})
+		}
+	})
+	for _, n := range []string{"one", "two"} {
+		if err := config.SetSecret(e.a.Cfg().Server.SecretsFile, "KEY_"+strings.ToUpper(n), "secret-"+n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.a.Pool.Reload(e.a.Cfg(), e.a.Secrets(), e.a.St)
+	e.a.Rt.Recompute(time.Now())
+	models := func(client string) []string {
+		rk := e.a.Rt.Rankings()[client+"/text"]
+		if rk == nil {
+			t.Fatalf("no ranking for %s", client)
+		}
+		return rk.Models
+	}
+	if got := models("one"); len(got) != 1 || got[0] != "cheap-b" {
+		t.Fatalf("client one may only see cheap-b, got %v", got)
+	}
+	if got := models("two"); len(got) != 2 {
+		t.Fatalf("client two may only see pro-c and promo-d, got %v", got)
+	}
+	// and the request path agrees: client one cannot reach a model of client two
+	r, _ := e.post(t, "xl-one", "/v1/chat/completions", `{"model":"text","messages":[{"role":"user","content":"hi"}]}`)
+	if r.Header.Get("X-Xellter-Model") != "cheap-b" {
+		t.Fatalf("served by %q", r.Header.Get("X-Xellter-Model"))
+	}
+}

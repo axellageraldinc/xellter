@@ -59,6 +59,7 @@ type Ranking struct {
 	Trial       []Candidate `json:"trial"`      // canary pool (new, unproven)
 	Rejected    []Rejected  `json:"rejected"`
 	Unavailable []string    `json:"unavailable"` // right modality, but no enabled key may call them
+	Models      []string    `json:"models"`      // every model of this kind the client's keys can call, before the preset's own filters
 	Callable    int         `json:"callable"`    // distinct models this client's keys can call for the preset
 	Computed    time.Time   `json:"computed"`
 }
@@ -105,6 +106,17 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 	for _, k := range in.Pool.ClientKeys(cl.Name) {
 		if c := k.Config(); c.Enabled && c.Tier == "plan" {
 			anyPlanKey = true
+		}
+	}
+
+	for _, id := range in.Snap.IDs() { // what the client's keys can call at all; lets the panel offer a tick list
+		if m := in.Snap.Models[id]; m.Endpoint == sh.Modality {
+			for _, k := range in.Pool.ClientKeys(cl.Name) {
+				if k.Config().Enabled && k.Secret != "" && k.AllowedModel(id) {
+					r.Models = append(r.Models, id)
+					break
+				}
+			}
 		}
 	}
 

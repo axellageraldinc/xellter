@@ -327,6 +327,7 @@ function presetCard(client, name, p, r) {
     isChat ? h('div', { class: 'mb-3' }, h('div', { class: 'subheader' }, 'Optimise for'),
       h('div', { class: 'btn-group w-100' }, Object.entries(OBJECTIVES).map(([k, o]) => h('button', { class: 'btn btn-sm ' + (obj === k ? 'btn-primary' : 'btn-outline-primary'), onclick: () => { p.weights = { ...o.w }; p.min_quality = o.q; markDirty(); render(); } }, o.label)), obj === 'custom' && h('button', { class: 'btn btn-sm btn-primary', disabled: true }, 'Custom')),
       obj === 'custom' && h('div', { class: 'form-hint' }, 'Tuned by hand under Advanced. Pick an option to reset it.')) : h('div', { class: 'text-secondary small mb-3' }, 'Cheapest working model first; free models come before paid ones.'),
+    modelPicker(p, r),
     h('div', { class: 'mb-3' }, h('div', { class: 'subheader' }, 'When several models are equally good'),
       h('select', { class: 'form-select form-select-sm', onchange: e => { p.strategy = e.target.value; markDirty(); } }, h('option', { value: 'priority', selected: p.strategy === 'priority' }, 'Always use the best one'), h('option', { value: 'round_robin', selected: p.strategy === 'round_robin' }, 'Take turns between them'))),
     isChat && h('div', { class: 'mb-2' }, h('div', { class: 'subheader' }, 'The model must support'),
@@ -341,6 +342,20 @@ function presetCard(client, name, p, r) {
       btn('Delete this preset', 'btn-outline-danger btn-sm', () => { const cl = S.cfg.clients.find(c => c.name === client); if (confirm(`Delete preset "${name}"? Apps calling it will get an error, and it is not created again.`)) { delete cl.presets[name]; markDirty(); render(); } }, 'trash')));
   return card(h('span', { class: 'd-flex align-items-center gap-2' }, h('span', { class: 'kind-icon' }, icon(ic)), h('span', {}, name, h('div', { class: 'text-secondary small fw-normal' }, `${kind} · ${r ? r.callable : 0} model${r?.callable === 1 ? '' : 's'} available`))), body,
     { actions: btn('Why this order?', 'btn-sm btn-ghost-secondary', () => showRanking(client, name)), class: 'h-100' });
+}
+
+// modelPicker lists every model the client's keys can call for this preset and lets the owner untick the ones it must never use.
+function modelPicker(p, r) {
+  const all = (r && r.models) || [];
+  if (!all.length) return null;
+  p.deny ||= [];
+  const off = id => p.deny.includes(id);
+  const body = h('div', { class: 'pt-2' }, all.map(id => h('label', { class: 'form-check mb-1' },
+    h('input', { class: 'form-check-input', type: 'checkbox', checked: !off(id), onchange: e => { p.deny = e.target.checked ? p.deny.filter(x => x !== id) : [...p.deny, id]; markDirty(); render(); } }),
+    h('span', { class: 'form-check-label mono' }, id, !(r.candidates || []).concat(r.trial || []).some(c => c.model === id) && !off(id) && h('span', { class: 'text-secondary' }, ' · not used right now')))),
+    h('div', { class: 'form-hint' }, 'Unticked models are never used by this preset. New models that appear later are on by default (and start on trial).'));
+  const n = all.filter(id => !off(id)).length;
+  return h('details', { class: 'adv mb-2' }, h('summary', {}, `Models it may use: ${n} of ${all.length}`), body);
 }
 
 function addPreset(cl) {

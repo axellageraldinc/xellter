@@ -211,3 +211,29 @@ func TestUsageCostUsesCacheDiscountAndPlanFreeCache(t *testing.T) {
 		t.Fatal("free cache must lower the cost")
 	}
 }
+
+func TestRankingListsEveryCallableModelAndHonoursDeny(t *testing.T) {
+	f := fixture(chat("a", 100, 300), chat("b", 200, 600), chat("c", 300, 900))
+	f.cfg.Benchmarks = map[string]float64{"a": 70, "b": 70, "c": 70}
+	p := f.cl.Presets["text"]
+	p.Deny = []string{"b"}
+	f.cl.Presets["text"] = p
+	r := f.rank("text", nil)
+	if len(r.Models) != 3 {
+		t.Fatalf("the tick list needs every callable model, denied ones included: %v", r.Models)
+	}
+	for _, c := range r.Candidates {
+		if c.Model == "b" {
+			t.Fatal("a denied model must never be a candidate")
+		}
+	}
+	found := false
+	for _, x := range r.Rejected {
+		if x.Model == "b" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the denial should be explained")
+	}
+}
