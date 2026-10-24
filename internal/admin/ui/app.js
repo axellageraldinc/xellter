@@ -319,9 +319,12 @@ function chart(series, hours, o = {}) {
 function drawChart(ctl) {
   const pts = ctl.pts, unit = ctl.unit, n = pts.length;
   const w = Math.max(240, Math.round(ctl.wrap.clientWidth || 640));
-  const padL = 38, padR = 6, padT = 8, padB = 20;
+  const padL = 38, padT = 8, padB = 20;
   const plotH = Math.round(Math.min(200, Math.max(130, w * 0.32)));
-  const W = w, H = plotH + padT + padB, plotW = W - padL - padR;
+  // the room a time label needs on each side, so the first and the last one
+  // sit centred on their bucket instead of being pulled to the edge
+  const labelPad = 16;
+  const W = w, H = plotH + padT + padB, plotW = Math.max(60, W - padL - labelPad);
   const max = niceMax(Math.max(1, ...pts.map(p => p.req)));
   const bw = plotW / n, gap = bw > 6 ? 1 : 0;
   const NS = 'http://www.w3.org/2000/svg', svg = document.createElementNS(NS, 'svg');
@@ -332,7 +335,7 @@ function drawChart(ctl) {
 
   [0, 0.5, 1].forEach(f => { // grid lines with the value they stand for
     const y = padT + plotH - f * plotH;
-    svg.append(mk('line', { x1: padL, x2: W - padR, y1: y, y2: y, class: 'chart-grid' }));
+    svg.append(mk('line', { x1: padL, x2: padL + plotW, y1: y, y2: y, class: 'chart-grid' }));
     const t = mk('text', { x: padL - 6, y, class: 'chart-axis', 'text-anchor': 'end', 'dominant-baseline': 'middle' });
     t.textContent = num(max * f);
     svg.append(t);
@@ -369,14 +372,15 @@ function drawChart(ctl) {
     svg.append(g);
   });
 
-  // Time axis: the labels are spread evenly over the buckets and as many as
-  // fit are kept. Every label is measured in the DOM, so a crowded axis
-  // thins out instead of overlapping.
+  // Time axis: the labels sit on a regular step of buckets, so the times on
+  // the axis are evenly spaced. Every label is measured in the DOM and the
+  // ones that would touch a label already on the axis are dropped, so a
+  // crowded axis thins out instead of overlapping.
   const made = []; // every time label, so the ones that do not fit can go
   const mkLabel = i => {
-    // the first and last label are pinned to the edge so they cannot hang out
-    const first = i === 0, last = i === n - 1;
-    const t = mk('text', { x: first ? padL : last ? W - padR : padL + i * bw + bw / 2, y: H - 5, class: 'chart-axis', 'text-anchor': first ? 'start' : last ? 'end' : 'middle' });
+    // centred on its bucket: the same anchor everywhere keeps the spacing
+    // between two labels equal to the distance between their buckets
+    const t = mk('text', { x: padL + i * bw + bw / 2, y: H - 5, class: 'chart-axis', 'text-anchor': 'middle' });
     t.textContent = bucketLabel(pts[i].key, unit, ctl.hours > 24);
     svg.append(t);
     made.push(t);
@@ -392,24 +396,18 @@ function drawChart(ctl) {
   // how many labels fit in the plot
   const room = plotW + labelGap;
   const maxLabels = Math.max(2, Math.min(n, Math.floor(room / (labelW + labelGap))));
-  // candidates at a regular bucket step, so the times on the axis are evenly
-  // spaced; the last bucket is always a candidate
-  const step = Math.max(1, Math.round((n - 1) / Math.max(1, maxLabels - 1)));
+  // one regular step in buckets, so the labelled times stay evenly spaced
+  const step = Math.max(1, Math.ceil((n - 1) / (maxLabels - 1)));
   const cand = [];
   for (let i = 0; i < n; i += step) cand.push(i);
-  if (cand[cand.length - 1] !== n - 1) cand.push(n - 1);
   const labs = cand.map(mkLabel);
   const boxes = labs.map(l => boxOf(l.el));
-  const lastBox = boxes[boxes.length - 1];
-  // keep a label only when it clears the last one and the one before it
   const kept = [];
-  for (let i = 0; i < labs.length - 1; i++) {
+  for (let i = 0; i < labs.length; i++) {
     const b = boxes[i];
-    if (!(lastBox.l > b.r + labelGap || lastBox.r < b.l - labelGap)) continue;
     if (kept.length && b.l <= boxes[kept[kept.length - 1]].r + labelGap) continue;
     kept.push(i);
   }
-  kept.push(labs.length - 1);
   const keepSet = new Set(kept.map(i => labs[i].el));
   made.forEach(t => { if (!keepSet.has(t)) t.remove(); });
 }
