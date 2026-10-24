@@ -157,7 +157,6 @@ func (h *Handler) alerts(snap *catalog.Snapshot, clients []clientRow, accts []up
 		active := 0
 		for _, k := range c.Keys {
 			switch {
-			case !k.Enabled:
 			case !k.HasSecret:
 				add("bad", fmt.Sprintf("%s: key \"%s\" has no key value.", c.Name, k.Label), c.Name)
 			case k.CooldownEnd.After(now) || k.BreakerEnd.After(now):
@@ -323,8 +322,9 @@ func envName(client, key string) string {
 func (h *Handler) keys(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Client string `json:"client"`
-		Action string `json:"action"` // add | remove | replace
+		Action string `json:"action"` // add | remove | replace | rename
 		Name   string `json:"name"`
+		New    string `json:"new_name"`
 		Key    string `json:"key"`
 	}
 	if r.Method != http.MethodPost || readJSON(r, &in) != nil {
@@ -332,6 +332,7 @@ func (h *Handler) keys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.Name, in.Key = strings.Join(strings.Fields(in.Name), "-"), strings.TrimSpace(in.Key)
+	in.New = strings.Join(strings.Fields(in.New), "-")
 	next := cloneConfig(h.a.Cfg())
 	var cl *config.Client
 	for i := range next.Clients {
@@ -350,13 +351,46 @@ func (h *Handler) keys(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		env := envName(in.Client, in.Name)
-		cl.Keys = append(cl.Keys, config.Upstream{Name: in.Name, KeyEnv: env, Enabled: true, Tier: "auto"})
+		cl.Keys = append(cl.Keys, config.Upstream{Name: in.Name, KeyEnv: env})
 		if err := config.Normalize(&next); err != nil {
 			jerr(w, 422, err.Error())
 			return
 		}
 		if err := config.SetSecret(next.Server.SecretsFile, env, in.Key); err != nil {
 			jerr(w, 422, err.Error())
+			return
+		}
+	case "rename":
+		// the name of a key is all it has: the secret moves with it.
+		if in.New == "" {
+			jerr(w, 422, "a new name is required")
+			return
+		}
+		for _, k := range cl.Keys {
+			if k.Name == in.New {
+				jerr(w, 422, fmt.Sprintf("this client already has a key named %q", in.New))
+				return
+			}
+		}
+		found := false
+		for i := range cl.Keys {
+			if cl.Keys[i].Name != in.Name {
+				continue
+			}
+			found = true
+			old := cl.Keys[i].KeyEnv
+			env := envName(in.Client, in.New)
+			if secret, ok := h.a.Secrets()[old]; ok {
+				if err := config.SetSecret(next.Server.SecretsFile, env, secret); err != nil {
+					jerr(w, 422, err.Error())
+					return
+				}
+			}
+			_ = config.DeleteSecret(next.Server.SecretsFile, old)
+			cl.Keys[i].Name, cl.Keys[i].KeyEnv = in.New, env
+		}
+		if !found {
+			jerr(w, 404, "no such key")
 			return
 		}
 	case "replace":
@@ -383,7 +417,7 @@ func (h *Handler) keys(w http.ResponseWriter, r *http.Request) {
 		}
 		cl.Keys = kept
 	default:
-		jerr(w, 400, "action must be add, remove or replace")
+		jerr(w, 400, "action must be add, remove, replace or rename")
 		return
 	}
 	if err := h.a.Apply(&next); err != nil {

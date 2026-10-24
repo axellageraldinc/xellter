@@ -29,6 +29,7 @@ type Key struct {
 	mu       sync.Mutex
 	cfg      config.Upstream
 	acct     *Account
+	readOnly bool      // the account key: it reads plan and balance, it never serves requests
 	cooldown time.Time // key unusable until (rejected key)
 	fails    int       // consecutive failures
 	breaker  time.Time
@@ -52,9 +53,8 @@ type Pool struct {
 // NewPool returns an empty pool.
 func NewPool() *Pool { return &Pool{by: map[string]*Key{}, accts: map[string]*Account{}} }
 
-var tierRank = map[string]int{"auto": 0, "free": 1, "topup": 2, "plan": 3}
-
-// DefaultAccount is the account name of keys that do not set one: most people have one kenari account.
+// DefaultAccount is the name of the one kenari account: there is a single
+// account, and the limits kenari applies are per account.
 const DefaultAccount = "main"
 
 // Reload applies a new config; state of keys and accounts with unchanged names
@@ -65,16 +65,17 @@ func (p *Pool) Reload(cfg *config.Config, secrets map[string]string, st *store.S
 	type entry struct {
 		id, client string
 		u          config.Upstream
+		readOnly   bool
 	}
 	var entries []entry
 	for _, cl := range cfg.Clients {
 		for _, u := range cl.Keys {
-			entries = append(entries, entry{cl.Name + "/" + u.Name, cl.Name, u})
+			entries = append(entries, entry{cl.Name + "/" + u.Name, cl.Name, u, false})
 		}
 	}
 	if env := cfg.Kenari.AccountKeyEnv; env != "" && secrets[env] != "" {
-		// the account key only reads plan quota and balance; it is never enabled for requests
-		entries = append(entries, entry{"account", "", config.Upstream{Name: "account", KeyEnv: env, Enabled: false, Tier: "auto", Account: DefaultAccount}})
+		// the account key only reads plan quota and balance; it never serves requests
+		entries = append(entries, entry{"account", "", config.Upstream{Name: "account", KeyEnv: env}, true})
 	}
 	next := make([]*Key, 0, len(entries))
 	by := map[string]*Key{}
@@ -87,33 +88,15 @@ func (p *Pool) Reload(cfg *config.Config, secrets map[string]string, st *store.S
 		if isNew {
 			k = &Key{Name: e.id, blocked: map[string]time.Time{}, blockN: map[string]int{}}
 		}
-		an := u.Account
-		if an == "" {
-			an = DefaultAccount
-		}
-		a := accts[an]
+		// every key belongs to the same kenari account: the limits kenari applies
+		// are per account, and there is only one account.
+		a := accts[DefaultAccount]
 		if a == nil {
-			a = p.accts[an]
+			a = p.accts[DefaultAccount]
 			if a == nil {
-				a = &Account{Name: an}
+				a = &Account{Name: DefaultAccount}
 			}
-			accts[an] = a
-			a.mu.Lock() // recomputed below from every member key
-			a.tier, a.planCfg, a.rpmCfg, a.dailyCfg = "auto", "", 0, 0
-			a.mu.Unlock()
-		}
-		a.mu.Lock()
-		if tierRank[u.Tier] >= tierRank[a.tier] {
-			a.tier = u.Tier
-		}
-		if a.planCfg == "" {
-			a.planCfg = u.Plan
-		}
-		if a.rpmCfg == 0 {
-			a.rpmCfg = u.RPM
-		}
-		if a.dailyCfg == 0 {
-			a.dailyCfg = u.Daily
+			accts[DefaultAccount] = a
 		}
 		if isNew && st != nil {
 			if t, err := st.FreeTimes(e.id, startOfUTCDay(now)); err == nil {
@@ -126,9 +109,8 @@ func (p *Pool) Reload(cfg *config.Config, secrets map[string]string, st *store.S
 				a.spend = append(a.spend, sp...)
 			}
 		}
-		a.mu.Unlock()
 		k.mu.Lock()
-		k.cfg, k.Secret, k.acct, k.Label, k.Client = u, secrets[u.KeyEnv], a, u.Name, e.client
+		k.cfg, k.Secret, k.acct, k.Label, k.Client, k.readOnly = u, secrets[u.KeyEnv], a, u.Name, e.client, e.readOnly
 		k.mu.Unlock()
 		next = append(next, k)
 		by[e.id] = k
@@ -197,6 +179,14 @@ func (k *Key) Config() config.Upstream {
 	return k.cfg
 }
 
+// ReadOnly reports whether the key is the dashboard's own account key: it
+// reads plan and balance and never serves client traffic.
+func (k *Key) ReadOnly() bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.readOnly
+}
+
 // Account returns the key's account.
 func (k *Key) Account() *Account {
 	k.mu.Lock()
@@ -212,7 +202,8 @@ func prune(ts []int64, cut int64) []int64 {
 	return ts[i:]
 }
 
-// AllowedModel reports whether config / learned lists permit the model.
+// AllowedModel reports whether the learned list permits the model. The list
+// comes from kenari itself (a probe or a 400 answer); it is never configured.
 func (k *Key) AllowedModel(id string) bool {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -220,9 +211,6 @@ func (k *Key) AllowedModel(id string) bool {
 }
 
 func (k *Key) allowed(id string) bool {
-	if len(k.cfg.Allow) > 0 && !config.MatchAny(k.cfg.Allow, id) {
-		return false
-	}
 	if k.learned != nil {
 		_, ok := k.learned[id]
 		return ok
@@ -281,8 +269,6 @@ func (k *Key) Check(m *catalog.Model, snap *catalog.Snapshot, now time.Time) str
 
 func (k *Key) check(m *catalog.Model, now time.Time) string {
 	switch {
-	case !k.cfg.Enabled:
-		return Disabled
 	case k.Secret == "":
 		return NoSecret
 	case now.Before(k.cooldown):
@@ -298,8 +284,9 @@ func (k *Key) check(m *catalog.Model, now time.Time) string {
 	return OK
 }
 
-// ReserveSystem is Reserve for the system key: it ignores the "enabled" switch (the account key is never
-// enabled for client traffic) but still honours cooldowns and the account-wide limits.
+// ReserveSystem is Reserve for the system key: it ignores the read-only flag
+// (the account key never serves client traffic) but still honours cooldowns
+// and the account-wide limits.
 func (k *Key) ReserveSystem(m *catalog.Model, snap *catalog.Snapshot, now time.Time) string {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -547,7 +534,6 @@ type Status struct {
 	Client       string    `json:"client"`
 	Account      string    `json:"account"`
 	Tier         string    `json:"tier"`
-	Enabled      bool      `json:"enabled"`
 	HasSecret    bool      `json:"has_secret"`
 	CooldownEnd  time.Time `json:"cooldown_until"`
 	BreakerEnd   time.Time `json:"breaker_until"`
@@ -562,7 +548,7 @@ type Status struct {
 func (k *Key) Status(now time.Time) Status {
 	k.mu.Lock()
 	a := k.acct
-	st := Status{Name: k.Name, Label: k.Label, Client: k.Client, Account: a.Name, Tier: k.cfg.Tier, Enabled: k.cfg.Enabled, HasSecret: k.Secret != "", CooldownEnd: k.cooldown, BreakerEnd: k.breaker, LastError: k.lastErr, LastOK: k.lastOK}
+	st := Status{Name: k.Name, Label: k.Label, Client: k.Client, Account: a.Name, Tier: a.tier(now), HasSecret: k.Secret != "", CooldownEnd: k.cooldown, BreakerEnd: k.breaker, LastError: k.lastErr, LastOK: k.lastOK}
 	for m, until := range k.blocked {
 		if now.Before(until) {
 			st.Blocked = append(st.Blocked, m)

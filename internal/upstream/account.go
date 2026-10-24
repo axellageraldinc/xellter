@@ -35,10 +35,6 @@ type Account struct {
 	Name string
 
 	mu             sync.Mutex
-	tier           string
-	planCfg        string
-	rpmCfg         int
-	dailyCfg       int
 	spend          []store.TimedCost // estimated plan-billed spend at catalog prices
 	rpm            []int64           // request times (ms), last minute
 	free           []int64           // free-model request times (ms) since 00:00 UTC
@@ -94,38 +90,40 @@ func (a *Account) QuotaKey() string {
 	return a.infoKey
 }
 
-// effTier is "plan" when kenari reports an active plan, otherwise the configured tier.
-func (a *Account) effTier(now time.Time) string {
-	if a.info != nil && now.Sub(a.info.Fetched) < infoFresh {
+// Tier is the account's effective tier: "plan" when kenari reports a plan,
+// "topup" when the balance is above kenari's threshold, else "free". There is
+// no configured tier (ADR 0012).
+func (a *Account) Tier(now time.Time) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.tier(now)
+}
+
+func (a *Account) tier(now time.Time) string {
+	if a.info != nil {
 		if a.info.Name != "" {
-			return "plan"
+			return "plan" // a plan was reported; it lasts until kenari says otherwise
 		}
-		if a.tier == "plan" || a.tier == "auto" {
+		if now.Sub(a.info.Fetched) < infoFresh {
 			return "free" // kenari says there is no plan any more
 		}
 	}
-	if a.tier == "auto" { // nothing read from kenari: infer from what we know
-		switch {
-		case a.planCfg != "":
-			return "plan"
-		case a.balanceAt.After(time.Time{}) && a.balanceIDR >= a.topupThreshold:
-			return "topup"
-		}
-		return "free"
+	if a.balanceAt.After(time.Time{}) && a.balanceIDR >= a.topupThreshold {
+		return "topup"
 	}
-	return a.tier
+	return "free"
 }
 
 func (a *Account) planName(now time.Time) string {
-	if a.info != nil && now.Sub(a.info.Fetched) < infoFresh && a.info.Name != "" {
+	if a.info != nil && a.info.Name != "" {
 		return a.info.Name
 	}
-	return a.planCfg
+	return ""
 }
 
 func (a *Account) limits(t catalog.FreeTier, now time.Time) (rpm, daily int) {
 	var tl catalog.TierLimit
-	switch a.effTier(now) {
+	switch a.tier(now) {
 	case "plan":
 		tl = t.Plan
 	case "topup":
@@ -133,21 +131,11 @@ func (a *Account) limits(t catalog.FreeTier, now time.Time) (rpm, daily int) {
 	default:
 		tl = t.Free
 	}
-	rpm, daily = tl.RPM, tl.Daily
-	if a.rpmCfg > 0 {
-		rpm = a.rpmCfg
-	}
-	switch {
-	case a.dailyCfg > 0:
-		daily = a.dailyCfg
-	case a.dailyCfg < 0:
-		daily = 0
-	}
-	return
+	return tl.RPM, tl.Daily
 }
 
 func (a *Account) inScope(m *catalog.Model, snap *catalog.Snapshot, now time.Time) bool {
-	if a.effTier(now) != "plan" {
+	if a.tier(now) != "plan" {
 		return false
 	}
 	pl := snap.Plan(a.planName(now))
@@ -181,6 +169,9 @@ func (a *Account) spentSince(t, now time.Time) float64 {
 	return v
 }
 
+// covered reports whether the model is paid for by the account's plan right
+// now. The plan is only known when kenari reported it; the numbers come from
+// kenari, and our own estimate of the spend since then ages them.
 func (a *Account) covered(m *catalog.Model, snap *catalog.Snapshot, now time.Time) bool {
 	if now.Before(a.planBlocked) || !a.inScope(m, snap, now) {
 		return false
@@ -196,6 +187,9 @@ func (a *Account) covered(m *catalog.Model, snap *catalog.Snapshot, now time.Tim
 		return true
 	}
 	pl := snap.Plan(a.planName(now))
+	if pl == nil {
+		return false
+	}
 	s5, sw, sm := a.sums(now)
 	return !(over(s5, pl.Budget5h) || over(sw, pl.BudgetWeek) || over(sm, pl.BudgetMon))
 }
@@ -278,7 +272,7 @@ func (a *Account) Status(snap *catalog.Snapshot, now time.Time) AccountStatus {
 	rpm, daily := a.limits(snap.Tier, now)
 	a.rpm = prune(a.rpm, now.Add(-time.Minute).UnixMilli())
 	a.free = prune(a.free, startOfUTCDay(now).UnixMilli())
-	st := AccountStatus{Name: a.Name, Tier: a.effTier(now), Plan: a.planName(now), PlanSource: "configured", QuotaKey: a.infoKey,
+	st := AccountStatus{Name: a.Name, Tier: a.tier(now), Plan: a.planName(now), PlanSource: "detected", QuotaKey: a.infoKey,
 		RPMLimit: rpm, RPMUsed: len(a.rpm), DailyLimit: daily, DailyUsed: len(a.free), BalanceIDR: a.balanceIDR, BalanceAt: a.balanceAt,
 		Cooldown: a.cooldown, PlanBlocked: a.planBlocked}
 	st.FreeBlocked = a.freeDailyUntil

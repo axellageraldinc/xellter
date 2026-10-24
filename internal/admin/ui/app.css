@@ -9,6 +9,10 @@ body { font-feature-settings: "cv11", "ss01"; letter-spacing: -.005em; }
 .side-foot .btn { gap: .6rem; }
 .icon { width: 1.15rem; height: 1.15rem; flex: none; }
 .icon-lg { width: 1.5rem; height: 1.5rem; }
+/* An icon-only button is a square: the icon sits in the middle, so a row of
+   them (rename, replace, delete) lines up and the icons do not wobble. */
+.btn.icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 2rem; height: 2rem; padding: 0; flex: none; }
+.btn.icon-btn .icon { display: block; margin: 0; }
 .page-body { margin-top: .5rem; padding-bottom: 5rem; }
 .head-row { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; }
 .head-row > .head-main { flex: 1 1 18rem; min-width: 0; }

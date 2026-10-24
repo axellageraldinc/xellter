@@ -53,6 +53,7 @@ The response header `X-Xellter-Model` tells which real model answered.
 | [docs/operations.md](docs/operations.md) | deploy, Tailscale, runbook, security model |
 | [docs/plan.md](docs/plan.md) | phases and deliverables |
 | [docs/adr/](docs/adr/) | architecture decision records |
+| [skills/xellter/SKILL.md](skills/xellter/SKILL.md) | how to change xellter (for LLM agents) |
 | [AGENTS.md](AGENTS.md) | rules for AI coding agents working on this repo |
 
 ## Develop

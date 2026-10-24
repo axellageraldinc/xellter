@@ -265,7 +265,7 @@ func TestAdminKeysAndOverview(t *testing.T) {
 	for _, k := range ae.a.Cfg().Clients[0].Keys {
 		if k.Name == "spare-key" {
 			found = true
-			if k.KeyEnv != "KENARI_KEY_BABU_SPARE_KEY" || k.Tier != "auto" || !k.Enabled {
+			if k.KeyEnv != "KENARI_KEY_BABU_SPARE_KEY" {
 				t.Fatalf("defaults wrong: %+v", k)
 			}
 		}

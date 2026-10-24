@@ -19,21 +19,39 @@ func snap() *catalog.Snapshot {
 	}
 }
 
+// snapWithFree limits the free tier to the given numbers, so a test can leave
+// the per-minute limit out of the way.
+func snapWithFree(rpm, daily int) *catalog.Snapshot {
+	s := snap()
+	s.Tier.Free = catalog.TierLimit{RPM: rpm, Daily: daily}
+	return s
+}
+
 func key(t *testing.T, u config.Upstream) *Key {
 	cfg := config.Default()
-	u.Enabled = true
 	cfg.Clients = []config.Client{{Name: "c", Enabled: true, Keys: []config.Upstream{u}}}
 	p := NewPool()
 	p.Reload(cfg, map[string]string{u.KeyEnv: "secret"}, nil)
 	return p.Keys()[0]
 }
 
+// planKey returns a key whose account is known to have the "Indie" plan, as
+// xellter sees it after reading the quota from kenari. The weekly window holds
+// 1000 Rp.
+func planKey(t *testing.T, u config.Upstream) *Key {
+	k := key(t, u)
+	k.Account().SetInfo(&PlanInfo{Name: "Indie", Windows: map[string]Window{
+		"week": {BudgetRP: 1000, UsedRP: 0, ResetsAt: now.Add(7 * 24 * time.Hour)},
+	}, Fetched: now}, k.Name)
+	return k
+}
+
 var res = config.Resilience{CooldownBaseSec: 30, CooldownMaxSec: 900, BreakerFailures: 3, BreakerOpenSec: 120}
 
 func TestRPMAndDailyFreeLimits(t *testing.T) {
-	k := key(t, config.Upstream{Name: "k", KeyEnv: "K", Tier: "free"})
+	k := key(t, config.Upstream{Name: "k", KeyEnv: "K"})
 	free := &catalog.Model{ID: "f:free", Free: true}
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if r := k.Reserve(free, snap(), now); r != OK {
 			t.Fatalf("request %d: %s", i, r)
 		}
@@ -45,26 +63,27 @@ func TestRPMAndDailyFreeLimits(t *testing.T) {
 		t.Fatalf("after the minute: %q", r)
 	}
 	// daily: 50 free requests per rolling day on the free tier
-	k2 := key(t, config.Upstream{Name: "k2", KeyEnv: "K", Tier: "free", RPM: 1000})
-	for i := 0; i < 50; i++ {
-		if r := k2.Reserve(free, snap(), now.Add(time.Duration(i)*time.Second)); r != OK {
+	k2 := key(t, config.Upstream{Name: "k2", KeyEnv: "K"})
+	s2 := snapWithFree(1000, 50)
+	for i := range 50 {
+		if r := k2.Reserve(free, s2, now.Add(time.Duration(i)*time.Second)); r != OK {
 			t.Fatalf("daily %d: %s", i, r)
 		}
 	}
-	if r := k2.Reserve(free, snap(), now.Add(time.Hour)); r != DailyLimit {
+	if r := k2.Reserve(free, s2, now.Add(time.Hour)); r != DailyLimit {
 		t.Fatalf("51st free request: %q", r)
 	}
 	paid := &catalog.Model{ID: "p", InIDR: 1}
-	if r := k2.Reserve(paid, snap(), now.Add(time.Hour)); r != OK {
+	if r := k2.Reserve(paid, s2, now.Add(time.Hour)); r != OK {
 		t.Fatalf("daily free quota must not block paid models: %q", r)
 	}
-	if r := k2.Reserve(free, snap(), now.Add(25*time.Hour)); r != OK {
+	if r := k2.Reserve(free, s2, now.Add(25*time.Hour)); r != OK {
 		t.Fatalf("window must roll: %q", r)
 	}
 }
 
 func TestPlanCoverageAndBudgetExhaustion(t *testing.T) {
-	k := key(t, config.Upstream{Name: "k", KeyEnv: "K", Tier: "plan", Plan: "Indie"})
+	k := planKey(t, config.Upstream{Name: "k", KeyEnv: "K"})
 	in := &catalog.Model{ID: "plan-a", InIDR: 1}
 	out := &catalog.Model{ID: "other", InIDR: 1}
 	if !k.Covered(in, snap(), now) || k.Covered(out, snap(), now) {
@@ -73,17 +92,17 @@ func TestPlanCoverageAndBudgetExhaustion(t *testing.T) {
 	if !k.FreeCache(in, snap(), now) || k.FreeCache(&catalog.Model{ID: "plan-b"}, snap(), now) {
 		t.Fatal("free-cache wrong")
 	}
-	k.RecordSpend(now.Add(-time.Hour), 980) // weekly budget is 1000, 97% threshold
-	if k.Covered(in, snap(), now) {
+	k.RecordSpend(now.Add(time.Minute), 980) // weekly budget is 1000, 97% threshold
+	if k.Covered(in, snap(), now.Add(2*time.Minute)) {
 		t.Fatal("exhausted weekly budget must uncover plan models")
 	}
 	if !k.Covered(in, snap(), now.Add(8*24*time.Hour)) {
-		t.Fatal("budget must recover when old spend leaves the window")
+		t.Fatal("budget must recover when the window has reset")
 	}
 }
 
 func TestFailureClassification(t *testing.T) {
-	k := key(t, config.Upstream{Name: "k", KeyEnv: "K", Tier: "plan", Plan: "Indie"})
+	k := planKey(t, config.Upstream{Name: "k", KeyEnv: "K"})
 	m := &catalog.Model{ID: "plan-a", InIDR: 1}
 	s := snap()
 
@@ -120,7 +139,7 @@ func TestFailureClassification(t *testing.T) {
 }
 
 func TestBlockBackoffGrowsAndSuccessResets(t *testing.T) {
-	k := key(t, config.Upstream{Name: "k", KeyEnv: "K", Tier: "free"})
+	k := key(t, config.Upstream{Name: "k", KeyEnv: "K"})
 	m := &catalog.Model{ID: "x", InIDR: 1}
 	k.Failure("x", 500, nil, 0, res, now)
 	if k.Check(m, snap(), now.Add(10*time.Second)) != Blocked || k.Check(m, snap(), now.Add(31*time.Second)) != OK {
@@ -136,7 +155,7 @@ func TestBlockBackoffGrowsAndSuccessResets(t *testing.T) {
 	}
 }
 
-func TestSeededFromStoreAndConfigAllowList(t *testing.T) {
+func TestSeededFromStoreAndLearnedAllowList(t *testing.T) {
 	st, err := store.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -145,14 +164,20 @@ func TestSeededFromStoreAndConfigAllowList(t *testing.T) {
 	st.Log(store.Request{TS: time.Now().UnixMilli(), Upstream: "c/k", Model: "f:free", OK: true, Billing: "free"})
 	st.Flush()
 	cfg := config.Default()
-	cfg.Clients = []config.Client{{Name: "c", Enabled: true, Keys: []config.Upstream{{Name: "k", KeyEnv: "K", Enabled: true, Tier: "free", Allow: []string{"deepseek-*"}}}}}
+	cfg.Clients = []config.Client{{Name: "c", Enabled: true, Keys: []config.Upstream{{Name: "k", KeyEnv: "K"}}}}
 	p := NewPool()
 	p.Reload(cfg, map[string]string{"K": "s"}, st)
 	k := p.Keys()[0]
 	if k.Account().Status(snap(), time.Now()).DailyUsed != 1 {
 		t.Fatal("counters must be rebuilt from the request log after a restart")
 	}
+	// the allow list comes from kenari (a probe or a 400 answer), never from the config
+	k.SetAllowed([]string{"deepseek-v4"})
 	if k.AllowedModel("glm-5") || !k.AllowedModel("deepseek-v4") {
-		t.Fatal("config allow globs ignored")
+		t.Fatal("learned allow list ignored")
+	}
+	k.SetAllowed(nil)
+	if !k.AllowedModel("glm-5") {
+		t.Fatal("an unrestricted key may call every model")
 	}
 }

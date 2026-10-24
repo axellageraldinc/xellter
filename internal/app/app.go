@@ -141,7 +141,7 @@ func (a *App) ProbeKeys(ctx context.Context) {
 		if k.Secret == "" {
 			continue
 		}
-		if !k.Config().Enabled { // read-only account key: used for plan and balance, never for requests
+		if k.ReadOnly() { // read-only account key: used for plan and balance, never for requests
 			a.readAccount(ctx, k)
 			continue
 		}
@@ -197,7 +197,7 @@ func (a *App) seedPresets() {
 		keys := a.Pool.ClientKeys(cl.Name)
 		ready := len(keys) > 0
 		for _, k := range keys {
-			if k.Config().Enabled && k.Secret != "" && !k.Probed() {
+			if k.Secret != "" && !k.Probed() {
 				ready = false
 			}
 		}
@@ -258,7 +258,7 @@ func kindAvailable(snap *catalog.Snapshot, keys []*upstream.Key, kind string) bo
 			continue
 		}
 		for _, k := range keys {
-			if k.Config().Enabled && k.Secret != "" && k.AllowedModel(id) {
+			if k.Secret != "" && k.AllowedModel(id) {
 				return true
 			}
 		}

@@ -31,7 +31,9 @@ function icon(name, cls = '') {
   s.innerHTML = ICONS[name] || ''; // static markup from icons.js
   return s;
 }
-const iconBtn = (title, ic, onclick, off) => h('button', { class: 'btn btn-sm btn-ghost-secondary px-1 flex-shrink-0', title, 'aria-label': title, onclick, disabled: off }, icon(ic));
+// iconBtn is a square, icon-only button: the icon sits in the middle of the
+// button, so a row of them (replace, rename, delete) lines up exactly.
+const iconBtn = (title, ic, onclick, cls = 'btn-ghost-secondary', off) => h('button', { class: `btn btn-sm icon-btn ${cls}`, title, 'aria-label': title, onclick, disabled: off }, icon(ic));
 const btn = (label, cls, onclick, ic) => h('button', { class: 'btn ' + cls, onclick }, ic && icon(ic, label ? 'me-1' : ''), label);
 
 async function api(path, opt = {}, retried) {
@@ -116,10 +118,7 @@ function field(obj, key, o = {}) {
     input = h('input', { class: 'form-check-input', type: 'checkbox', onchange: e => set(e.target.checked) }); input.checked = !!obj[key];
     return h('label', { class: 'form-check form-switch mb-2' }, input, h('span', { class: 'form-check-label' }, label), o.help && h('div', { class: 'form-hint' }, o.help));
   }
-  if (type === 'optswitch') {
-    input = h('select', { class: 'form-select', onchange: e => { obj[key] = e.target.value === '' ? null : e.target.value === 'true'; markDirty(); } }, h('option', { value: '' }, 'Same as global'), h('option', { value: 'true' }, 'On'), h('option', { value: 'false' }, 'Off'));
-    input.value = obj[key] == null ? '' : String(obj[key]);
-  } else if (type === 'select') {
+  if (type === 'select') {
     input = h('select', { class: 'form-select', onchange: e => set(o.cast ? o.cast(e.target.value) : e.target.value) }, o.opts.map(x => h('option', { value: Array.isArray(x) ? x[0] : x }, Array.isArray(x) ? x[1] : x)));
     const cur = String(obj[key] ?? (Array.isArray(o.opts[0]) ? o.opts[0][0] : o.opts[0]));
     if (![...input.options].some(x => x.value === cur)) input.append(h('option', { value: cur }, o.custom ? o.custom(cur) : cur));
@@ -455,16 +454,15 @@ views.client = async function (name) {
   setHead({ crumbs: [h('a', { class: 'clickable', onclick: () => go('clients') }, 'Clients'), ' / ', name], title: [name, ' ', !cl.enabled && badge('disabled', 'red')],
     sub: `${pl(row.keys.length, 'kenari key')} · ${pl(Object.keys(cl.presets).length, 'preset')} · xellter key ${cl.key_hint || ''}`,
     actions: [btn('Usage', 'btn-outline-secondary', () => go('usage?client=' + encodeURIComponent(name)), 'chart-bar'), btn('New xellter key', 'btn-outline-secondary', () => { if (confirm(`Create a new key for ${name}? The old key stops working at once.`)) rotateKey(name); }, 'refresh'),
-      btn('', 'btn-outline-danger', () => { if (confirm(`Delete client ${name} and its kenari keys from xellter?`)) act(api('clients', { method: 'POST', body: { action: 'delete', name } }).then(() => { location.hash = '#/clients'; }), 'Client deleted'); }, 'trash')] });
+      iconBtn('Delete client', 'trash', () => { if (confirm(`Delete client ${name} and its kenari keys from xellter?`)) act(api('clients', { method: 'POST', body: { action: 'delete', name } }).then(() => { location.hash = '#/clients'; }), 'Client deleted'); }, 'btn-outline-danger')] });
 
   const keyRows = row.keys.map(k => {
-    const u = cl.keys.find(x => x.name === k.label) || {};
     const paused = (!zero(k.cooldown_until) && left(k.cooldown_until)) || (!zero(k.breaker_until) && left(k.breaker_until));
-    const st = !k.enabled ? ['secondary', 'Off'] : !k.has_secret ? ['red', 'No key value'] : paused ? ['orange', 'Paused ' + paused] : ['green', 'Ready'];
+    const st = !k.has_secret ? ['red', 'No key value'] : paused ? ['orange', 'Paused ' + paused] : ['green', 'Ready'];
     return h('tr', {}, h('td', {}, h('strong', {}, k.label), k.last_error && h('div', { class: 'text-danger small' }, k.last_error)),
       h('td', {}, dot(st[0]), st[1]), h('td', {}, k.learned_allow?.length ? h('span', { title: k.learned_allow.join(', ') }, `${k.learned_allow.length} model${k.learned_allow.length === 1 ? '' : 's'}`) : 'All models'),
-      h('td', { class: 'text-end nowrap' }, iconBtn('Settings', 'adjustments-horizontal', () => keySettings(u)), iconBtn('Replace key', 'key', () => replaceKey(name, k.label)),
-        iconBtn('Remove key', 'trash', () => { if (confirm(`Remove key "${k.label}" from ${name}? It stays valid at kenari.`)) act(api('keys', { method: 'POST', body: { client: name, action: 'remove', name: k.label } }), 'Key removed'); })));
+      h('td', { class: 'text-end nowrap' }, iconBtn('Rename key', 'pencil', () => renameKey(name, k.label)), iconBtn('Replace key', 'key', () => replaceKey(name, k.label)),
+        iconBtn('Remove key', 'trash', () => { if (confirm(`Remove key "${k.label}" from ${name}? It stays valid at kenari.`)) act(api('keys', { method: 'POST', body: { client: name, action: 'remove', name: k.label } }), 'Key removed'); }, 'btn-ghost-danger')));
   });
   const presets = Object.keys(cl.presets).sort((a, b) => presetSort(cl.presets[a], a).localeCompare(presetSort(cl.presets[b], b)));
   return h('div', {},
@@ -473,9 +471,7 @@ views.client = async function (name) {
       { flush: true, actions: btn('Add key', 'btn-primary btn-sm', () => addKey(name), 'plus') })),
     h('div', { class: 'd-flex align-items-center mb-1' }, h('h3', { class: 'mb-0 me-auto' }, 'Presets'), btn('Add preset', 'btn-outline-primary btn-sm', () => addPreset(cl), 'plus')),
     h('p', { class: 'text-secondary' }, 'Created automatically from the models this client\'s keys can call, duplicates merged. The app uses a preset name as the model, for example "text"; for every request xellter picks the best model behind it right now.'),
-    presets.length ? h('div', { class: 'row row-cards mb-3' }, presets.map(n => h('div', { class: 'col-lg-6' }, presetCard(name, n, cl.presets[n], rk[n])))) : empty('Presets appear here once a key has been added and checked.'),
-    card('Client settings', h('div', {}, cols(field(cl, 'enabled', { type: 'switch', label: 'Allowed to call xellter' }), field(cl, 'daily_budget_idr', { type: 'num', label: 'Daily spending limit (Rp, 0 = none)', help: 'counted at list price, free and plan traffic included' }), field(cl, 'note', { label: 'Note' })),
-      advanced(cols(field(cl, 'rtk', { type: 'optswitch', label: 'Token saver (RTK)' }), field(cl, 'passthrough', { type: 'list', label: 'Real models the app may also call directly', ph: 'e.g. deepseek-v4-1-flash', help: 'normally empty: apps should call presets' }))))));
+    presets.length ? h('div', { class: 'row row-cards mb-3' }, presets.map(n => h('div', { class: 'col-lg-6' }, presetCard(name, n, cl.presets[n], rk[n])))) : empty('Presets appear here once a key has been added and checked.'));
 };
 
 async function rotateKey(name) {
@@ -493,14 +489,17 @@ function replaceKey(client, name) {
   dialog(h('h3', {}, `Replace key "${name}"`), h('div', { class: 'mb-3' }, h('label', { class: 'form-label' }, 'New API key'), h('input', { class: 'form-control', type: 'password', autocomplete: 'off', oninput: e => f.key = e.target.value })),
     dialogButtons(btn('Replace', 'btn-primary', async () => { try { await api('keys', { method: 'POST', body: { client, action: 'replace', name, key: f.key } }); closeDialog(); toast('Key replaced'); render(); } catch (e) { fail(e); } })));
 }
-function keySettings(u) {
-  dialog(h('h3', {}, `Key "${u.name}"`), h('p', { class: 'text-secondary' }, 'Most keys need nothing here. xellter detects the account, plan and limits by itself.'),
-    cols(field(u, 'enabled', { type: 'switch', label: 'Use this key for requests' }), field(u, 'account', { label: 'Kenari account', ph: 'main', help: 'keys of one account share its limits; change only with several accounts' }),
-      field(u, 'tier', { type: 'select', label: 'Account tier', opts: [['auto', 'Detect'], ['free', 'Free'], ['topup', 'Topped up'], ['plan', 'Has a plan']] }), field(u, 'plan', { label: 'Plan name', help: 'only needed without an account key, when the tier is "Has a plan"' }),
-      field(u, 'rpm', { type: 'num', label: 'Requests per minute (0 = kenari default)' }), field(u, 'daily_free', { type: 'num', label: 'Free requests per day (0 = default, -1 = unlimited)' }),
-      field(u, 'allow', { type: 'list', label: 'Only use these models', ph: 'normally detected automatically' }), field(u, 'note', { label: 'Note' })),
-    dialogButtons(btn('Save', 'btn-primary', async () => { S.saving = true; closeDialog(); await saveCfg(); S.saving = false; })));
-  $('#dlg').addEventListener('close', () => { if (S.dirty && !S.saving) { S.cfg = null; S.dirty = false; $('#savebar').hidden = true; render(); } }, { once: true });
+// renameKey edits the only thing a key has besides its value: its name.
+function renameKey(client, name) {
+  const f = { name };
+  dialog(h('h3', {}, `Rename key "${name}"`), h('p', { class: 'text-secondary' }, 'The name is how you recognise the key here. xellter detects everything else (account, plan, limits) by itself.'),
+    h('div', { class: 'mb-3' }, h('label', { class: 'form-label' }, 'Name'), h('input', { class: 'form-control', value: name, oninput: e => f.name = e.target.value })),
+    dialogButtons(btn('Save', 'btn-primary', async () => {
+      try {
+        await api('keys', { method: 'POST', body: { client, action: 'rename', name, new_name: f.name } });
+        closeDialog(); toast('Key renamed'); S.cfg = null; render();
+      } catch (e) { fail(e); }
+    })));
 }
 
 // ---------- Presets ----------
@@ -530,36 +529,13 @@ function presetCard(client, name, p, r) {
       r?.trial?.length ? h('div', { class: 'text-secondary small mt-1' }, `${r.trial.length} new model${r.trial.length === 1 ? '' : 's'} on trial`) : null),
     h('div', { class: 'mb-3' }, h('div', { class: 'subheader' }, 'Optimise for'),
       h('div', { class: 'btn-group w-100' }, Object.entries(objectivesFor(p)).map(([k, o]) => h('button', { class: 'btn btn-sm ' + (obj === k ? 'btn-primary' : 'btn-outline-primary'), onclick: () => { p.weights = { ...o.w }; p.min_quality = o.q; markDirty(); render(); } }, o.label)), obj === 'custom' && h('button', { class: 'btn btn-sm btn-primary', disabled: true }, 'Custom')),
-      h('div', { class: 'form-hint' }, obj === 'custom' ? 'Tuned by hand under Advanced. Pick an option to reset it.' : isChat ? 'Cheapest: lowest price among models that are good enough. Balanced: best quality for the price. Best quality: the strongest model, price matters little.' : 'Quality comes from the Arena leaderboard when the model is listed there, otherwise it is estimated from price.')),
-    modelPicker(p, r),
+      h('div', { class: 'form-hint' }, obj === 'custom' ? 'Tuned by hand. Pick an option to reset it.' : isChat ? 'Cheapest: lowest price among models that are good enough. Balanced: best quality for the price. Best quality: the strongest model, price matters little.' : 'Quality comes from the Arena leaderboard when the model is listed there, otherwise it is estimated from price.')),
     h('div', { class: 'mb-3' }, h('div', { class: 'subheader' }, 'When several models are equally good'),
       h('select', { class: 'form-select form-select-sm', onchange: e => { p.strategy = e.target.value; markDirty(); } }, h('option', { value: 'priority', selected: p.strategy === 'priority' }, 'Always use the best one'), h('option', { value: 'round_robin', selected: p.strategy === 'round_robin' }, 'Take turns between them'))),
     isChat && h('div', { class: 'mb-2' }, h('div', { class: 'subheader' }, 'The model must support'),
-      field(p.require, 'tool_call', { type: 'switch', label: 'Tool calling (agents, function calls)' }), field(p.require, 'vision', { type: 'switch', label: 'Image input' }),
-      field(p.require, 'min_context', { type: 'select', label: 'Context size', cast: Number, custom: v => `${Math.round(v / 1000)}k tokens (custom)`, opts: [[0, 'Any'], [32000, 'at least 32k tokens'], [64000, 'at least 64k tokens'], [128000, 'at least 128k tokens'], [256000, 'at least 256k tokens']] })),
-    advanced(cols(
-      field(p, 'description'), field(p, 'mode', { type: 'select', label: 'How it picks', opts: [['auto', 'Automatically (ranking)'], ['combo', 'Fixed list, in order']] }),
-      field(p, 'models', { type: 'list', label: 'Fixed list of models', help: 'only used for "Fixed list"' }), field(p, 'allow', { type: 'list', label: 'Only consider models matching', ph: 'e.g. deepseek-*, glm-*' }), field(p, 'deny', { type: 'list', label: 'Never use models matching' }),
-      field(p, 'min_quality', { type: 'num', step: '0.01', label: 'Minimum quality (0-1)' }), field(p, 'max_candidates', { type: 'num', label: 'How many models to keep' }), field(p, 'rr_band', { type: 'num', step: '0.01', label: '"Equally good" means within' }),
-      ['cost', 'benchmark', 'jev', 'reliability', 'context'].map(k => field(p.weights, k, { type: 'num', label: `Weight: ${k}` })),
-      [['input_tokens', 'Typical input tokens'], ['output_tokens', 'Typical output tokens'], ['cached_ratio', 'Share of input served from cache'], ['images', 'Images per request'], ['seconds', 'Seconds of audio/video'], ['chars', 'Characters of speech']].map(([k, l]) => field(p.cost_profile, k, { type: 'num', label: l }))),
-  ));
+      field(p.require, 'tool_call', { type: 'switch', label: 'Tool calling (agents, function calls)' }), field(p.require, 'vision', { type: 'switch', label: 'Image input' })));
   return card(h('span', { class: 'd-flex align-items-center gap-2' }, h('span', { class: 'kind-icon' }, icon(ic)), h('span', {}, name, h('div', { class: 'text-secondary small fw-normal' }, `${kind} · ${r ? r.callable : 0} model${r?.callable === 1 ? '' : 's'} available`))), body,
-    { actions: h('div', { class: 'd-flex gap-1' }, btn('Why this order?', 'btn-sm btn-ghost-secondary', () => showRanking(client, name)), btn('Delete', 'btn-sm btn-ghost-danger', () => { const cl = S.cfg.clients.find(c => c.name === client); if (confirm(`Delete preset "${name}" of ${client}? Apps calling it will get an error until you add it again with "Add preset".`)) { delete cl.presets[name]; markDirty(); render(); } }, 'trash')), class: 'h-100' });
-}
-
-// modelPicker lists every model the client's keys can call for this preset and lets the owner untick the ones it must never use.
-function modelPicker(p, r) {
-  const all = (r && r.models) || [];
-  if (!all.length) return null;
-  p.deny ||= [];
-  const off = id => p.deny.includes(id);
-  const body = h('div', { class: 'pt-2' }, all.map(id => h('label', { class: 'form-check mb-1' },
-    h('input', { class: 'form-check-input', type: 'checkbox', checked: !off(id), onchange: e => { p.deny = e.target.checked ? p.deny.filter(x => x !== id) : [...p.deny, id]; markDirty(); render(); } }),
-    h('span', { class: 'form-check-label mono' }, id, !(r.candidates || []).concat(r.trial || []).some(c => c.model === id) && !off(id) && h('span', { class: 'text-secondary' }, ' · not used right now')))),
-    h('div', { class: 'form-hint' }, 'Unticked models are never used by this preset. New models that appear later are on by default (and start on trial).'));
-  const n = all.filter(id => !off(id)).length;
-  return h('details', { class: 'adv mb-2' }, h('summary', {}, `Models it may use: ${n} of ${all.length}`), body);
+    { actions: h('div', { class: 'd-flex gap-1' }, btn('Why this order?', 'btn-sm btn-ghost-secondary', () => showRanking(client, name)), iconBtn('Delete preset', 'trash', () => { const cl = S.cfg.clients.find(c => c.name === client); if (confirm(`Delete preset "${name}" of ${client}? Apps calling it will get an error until you add it again with "Add preset".`)) { delete cl.presets[name]; markDirty(); render(); } }, 'btn-ghost-danger')), class: 'h-100' });
 }
 
 function addPreset(cl) {
@@ -577,7 +553,7 @@ function addPreset(cl) {
 }
 function newDefault(kind) {
   const media = { cost: 70, benchmark: 10, jev: 0, reliability: 20, context: 0 };
-  if (kind === 'chat') return { description: '', modality: 'chat', mode: 'auto', require: { tool_call: true, min_context: 32000 }, min_quality: 0.50, max_candidates: 4, strategy: 'round_robin', rr_band: 0.04, weights: { ...OBJECTIVES.balanced.w }, cost_profile: { input_tokens: 4000, output_tokens: 600, cached_ratio: 0.7 } };
+  if (kind === 'chat') return { description: '', modality: 'chat', mode: 'auto', require: { tool_call: true }, min_quality: 0.50, max_candidates: 4, strategy: 'round_robin', rr_band: 0.04, weights: { ...OBJECTIVES.balanced.w }, cost_profile: { input_tokens: 4000, output_tokens: 600, cached_ratio: 0.7 } };
   return { description: '', modality: kind, mode: 'auto', require: {}, min_quality: 0, max_candidates: 3, strategy: 'priority', rr_band: 0.03, weights: media, cost_profile: { images: 1, seconds: kind === 'audio_transcription' ? 60 : 5, chars: 1000, variant: kind === 'videos' ? '720p' : '' } };
 }
 
@@ -650,9 +626,9 @@ function judgeOrder(jev, j) {
       h('span', { class: 'text-secondary mono me-1' }, i + 1 + '.'),
       h('span', { class: 'mono me-auto' + (meta(id) ? '' : ' text-warning') }, label(id), !meta(id) && h('span', { class: 'small' }, ' · not in the catalog right now')),
       i === 0 && badge('tried first', 'blue'),
-      iconBtn('Move up', 'arrow-up', () => move(i, -1), i === 0),
-      iconBtn('Move down', 'arrow-down', () => move(i, 1), i === jev.judges.length - 1),
-      iconBtn('Remove', 'trash', () => { jev.judges.splice(i, 1); markDirty(); render(); })))) : empty('No judge chosen yet.'),
+      iconBtn('Move up', 'arrow-up', () => move(i, -1), 'btn-ghost-secondary', i === 0),
+      iconBtn('Move down', 'arrow-down', () => move(i, 1), 'btn-ghost-secondary', i === jev.judges.length - 1),
+      iconBtn('Remove', 'trash', () => { jev.judges.splice(i, 1); markDirty(); render(); }, 'btn-ghost-danger')))) : empty('No judge chosen yet.'),
     h('div', { class: 'd-flex gap-2' }, picker, btn('Add', 'btn-outline-primary btn-sm', () => { if (picker.value) { jev.judges.push(picker.value); markDirty(); render(); } }, 'plus')),
     h('div', { class: 'form-hint' }, 'The judge at the top scores every answer. If kenari cannot serve it (down or too slow), the next one in this list takes over, and after that any other free System One judge. A judge that is not free costs money from the daily limit, so keep free ones first.'));
 }

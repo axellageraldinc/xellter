@@ -32,6 +32,8 @@ internal/app       wiring + hot reload (Apply) + background loops + preset gener
 User systemd unit `xellter.service` (`~/infra/systemd/user/`), listens on `127.0.0.1:8480`, exposed on the tailnet with `tailscale serve`. Runbook: `docs/operations.md`. Registry entry: `~/infra/REGISTRY.md`.
 
 ## Project rules
+- **The panel shows only the knobs that matter** (ADR 0012). A kenari key has a name and nothing else; xellter detects the account, plan, tier, limits and the models a key may call. Presets have no model allow/deny list and no context-size gate. Client-level knobs (budget, RTK override, passthrough) keep their defaults. Anything else is changed in `xellter.yaml` (the Config tab edits the same file) — do not add a panel control for it.
+- `skills/xellter/SKILL.md` documents the knobs that remain and how to change them. Read it before changing xellter's configuration.
 - **Public repo (once opened): never commit** `xellter.yaml`, `data/`, `secrets.env`, API keys, client keys, auth records, request logs. They are git-ignored; keep it that way. Run the server-wide secret scan before every push.
 - Hot path stays allocation-light and non-blocking: no per-request catalog fetch, no synchronous DB writes (logging is queued), streaming is copied through without buffering.
 - `internal/rank` stays pure (no I/O). Every ranking decision must be explainable (`Candidate.Reason`, `Rejected`).

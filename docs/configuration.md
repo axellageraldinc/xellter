@@ -34,8 +34,10 @@ A client is one app that calls xellter. It has its own kenari keys and its own p
 | `rtk` | `null` = follow the global token saver setting |
 | `note` | free text |
 
+The panel shows none of the client-level knobs: they keep their defaults, and the defaults are the sensible ones (see ADR 0012).
+
 ### keys[]
-`name`, `key_env` (name of the secret that holds the key value in `data/secrets.env`; unique across clients), `enabled`, `tier` (`auto` detects it; `free`/`topup`/`plan` override), `plan` (only needed when no account key is set and the tier is `plan`), `account` (default `main`: keys of one kenari account share its limits and plan), `rpm` / `daily_free` (override kenari defaults; `-1` = unlimited), `allow` (model globs; normally detected by probing), `note`.
+A kenari key has a name and nothing else: `name` and `key_env` (the name of the secret that holds the key value in `data/secrets.env`, unique across clients). xellter detects the account, the plan, the tier and the limits by itself; the models a key may call are learned from kenari (a probe or a 400 answer), never configured. Rename a key in the panel; the secret moves with it.
 
 ### Generated presets
 For each kind that has at least one model callable by the client's keys, xellter creates one preset once: `text` (chat), `image`, `video`, `tts` (text to speech), `stt` (speech to text), `music`. A client is only seeded after all its enabled keys have been probed. Preset names are predefined and a client has each at most once: the admin API refuses any other name or a kind that does not match its name. A preset can be edited or deleted (it is not recreated) and added back from the panel ("Add preset" lists only the missing ones). Preset names take precedence over real model names.
@@ -48,15 +50,16 @@ Key = the name the app sends as `model`.
 | `modality` | `chat`, `images`, `videos`, `audio_speech`, `audio_transcription`, `music` |
 | `mode` | `auto` (rank the callable models) or `combo` (use `models` in order) |
 | `models` | combo list |
-| `allow` / `deny` | model globs (auto) |
-| `require` | `tool_call`, `vision`, `reasoning`, `min_context` |
+| `require` | `tool_call`, `vision`, `reasoning` |
 | `min_quality` | 0..1 quality gate |
 | `max_candidates` | size of the main list |
 | `strategy` / `rr_band` | `round_robin` rotates within `rr_band` of the top score; `priority` always starts with the best |
 | `weights` | relative weights of `cost`, `benchmark`, `jev`, `reliability`, `context` |
 | `cost_profile` | reference request: `input_tokens`, `output_tokens`, `cached_ratio` (chat); `images`; `seconds`, `variant` (video/STT); `chars` (TTS) |
 
-In the panel, "Models it may use" on a preset card lists every model the client's keys can call; unticking one adds it to `deny`. The "Optimise for" buttons set `weights` and `min_quality` together: Cheapest (60/10/10/15/5, .30), Balanced (30/25/20/15/10, .45), Best quality (5/40/30/15/10, .60).
+A preset has no model allow or deny list and no context-size gate: the models the client's keys may call are the ones it can use, and the context size is only a soft preference in the score (ADR 0012).
+
+In the panel, a preset card offers the objective buttons ("Optimise for"): Cheapest (60/10/10/15/5, .35), Balanced (25/35/20/15/5, .50), Best quality (2/55/25/15/3, .64), the tie-break strategy, and the tool-calling and image-input requirements. Everything else keeps the backend default.
 
 ## rules
 `free_bonus` .10, `plan_bonus` .08, `plan_cost_factor` .3 (a plan-covered request counts for this share of its list price, because plan budget is finite), `promo_bonus_max` .05, `promo_min_remaining_hours` 12, `upcoming_lookahead_hours` 24, `new_model_days` 14, `canary_percent` 5, `canary_min_requests` 20, `canary_min_success` .9, `avoid_sunset_days` 3, `sticky_minutes` 30, `stats_window_hours` 24.

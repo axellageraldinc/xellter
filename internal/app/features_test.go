@@ -133,14 +133,8 @@ func TestProbeLearnsAllowListWithoutBilling(t *testing.T) {
 	t.Fatal("pro-c should remain routable through the unrestricted key")
 }
 
-func TestAccountQuotaFromUnrestrictedKeyReplacesGuess(t *testing.T) {
-	e := setup(t, func(c *config.Config) {
-		for i := range c.Clients[0].Keys {
-			c.Clients[0].Keys[i].Account = "main"
-			c.Clients[0].Keys[i].Plan = "WrongGuess"
-		}
-		c.Clients[0].Keys[0].Tier, c.Clients[0].Keys[1].Tier = "plan", "plan"
-	})
+func TestAccountQuotaFromUnrestrictedKeyIsRead(t *testing.T) {
+	e := setup(t, nil)
 	reset := time.Now().Add(48 * time.Hour).UTC().Format(time.RFC3339)
 	e.f.account = func(auth string) (int, string) {
 		if auth != "Bearer secret-topup" {
@@ -169,9 +163,7 @@ func TestAccountQuotaFromUnrestrictedKeyReplacesGuess(t *testing.T) {
 }
 
 func TestFreeQuotaErrorsAreAccountWide(t *testing.T) {
-	e := setup(t, func(c *config.Config) {
-		c.Clients[0].Keys[0].Account, c.Clients[0].Keys[1].Account = "main", "main"
-	})
+	e := setup(t, nil)
 	free := e.a.Cat.Snapshot().Models["free-a:free"]
 	paid := e.a.Cat.Snapshot().Models["pro-c"]
 	k0, k1 := e.a.Pool.Keys()[0], e.a.Pool.Keys()[1]
@@ -188,7 +180,7 @@ func TestFreeQuotaErrorsAreAccountWide(t *testing.T) {
 func TestPresetsAreGeneratedFromWhatTheKeysCanCall(t *testing.T) {
 	e := setup(t, func(c *config.Config) {
 		c.Clients = append(c.Clients, config.Client{Name: "gen", Enabled: true, KeyHash: proxy.HashKey("xl-gen"),
-			Keys: []config.Upstream{{Name: "limited", KeyEnv: "KEY_GEN", Enabled: true, Tier: "topup"}}})
+			Keys: []config.Upstream{{Name: "limited", KeyEnv: "KEY_GEN"}}})
 	})
 	if err := config.SetSecret(e.a.Cfg().Server.SecretsFile, "KEY_GEN", "secret-gen"); err != nil {
 		t.Fatal(err)
@@ -278,7 +270,7 @@ func TestClientsNeverSeeEachOthersModels(t *testing.T) {
 		text.MinQuality, text.Require = 0, config.Require{}
 		for _, n := range []string{"one", "two"} {
 			c.Clients = append(c.Clients, config.Client{Name: n, Enabled: true, KeyHash: proxy.HashKey("xl-" + n), Presets: map[string]config.Preset{"text": text}, Seeded: config.PresetModalities,
-				Keys: []config.Upstream{{Name: "k", KeyEnv: "KEY_" + strings.ToUpper(n), Enabled: true, Tier: "topup", Allow: map[string][]string{"one": {"cheap-b"}, "two": {"pro-c", "promo-d"}}[n]}}})
+				Keys: []config.Upstream{{Name: "k", KeyEnv: "KEY_" + strings.ToUpper(n)}}})
 		}
 	})
 	for _, n := range []string{"one", "two"} {
@@ -287,6 +279,9 @@ func TestClientsNeverSeeEachOthersModels(t *testing.T) {
 		}
 	}
 	e.a.Pool.Reload(e.a.Cfg(), e.a.Secrets(), e.a.St)
+	// the keys are restricted to different models; kenari tells xellter which ones
+	e.a.Pool.Get("one/k").SetAllowed([]string{"cheap-b"})
+	e.a.Pool.Get("two/k").SetAllowed([]string{"pro-c", "promo-d"})
 	e.a.Rt.Recompute(time.Now())
 	models := func(client string) []string {
 		rk := e.a.Rt.Rankings()[client+"/text"]

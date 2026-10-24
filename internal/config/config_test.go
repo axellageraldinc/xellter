@@ -8,11 +8,11 @@ import (
 )
 
 func TestMinimalYAMLWorksAndDefaultsFill(t *testing.T) {
-	c, err := Parse([]byte("clients:\n  - name: babu\n    enabled: true\n    keys:\n      - {name: main, key_env: KENARI_KEY_BABU_MAIN, enabled: true}\n"))
+	c, err := Parse([]byte("clients:\n  - name: babu\n    enabled: true\n    keys:\n      - {name: main, key_env: KENARI_KEY_BABU_MAIN}\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Server.Listen != "127.0.0.1:8480" || c.Clients[0].Keys[0].Tier != "auto" || c.Kenari.AccountKeyEnv != "KENARI_ACCOUNT_KEY" {
+	if c.Server.Listen != "127.0.0.1:8480" || c.Kenari.AccountKeyEnv != "KENARI_ACCOUNT_KEY" {
 		t.Fatalf("defaults missing: %+v", c.Clients[0].Keys[0])
 	}
 }
@@ -34,9 +34,8 @@ func TestGeneratedPresetsCoverEveryKind(t *testing.T) {
 }
 
 func TestValidationCatchesMistakes(t *testing.T) {
-	good := "    keys:\n      - {name: main, key_env: KENARI_KEY_A, enabled: true}\n"
+	good := "    keys:\n      - {name: main, key_env: KENARI_KEY_A}\n"
 	cases := map[string]string{
-		"bad tier":                 "clients:\n  - name: x\n    keys:\n      - {name: main, key_env: KENARI_KEY_A, tier: gold}\n",
 		"bad secret name":          "clients:\n  - name: x\n    keys:\n      - {name: main, key_env: sk-live-123}\n",
 		"duplicate key in client":  "clients:\n  - name: x\n    keys:\n      - {name: a, key_env: K1}\n      - {name: a, key_env: K2}\n",
 		"secret shared by clients": "clients:\n  - name: x\n    keys:\n      - {name: a, key_env: K1}\n  - name: y\n    keys:\n      - {name: a, key_env: K1}\n",
@@ -98,7 +97,7 @@ func TestSaveKeepsHistoryAndNeverStoresSecrets(t *testing.T) {
 	file := filepath.Join(dir, "xellter.yaml")
 	c := Default()
 	c.Server.DataDir = filepath.Join(dir, "data")
-	c.Clients = []Client{{Name: "babu", Enabled: true, Keys: []Upstream{{Name: "main", KeyEnv: "KENARI_KEY_BABU_MAIN", Enabled: true, Tier: "auto"}}, Presets: DefaultPresets()}}
+	c.Clients = []Client{{Name: "babu", Enabled: true, Keys: []Upstream{{Name: "main", KeyEnv: "KENARI_KEY_BABU_MAIN"}}, Presets: DefaultPresets()}}
 	for i := 0; i < 3; i++ {
 		c.Rules.CanaryPercent = float64(i)
 		if err := Save(file, c); err != nil {

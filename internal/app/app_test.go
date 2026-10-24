@@ -201,17 +201,17 @@ func setup(t testing.TB, mutate func(*config.Config)) *env {
 	cfg.Kenari.BaseURL = f.srv.URL
 	cfg.Rules.CanaryPercent = 0
 	babuKeys := []config.Upstream{
-		{Name: "plan", KeyEnv: "KEY_PLAN", Enabled: true, Tier: "plan", Plan: "Indie"},
-		{Name: "topup", KeyEnv: "KEY_TOPUP", Enabled: true, Tier: "topup"},
+		{Name: "plan", KeyEnv: "KEY_PLAN"},
+		{Name: "topup", KeyEnv: "KEY_TOPUP"},
 	}
 	budget := config.DefaultPreset("chat")
-	budget.Description, budget.MinQuality, budget.Require = "cheap", 0.30, config.Require{MinContext: 16000}
+	budget.Description, budget.MinQuality = "cheap", 0.30
 	budget.Weights = config.Weights{Cost: 50, Benchmark: 15, JEV: 10, Reliability: 20, Context: 5}
 	babuPresets := config.DefaultPresets()
 	babuPresets["budget"] = budget
 	key := "xl-testkey"
 	one := func(env string) []config.Upstream {
-		return []config.Upstream{{Name: "k", KeyEnv: env, Enabled: true, Tier: "topup"}}
+		return []config.Upstream{{Name: "k", KeyEnv: env}}
 	}
 	cfg.Clients = []config.Client{
 		{Name: "babu", Enabled: true, KeyHash: proxy.HashKey(key), Keys: babuKeys, Presets: babuPresets, Seeded: config.PresetModalities},
@@ -352,9 +352,8 @@ func TestFallbackOnUpstreamErrorAndRateLimit(t *testing.T) {
 	}
 }
 
-func TestRateLimitedKeyCoolsDownAndOtherKeyServes(t *testing.T) {
+func TestRateLimitCooldownIsAccountWide(t *testing.T) {
 	e := setup(t, func(c *config.Config) {
-		c.Clients[0].Keys[0].Account, c.Clients[0].Keys[1].Account = "acct-a", "acct-b" // limits are per account
 		sh := c.Clients[0].Presets["text"]
 		sh.Mode, sh.Models, sh.Strategy = "combo", []string{"free-a:free"}, "priority"
 		c.Clients[0].Presets["text"] = sh
@@ -367,12 +366,14 @@ func TestRateLimitedKeyCoolsDownAndOtherKeyServes(t *testing.T) {
 		}
 		return 0, ""
 	}
+	// kenari limits per account and there is only one account, so the other key of
+	// the client cannot take the request either.
 	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "text"))
-	if resp.StatusCode != 200 {
-		t.Fatalf("second key should have served: %d %s", resp.StatusCode, body)
+	if resp.StatusCode != 429 {
+		t.Fatalf("the account is rate limited, got %d %s", resp.StatusCode, body)
 	}
-	if e.f.count("free-a:free") != 2 {
-		t.Fatalf("expected exactly 2 upstream calls, got %d", e.f.count("free-a:free"))
+	if e.f.count("free-a:free") != 1 {
+		t.Fatalf("expected exactly 1 upstream call, got %d", e.f.count("free-a:free"))
 	}
 }
 
@@ -391,7 +392,8 @@ func TestStreamingAndUsageAccounting(t *testing.T) {
 	}
 	e.a.St.Flush()
 	rows, _ := e.a.St.Recent(5, "")
-	if len(rows) == 0 || rows[0].InTok != 1000 || rows[0].OutTok != 50 || rows[0].Billing != "plan" || !rows[0].OK {
+	// no plan was reported by kenari in this fixture, so the traffic is payg
+	if len(rows) == 0 || rows[0].InTok != 1000 || rows[0].OutTok != 50 || rows[0].Billing != "payg" || !rows[0].OK {
 		t.Fatalf("usage row wrong: %+v", rows)
 	}
 	if rows[0].Cost <= 0 {

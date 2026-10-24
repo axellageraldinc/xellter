@@ -297,7 +297,7 @@ func keyCmd(args []string) error {
 			continue
 		}
 		env := "KENARI_KEY_" + strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(*client+"_"+*name))
-		c.Clients[i].Keys = append(c.Clients[i].Keys, config.Upstream{Name: *name, KeyEnv: env, Enabled: true, Tier: "auto"})
+		c.Clients[i].Keys = append(c.Clients[i].Keys, config.Upstream{Name: *name, KeyEnv: env})
 		if err := config.SetSecret(c.Server.SecretsFile, env, value); err != nil {
 			return err
 		}

@@ -104,17 +104,19 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 	minRemain := time.Duration(rules.PromoMinRemainingHrs * float64(time.Hour))
 	reject := func(id, why string) { r.Rejected = append(r.Rejected, Rejected{id, why}) }
 
+	// a subscriber-only model is usable only when the account has a plan: the
+	// tier is detected from kenari, not configured.
 	anyPlanKey := false
 	for _, k := range in.Pool.ClientKeys(cl.Name) {
-		if c := k.Config(); c.Enabled && c.Tier == "plan" {
+		if k.Account().Tier(in.Now) == "plan" {
 			anyPlanKey = true
 		}
 	}
 
-	for _, id := range in.Snap.IDs() { // what the client's keys can call at all; lets the panel offer a tick list
+	for _, id := range in.Snap.IDs() { // what the client's keys can call at all
 		if m := in.Snap.Models[id]; m.Endpoint == sh.Modality {
 			for _, k := range in.Pool.ClientKeys(cl.Name) {
-				if k.Config().Enabled && k.Secret != "" && k.AllowedModel(id) {
+				if k.Secret != "" && k.AllowedModel(id) {
 					r.Models = append(r.Models, id)
 					break
 				}
@@ -129,11 +131,6 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 			continue
 		}
 		switch {
-		case len(sh.Allow) > 0 && !config.MatchAny(sh.Allow, id):
-			continue // silently out of scope
-		case config.MatchAny(sh.Deny, id):
-			reject(id, "denied by preset config")
-			continue
 		case sh.Require.ToolCall && !m.ToolCall:
 			reject(id, "no tool calling")
 			continue
@@ -142,9 +139,6 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 			continue
 		case sh.Require.Reasoning && !m.Reasoning:
 			reject(id, "no reasoning")
-			continue
-		case sh.Require.MinContext > 0 && m.Context < sh.Require.MinContext:
-			reject(id, fmt.Sprintf("context %d < %d", m.Context, sh.Require.MinContext))
 			continue
 		case m.SunsetAt != nil && m.SunsetAt.Sub(in.Now) < time.Duration(rules.AvoidSunsetDays)*24*time.Hour:
 			reject(id, "sunsets "+m.SunsetAt.Format("2006-01-02"))
@@ -156,8 +150,7 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 		s := &scored{m: m}
 		usable, covered := false, false
 		for _, k := range in.Pool.ClientKeys(cl.Name) {
-			c := k.Config()
-			if !c.Enabled || k.Secret == "" || !k.AllowedModel(id) {
+			if k.Secret == "" || !k.AllowedModel(id) {
 				continue
 			}
 			usable = true
@@ -245,10 +238,9 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 	if tot := w.Cost + w.Benchmark + w.JEV + w.Reliability + w.Context; tot > 0 {
 		bonusScale = math.Max(0.1, math.Min(2, (w.Cost/tot)/0.30))
 	}
-	minCtx := float64(sh.Require.MinContext)
-	if minCtx <= 0 {
-		minCtx = 8000
-	}
+	// The context size is a soft preference only (there is no context gate): a
+	// bigger context scores a little higher, measured against a fixed baseline.
+	const minCtx = 8000.0
 	var main, trial []Candidate
 	for _, s := range pool {
 		m := s.m

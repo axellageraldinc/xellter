@@ -25,7 +25,7 @@ type fx struct {
 
 func fixture(models ...*catalog.Model) *fx {
 	cfg := config.Default()
-	cfg.Clients = []config.Client{{Name: "c", Enabled: true, Presets: config.DefaultPresets(), Keys: []config.Upstream{{Name: "k", KeyEnv: "K", Enabled: true, Tier: "topup"}}}}
+	cfg.Clients = []config.Client{{Name: "c", Enabled: true, Presets: config.DefaultPresets(), Keys: []config.Upstream{{Name: "k", KeyEnv: "K"}}}}
 	pool := upstream.NewPool()
 	pool.Reload(cfg, map[string]string{"K": "s"}, nil)
 	snap := &catalog.Snapshot{Models: map[string]*catalog.Model{}, Tier: catalog.FreeTier{Free: catalog.TierLimit{RPM: 5, Daily: 50}, Topup: catalog.TierLimit{RPM: 10, Daily: 1000}, Plan: catalog.TierLimit{RPM: 25}}}
@@ -215,29 +215,24 @@ func TestUsageCostUsesCacheDiscountAndPlanFreeCache(t *testing.T) {
 	}
 }
 
-func TestRankingListsEveryCallableModelAndHonoursDeny(t *testing.T) {
+func TestRankingListsEveryCallableModel(t *testing.T) {
 	f := fixture(chat("a", 100, 300), chat("b", 200, 600), chat("c", 300, 900))
 	f.cfg.Benchmarks = map[string]float64{"a": 70, "b": 70, "c": 70}
-	p := f.cl.Presets["text"]
-	p.Deny = []string{"b"}
-	f.cl.Presets["text"] = p
 	r := f.rank("text", nil)
 	if len(r.Models) != 3 {
-		t.Fatalf("the tick list needs every callable model, denied ones included: %v", r.Models)
+		t.Fatalf("the list needs every callable model: %v", r.Models)
 	}
-	for _, c := range r.Candidates {
-		if c.Model == "b" {
-			t.Fatal("a denied model must never be a candidate")
+	// a preset has no model filters: every model the keys can call is a candidate
+	for _, m := range []string{"a", "b", "c"} {
+		found := false
+		for _, c := range r.Candidates {
+			if c.Model == m {
+				found = true
+			}
 		}
-	}
-	found := false
-	for _, x := range r.Rejected {
-		if x.Model == "b" {
-			found = true
+		if !found {
+			t.Fatalf("model %s must be a candidate: %v", m, order(r))
 		}
-	}
-	if !found {
-		t.Fatal("the denial should be explained")
 	}
 }
 
@@ -336,8 +331,9 @@ func TestStackedPlanAndPromoNeverBeatAFreeModelOfEqualQuality(t *testing.T) {
 	promo.Promo = &catalog.Promo{PercentOff: 90, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(72 * time.Hour)}
 	f := fixture(free, promo)
 	f.snap.Plans = []catalog.Plan{{Name: "P", Scope: []string{"promo-plan"}}}
-	f.cfg.Clients[0].Keys[0].Tier, f.cfg.Clients[0].Keys[0].Plan = "plan", "P"
 	f.pool.Reload(f.cfg, map[string]string{"K": "s"}, nil)
+	// the plan is detected from kenari, not configured
+	f.pool.Keys()[0].Account().SetInfo(&upstream.PlanInfo{Name: "P", Windows: map[string]upstream.Window{}, Fetched: now}, f.pool.Keys()[0].Name)
 	f.cfg.Benchmarks = map[string]float64{"free-ok:free": 70, "promo-plan": 70}
 	p := f.cl.Presets["text"]
 	p.Weights, p.MinQuality = config.Weights{Cost: 60, Benchmark: 10, JEV: 10, Reliability: 15, Context: 5}, 0.3

@@ -59,19 +59,12 @@ type Kenari struct {
 	AccountKeyEnv string `yaml:"account_key_env" json:"account_key_env"`
 }
 
-// Upstream is one kenari API key of a client. Tier drives rate limits; Plan
-// names the subscription (for plan-covered models) when Tier is "plan".
+// Upstream is one kenari API key of a client. Only a name and the secret
+// name are configurable: xellter detects the account, the plan and the limits
+// by itself (ADR 0012).
 type Upstream struct {
-	Name    string   `yaml:"name" json:"name"`
-	KeyEnv  string   `yaml:"key_env" json:"key_env"`
-	Enabled bool     `yaml:"enabled" json:"enabled"`
-	Tier    string   `yaml:"tier" json:"tier"` // free | topup | plan
-	Plan    string   `yaml:"plan" json:"plan"`
-	Account string   `yaml:"account" json:"account"`       // keys of one kenari account share its limits and plan; default "main"
-	RPM     int      `yaml:"rpm" json:"rpm"`               // 0 = tier default
-	Daily   int      `yaml:"daily_free" json:"daily_free"` // 0 = tier default, -1 = unlimited
-	Allow   []string `yaml:"allow" json:"allow"`           // model globs this key may use; empty = all (learned from 400s)
-	Note    string   `yaml:"note" json:"note"`
+	Name   string `yaml:"name" json:"name"`
+	KeyEnv string `yaml:"key_env" json:"key_env"`
 }
 
 // Client is an app that calls xellter (Babu, aixell, polifin, ...). It has one
@@ -100,12 +93,12 @@ type Weights struct {
 	Context     float64 `yaml:"context" json:"context"`
 }
 
-// Require are hard capability gates.
+// Require are hard capability gates. There is no context-size gate: every
+// model the client's keys can call may serve a preset (ADR 0012).
 type Require struct {
-	ToolCall   bool `yaml:"tool_call" json:"tool_call"`
-	Vision     bool `yaml:"vision" json:"vision"`
-	Reasoning  bool `yaml:"reasoning" json:"reasoning"`
-	MinContext int  `yaml:"min_context" json:"min_context"`
+	ToolCall  bool `yaml:"tool_call" json:"tool_call"`
+	Vision    bool `yaml:"vision" json:"vision"`
+	Reasoning bool `yaml:"reasoning" json:"reasoning"`
 }
 
 // CostProfile is the reference request used to turn prices into one number.
@@ -120,14 +113,14 @@ type CostProfile struct {
 }
 
 // Preset is a virtual model exposed to clients. Mode "auto" ranks the catalog;
-// mode "combo" uses Models as an explicit ordered list.
+// mode "combo" uses Models as an explicit ordered list. A preset has no model
+// allow or deny list: the models the client's kenari keys may call are the
+// ones it can use (ADR 0012).
 type Preset struct {
 	Description   string      `yaml:"description" json:"description"`
 	Modality      string      `yaml:"modality" json:"modality"` // chat | images | videos | audio_speech | audio_transcription | music
 	Mode          string      `yaml:"mode" json:"mode"`         // auto | combo
 	Models        []string    `yaml:"models" json:"models"`     // combo: ordered list
-	Allow         []string    `yaml:"allow" json:"allow"`       // auto: model globs (empty = all)
-	Deny          []string    `yaml:"deny" json:"deny"`
 	Require       Require     `yaml:"require" json:"require"`
 	MinQuality    float64     `yaml:"min_quality" json:"min_quality"`
 	MaxCandidates int         `yaml:"max_candidates" json:"max_candidates"`
@@ -262,7 +255,7 @@ func DefaultPreset(modality string) Preset {
 	media := Weights{Cost: 70, Benchmark: 10, Reliability: 20}
 	switch modality {
 	case "chat":
-		return Preset{Description: "Text and chat. Picks the best model that is cheap enough.", Modality: "chat", Mode: "auto", Require: Require{ToolCall: true, MinContext: 32000},
+		return Preset{Description: "Text and chat. Picks the best model that is cheap enough.", Modality: "chat", Mode: "auto", Require: Require{ToolCall: true},
 			MinQuality: 0.50, MaxCandidates: 4, Strategy: "round_robin", RRBand: 0.04, Weights: Weights{Cost: 25, Benchmark: 35, JEV: 20, Reliability: 15, Context: 5},
 			Cost: CostProfile{InputTokens: 4000, OutputTokens: 600, CachedRatio: 0.7}}
 	case "images":
@@ -400,11 +393,6 @@ func (c *Config) fillDefaults() {
 	}
 	for i := range c.Clients {
 		cl := &c.Clients[i]
-		for j := range cl.Keys {
-			if cl.Keys[j].Tier == "" {
-				cl.Keys[j].Tier = "auto"
-			}
-		}
 		for name, s := range cl.Presets {
 			if s.Mode == "" {
 				s.Mode = "auto"
@@ -465,10 +453,6 @@ func (c *Config) Validate() error {
 				bad("secret name %s is used by both %s and %s/%s", u.KeyEnv, other, cl.Name, u.Name)
 			}
 			envSeen[u.KeyEnv] = cl.Name + "/" + u.Name
-			if u.Tier != "auto" && u.Tier != "free" && u.Tier != "topup" && u.Tier != "plan" {
-				bad("client %q key %q: tier must be auto, free, topup or plan", cl.Name, u.Name)
-			}
-			checkGlobs(&errs, "key "+cl.Name+"/"+u.Name+".allow", u.Allow)
 		}
 		for name, s := range cl.Presets {
 			where := "client " + cl.Name + " preset " + name
@@ -497,8 +481,6 @@ func (c *Config) Validate() error {
 			if s.MinQuality < 0 || s.MinQuality > 1 {
 				bad("%s: min_quality must be 0..1", where)
 			}
-			checkGlobs(&errs, where+".allow", s.Allow)
-			checkGlobs(&errs, where+".deny", s.Deny)
 		}
 	}
 	if c.Kenari.AccountKeyEnv != "" && !envRe.MatchString(c.Kenari.AccountKeyEnv) {

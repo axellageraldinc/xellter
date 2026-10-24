@@ -24,8 +24,6 @@ clients:
     keys:                         # kenari API keys of this client (values live in data/secrets.env)
       - name: main
         key_env: KENARI_KEY_BABU_MAIN
-        enabled: true
-        tier: auto                # auto | free | topup | plan; auto detects it
     presets: {}                   # filled automatically: text, image, video, tts, stt, music
     seeded: []                    # kinds that already got a generated preset
     daily_budget_idr: 0           # 0 = unlimited
@@ -36,7 +34,7 @@ clients:
     #     modality: chat
     #     mode: auto
     #     strategy: priority
-    #     require: {tool_call: true, min_context: 64000}
+    #     require: {tool_call: true}
     #     min_quality: 0.55
     #     weights: {cost: 20, benchmark: 35, jev: 20, reliability: 15, context: 10}
 
