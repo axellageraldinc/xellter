@@ -12,7 +12,7 @@ func TestDefaultsAreValidAndMinimalYAMLWorks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.Presets) < 8 || c.Presets["xl-balanced"].Weights.Cost != 30 || c.Server.Listen != "127.0.0.1:8480" {
+	if len(c.Presets) < 8 || c.Presets["balanced"].Weights.Cost != 30 || c.Server.Listen != "127.0.0.1:8480" {
 		t.Fatalf("defaults missing: %+v", c.Server)
 	}
 }

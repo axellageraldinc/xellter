@@ -56,7 +56,7 @@ func TestFreeModelWinsWhenQualityIsAcceptable(t *testing.T) {
 	free.Free = true
 	f := fixture(free, chat("mid", 500, 1500), chat("big", 8000, 24000))
 	f.cfg.Benchmarks = map[string]float64{"g:free": 70, "mid": 72, "big": 90}
-	r := f.rank("xl-balanced", nil)
+	r := f.rank("balanced", nil)
 	if o := order(r); len(o) == 0 || o[0] != "g:free" {
 		t.Fatalf("free model should lead: %v", o)
 	}
@@ -67,7 +67,7 @@ func TestQualityGateKeepsBadCheapModelsOut(t *testing.T) {
 	free.Free = true
 	f := fixture(free, chat("good", 600, 1800))
 	f.cfg.Benchmarks = map[string]float64{"junk:free": 5, "good": 80}
-	r := f.rank("xl-balanced", nil)
+	r := f.rank("balanced", nil)
 	if o := order(r); len(o) != 1 || o[0] != "good" {
 		t.Fatalf("gate failed: %v rejected=%v", o, r.Rejected)
 	}
@@ -77,7 +77,7 @@ func TestPromoMakesModelCheaperAndDoesNotLowerItsQuality(t *testing.T) {
 	promo := chat("promo", 63, 250) // listed price already includes a 90% discount
 	promo.Promo = &catalog.Promo{PercentOff: 90, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(7 * 24 * time.Hour)}
 	f := fixture(promo, chat("rival", 630, 2500), chat("other", 100, 300), chat("pricey", 9000, 30000))
-	r := f.rank("xl-balanced", nil)
+	r := f.rank("balanced", nil)
 	var pc *Candidate
 	for i := range r.Candidates {
 		if r.Candidates[i].Model == "promo" {
@@ -115,11 +115,11 @@ func TestNewModelsGoToTrialUntilProven(t *testing.T) {
 	f := fixture(chat("old", 500, 1500), chat("shiny", 400, 1200))
 	f.cfg.Benchmarks = map[string]float64{"old": 70, "shiny": 70}
 	seen := map[string]time.Time{"old": time.Unix(0, 0), "shiny": now.Add(-2 * 24 * time.Hour)}
-	r := f.rank("xl-balanced", func(in *Inputs) { in.Seen = seen })
+	r := f.rank("balanced", func(in *Inputs) { in.Seen = seen })
 	if len(r.Trial) != 1 || r.Trial[0].Model != "shiny" || len(r.Candidates) != 1 {
 		t.Fatalf("trial=%v main=%v", r.Trial, order(r))
 	}
-	r = f.rank("xl-balanced", func(in *Inputs) {
+	r = f.rank("balanced", func(in *Inputs) {
 		in.Seen = seen
 		in.Life = map[string]store.ModelStat{"shiny": {N: 40, OK: 39}}
 	})
@@ -131,7 +131,7 @@ func TestNewModelsGoToTrialUntilProven(t *testing.T) {
 func TestTrialCostGuard(t *testing.T) {
 	f := fixture(chat("old", 100, 300), chat("lavish", 20000, 60000))
 	f.cfg.Benchmarks = map[string]float64{"old": 70, "lavish": 70}
-	r := f.rank("xl-balanced", func(in *Inputs) {
+	r := f.rank("balanced", func(in *Inputs) {
 		in.Seen = map[string]time.Time{"old": time.Unix(0, 0), "lavish": now.Add(-time.Hour)}
 	})
 	if len(r.Trial) != 0 {
@@ -142,7 +142,7 @@ func TestTrialCostGuard(t *testing.T) {
 func TestJEVThresholdRejectsAndScoreLifts(t *testing.T) {
 	f := fixture(chat("a", 500, 1500), chat("b", 500, 1500))
 	f.cfg.JEV.Enabled = true
-	r := f.rank("xl-balanced", func(in *Inputs) {
+	r := f.rank("balanced", func(in *Inputs) {
 		in.JEV = map[string]store.JEVScore{"a": {Score: 0.95}, "b": {Score: 0.2}}
 	})
 	if o := order(r); len(o) != 1 || o[0] != "a" {
@@ -159,7 +159,7 @@ func TestGatesAndSunset(t *testing.T) {
 	t1 := now.Add(24 * time.Hour)
 	dying.SunsetAt = &t1
 	f := fixture(noTools, small, dying, chat("fine", 200, 600))
-	r := f.rank("xl-balanced", nil)
+	r := f.rank("balanced", nil)
 	if o := order(r); len(o) != 1 || o[0] != "fine" || len(r.Rejected) != 3 {
 		t.Fatalf("order=%v rejected=%v", o, r.Rejected)
 	}
@@ -168,14 +168,14 @@ func TestGatesAndSunset(t *testing.T) {
 func TestRoundRobinFrontGroupAndPriority(t *testing.T) {
 	f := fixture(chat("a", 100, 300), chat("b", 102, 304), chat("c", 5000, 15000))
 	f.cfg.Benchmarks = map[string]float64{"a": 70, "b": 70, "c": 70}
-	r := f.rank("xl-balanced", nil)
+	r := f.rank("balanced", nil)
 	if r.Front < 2 {
 		t.Fatalf("near-equal models should form a round-robin group, front=%d %v", r.Front, order(r))
 	}
-	sh := f.cfg.Presets["xl-balanced"]
+	sh := f.cfg.Presets["balanced"]
 	sh.Strategy = "priority"
-	f.cfg.Presets["xl-balanced"] = sh
-	if r := f.rank("xl-balanced", nil); r.Front != 1 {
+	f.cfg.Presets["balanced"] = sh
+	if r := f.rank("balanced", nil); r.Front != 1 {
 		t.Fatalf("priority strategy must have front=1, got %d", r.Front)
 	}
 }
@@ -185,7 +185,7 @@ func TestMediaPresetSortsByPriceFreeFirst(t *testing.T) {
 	cheap := &catalog.Model{ID: "img-cheap", Endpoint: "images", Lines: []catalog.Line{{Unit: "image", IDR: 40}}}
 	free := &catalog.Model{ID: "img-free:free", Endpoint: "images", Free: true}
 	f := fixture(paid, cheap, free)
-	r := f.rank("xl-image", nil)
+	r := f.rank("image", nil)
 	if o := order(r); len(o) != 3 || o[0] != "img-free:free" || o[1] != "img-cheap" || o[2] != "img-paid" {
 		t.Fatalf("media order: %v", o)
 	}
@@ -193,8 +193,8 @@ func TestMediaPresetSortsByPriceFreeFirst(t *testing.T) {
 
 func TestComboKeepsConfiguredOrder(t *testing.T) {
 	f := fixture(chat("a", 1, 1), chat("b", 1, 1))
-	f.cfg.Presets["xl-balanced"] = config.Preset{Modality: "chat", Mode: "combo", Models: []string{"b", "ghost", "a"}, Strategy: "priority", MaxCandidates: 4}
-	r := f.rank("xl-balanced", nil)
+	f.cfg.Presets["balanced"] = config.Preset{Modality: "chat", Mode: "combo", Models: []string{"b", "ghost", "a"}, Strategy: "priority", MaxCandidates: 4}
+	r := f.rank("balanced", nil)
 	if o := order(r); len(o) != 2 || o[0] != "b" || o[1] != "a" || len(r.Rejected) != 1 {
 		t.Fatalf("combo: %v %v", o, r.Rejected)
 	}

@@ -12,10 +12,12 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"net"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,6 +27,7 @@ import (
 
 	"github.com/axellageraldinc/xellter/internal/app"
 	"github.com/axellageraldinc/xellter/internal/auth"
+	"github.com/axellageraldinc/xellter/internal/catalog"
 	"github.com/axellageraldinc/xellter/internal/config"
 	"github.com/axellageraldinc/xellter/internal/proxy"
 	"github.com/axellageraldinc/xellter/internal/upstream"
@@ -56,6 +59,7 @@ func New(a *app.App) *Handler {
 	api("rollback", h.rollback)
 	api("clients", h.clients)
 	api("secret", h.secret)
+	api("upstreams", h.upstreams)
 	api("keys/reset", h.resetKey)
 	api("keys/probe", h.probeKeys)
 	api("ranking", h.ranking)
@@ -209,6 +213,15 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 	}
 	out["accounts"] = accts
 	out["keys"] = keys
+	out["alerts"], out["status"] = h.alerts(snap, keys, accts, now)
+	out["presets"] = h.presetSummary()
+	if snap != nil {
+		var plans []string
+		for _, p := range snap.Plans {
+			plans = append(plans, p.Name)
+		}
+		out["plan_names"] = plans
+	}
 	spent, limit := h.a.Judge.Budget()
 	out["jev"] = map[string]any{"enabled": h.a.Cfg().JEV.Enabled, "spent_idr": spent, "budget_idr": limit}
 	since := now.Add(-24 * time.Hour)
@@ -220,6 +233,178 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 	}
 	out["clients"] = clients
 	jok(w, out)
+}
+
+type alert struct {
+	Level string `json:"level"` // info | warn | bad
+	Text  string `json:"text"`
+	Go    string `json:"go,omitempty"` // tab to open
+}
+
+func (h *Handler) alerts(snap *catalog.Snapshot, keys []upstream.Status, accts []upstream.AccountStatus, now time.Time) ([]alert, string) {
+	var out []alert
+	add := func(level, text, tab string) { out = append(out, alert{level, text, tab}) }
+	cfg := h.a.Cfg()
+	if snap == nil {
+		add("bad", "Model catalog not loaded yet.", "")
+	} else if snap.Degraded {
+		add("warn", "kenari is unreachable: serving from the last known catalog.", "")
+	}
+	if len(cfg.Clients) == 0 {
+		add("info", "No clients yet. Create one so an app can call xellter.", "clients")
+	}
+	for _, k := range keys {
+		switch {
+		case !k.Enabled:
+		case !k.HasSecret:
+			add("bad", "Key \""+k.Name+"\" has no key value.", "upstreams")
+		case k.CooldownEnd.After(now) || k.BreakerEnd.After(now):
+			add("warn", "Key \""+k.Name+"\" is paused after errors"+lastErr(k.LastError)+".", "upstreams")
+		}
+	}
+	for _, a := range accts {
+		if a.QuotaKey == "" {
+			add("info", "Plan usage of account \""+a.Name+"\" is estimated. Add a full-access kenari key to read the real numbers.", "upstreams")
+		}
+		for name, w := range a.Windows {
+			switch {
+			case w.UsedFrac >= 0.97:
+				add("bad", fmt.Sprintf("Plan %s budget is %.0f%% used; plan models are paused until it resets.", name, w.UsedFrac*100), "")
+			case w.UsedFrac >= 0.8:
+				add("warn", fmt.Sprintf("Plan %s budget is %.0f%% used.", name, w.UsedFrac*100), "")
+			}
+		}
+		if a.Cooldown.After(now) {
+			add("warn", "Account \""+a.Name+"\" is rate limited by kenari; requests wait or move to other models.", "")
+		}
+		if a.FreeBlocked.After(now) {
+			add("warn", "Free models are paused on account \""+a.Name+"\" (free quota used).", "")
+		}
+		if a.PlanBlocked.After(now) {
+			add("warn", "kenari reported the plan limit on account \""+a.Name+"\"; plan models are paused for a few minutes.", "")
+		}
+	}
+	for _, p := range h.presetSummary() {
+		if p.Now == "" {
+			add("warn", "Preset \""+p.Name+"\" has no usable model right now.", "presets")
+		}
+	}
+	status := "ok"
+	for _, a := range out {
+		if a.Level == "bad" {
+			status = "bad"
+		} else if a.Level == "warn" && status == "ok" {
+			status = "warn"
+		}
+	}
+	return out, status
+}
+
+func lastErr(s string) string {
+	if s == "" {
+		return ""
+	}
+	return " (" + s + ")"
+}
+
+type presetRow struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Modality    string   `json:"modality"`
+	Now         string   `json:"now"`
+	Flags       []string `json:"flags"`
+	Next        []string `json:"next"`
+	Trial       int      `json:"trial"`
+}
+
+func (h *Handler) presetSummary() []presetRow {
+	cfg := h.a.Cfg()
+	rk := h.a.Rt.Rankings()
+	names := make([]string, 0, len(cfg.Presets))
+	for n := range cfg.Presets {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var rows []presetRow
+	for _, n := range names {
+		p := cfg.Presets[n]
+		r := presetRow{Name: n, Description: p.Description, Modality: p.Modality}
+		if x := rk[n]; x != nil {
+			r.Trial = len(x.Trial)
+			for i, c := range x.Candidates {
+				switch {
+				case i == 0:
+					r.Now, r.Flags = c.Model, c.Flags
+				case i <= 2:
+					r.Next = append(r.Next, c.Model)
+				}
+			}
+		}
+		rows = append(rows, r)
+	}
+	return rows
+}
+
+// ---- upstream keys ----
+
+var nonEnv = regexp.MustCompile(`[^A-Z0-9]+`)
+
+func (h *Handler) upstreams(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Action string `json:"action"` // create | delete
+		Name   string `json:"name"`
+		Key    string `json:"key"`
+	}
+	if r.Method != http.MethodPost || readJSON(r, &in) != nil {
+		jerr(w, 400, "POST {action, name, key}")
+		return
+	}
+	next := *h.a.Cfg()
+	next.Upstreams = append([]config.Upstream(nil), next.Upstreams...)
+	switch in.Action {
+	case "create":
+		in.Key = strings.TrimSpace(in.Key)
+		in.Name = strings.Join(strings.Fields(in.Name), "-") // "my key" -> "my-key"
+		if in.Name == "" || in.Key == "" {
+			jerr(w, 422, "name and key are required")
+			return
+		}
+		env := "KENARI_KEY_" + strings.Trim(nonEnv.ReplaceAllString(strings.ToUpper(in.Name), "_"), "_")
+		next.Upstreams = append(next.Upstreams, config.Upstream{Name: in.Name, KeyEnv: env, Enabled: true, Tier: "auto"})
+		if err := config.Normalize(&next); err != nil {
+			jerr(w, 422, err.Error())
+			return
+		}
+		if err := config.SetSecret(next.Server.SecretsFile, env, in.Key); err != nil {
+			jerr(w, 422, err.Error())
+			return
+		}
+	case "delete":
+		kept := next.Upstreams[:0:0]
+		for _, u := range next.Upstreams {
+			if u.Name != in.Name {
+				kept = append(kept, u)
+			}
+		}
+		next.Upstreams = kept
+		for i := range next.Clients { // drop dangling restrictions
+			var ups []string
+			for _, n := range next.Clients[i].Upstreams {
+				if n != in.Name {
+					ups = append(ups, n)
+				}
+			}
+			next.Clients[i].Upstreams = ups
+		}
+	default:
+		jerr(w, 400, "action must be create or delete")
+		return
+	}
+	if err := h.a.Apply(&next); err != nil {
+		jerr(w, 422, err.Error())
+		return
+	}
+	jok(w, map[string]any{"ok": true})
 }
 
 // ---- config ----
@@ -350,8 +535,16 @@ func (h *Handler) clients(w http.ResponseWriter, r *http.Request) {
 			jerr(w, 404, "no such client")
 			return
 		}
+	case "delete":
+		kept := next.Clients[:0:0]
+		for _, c := range next.Clients {
+			if c.Name != in.Name {
+				kept = append(kept, c)
+			}
+		}
+		next.Clients = kept
 	default:
-		jerr(w, 400, "action must be create or rotate")
+		jerr(w, 400, "action must be create, rotate or delete")
 		return
 	}
 	if err := config.Normalize(&next); err != nil {

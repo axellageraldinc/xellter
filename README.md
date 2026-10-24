@@ -9,7 +9,7 @@ shrinks tool output before it is paid for. One static Go binary, no runtime depe
 
 ## What it does
 
-- **Preset models.** A preset is a named recipe clients call like a model (`xl-balanced`, `xl-budget`, `xl-smart`, `xl-coding`, `xl-image`, ...); xellter chooses the real model behind it.
+- **Preset models.** A preset is a named recipe clients call like a model (`balanced`, `budget`, `smart`, `coding`, `image`, ...); xellter chooses the real model behind it.
   Rank is computed from live kenari prices, promos, plans and free tiers, a quality score
   (benchmarks, a System One "JEV" judge, context size) and measured reliability.
 - **Auto rules.** Free models, plan-covered models and models on discount are preferred; new models get
@@ -39,7 +39,7 @@ Point a client at it:
 ```bash
 curl http://127.0.0.1:8480/v1/chat/completions \
   -H "Authorization: Bearer $(cat data/babu.key)" -H 'Content-Type: application/json' \
-  -d '{"model":"xl-balanced","messages":[{"role":"user","content":"hello"}]}'
+  -d '{"model":"balanced","messages":[{"role":"user","content":"hello"}]}'
 ```
 
 The response header `X-Xellter-Model` tells which real model answered.

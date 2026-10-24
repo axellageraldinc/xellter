@@ -152,16 +152,16 @@ func TestAdminConfigClientsAndRollback(t *testing.T) {
 	ck := ae.login(t)
 
 	// create a client: the key is returned once and works immediately
-	resp, b := ae.do(t, ck, "POST", "/admin/api/clients", map[string]any{"action": "create", "client": map[string]any{"name": "polifin", "presets": []string{"xl-budget"}}})
+	resp, b := ae.do(t, ck, "POST", "/admin/api/clients", map[string]any{"action": "create", "client": map[string]any{"name": "polifin", "presets": []string{"budget"}}})
 	var created struct{ Key string }
 	_ = json.Unmarshal(b, &created)
 	if resp.StatusCode != 200 || !strings.HasPrefix(created.Key, "xl-") {
 		t.Fatalf("create client: %d %s", resp.StatusCode, b)
 	}
-	if r, _ := ae.post(t, created.Key, "/v1/chat/completions", `{"model":"xl-budget","messages":[{"role":"user","content":"hi"}]}`); r.StatusCode != 200 {
+	if r, _ := ae.post(t, created.Key, "/v1/chat/completions", `{"model":"budget","messages":[{"role":"user","content":"hi"}]}`); r.StatusCode != 200 {
 		t.Fatalf("new client key rejected: %d", r.StatusCode)
 	}
-	if r, _ := ae.post(t, created.Key, "/v1/chat/completions", `{"model":"xl-balanced","messages":[{"role":"user","content":"hi"}]}`); r.StatusCode != 403 {
+	if r, _ := ae.post(t, created.Key, "/v1/chat/completions", `{"model":"balanced","messages":[{"role":"user","content":"hi"}]}`); r.StatusCode != 403 {
 		t.Fatalf("client must be limited to its presets: %d", r.StatusCode)
 	}
 	data, _ := os.ReadFile(ae.a.Path)
@@ -187,20 +187,20 @@ func TestAdminConfigClientsAndRollback(t *testing.T) {
 		History []string
 	}
 	_ = json.Unmarshal(b, &cur)
-	cur.Config["presets"].(map[string]any)["xl-balanced"].(map[string]any)["strategy"] = "nonsense"
+	cur.Config["presets"].(map[string]any)["balanced"].(map[string]any)["strategy"] = "nonsense"
 	if r, _ := ae.do(t, ck, "PUT", "/admin/api/config", map[string]any{"config": cur.Config}); r.StatusCode != 422 {
 		t.Fatalf("invalid config accepted: %d", r.StatusCode)
 	}
-	if ae.a.Cfg().Presets["xl-balanced"].Strategy == "nonsense" {
+	if ae.a.Cfg().Presets["balanced"].Strategy == "nonsense" {
 		t.Fatal("invalid config was applied")
 	}
 
 	// a valid edit applies live and is reversible
-	cur.Config["presets"].(map[string]any)["xl-balanced"].(map[string]any)["strategy"] = "priority"
+	cur.Config["presets"].(map[string]any)["balanced"].(map[string]any)["strategy"] = "priority"
 	if r, b := ae.do(t, ck, "PUT", "/admin/api/config", map[string]any{"config": cur.Config}); r.StatusCode != 200 {
 		t.Fatalf("valid config rejected: %d %s", r.StatusCode, b)
 	}
-	if ae.a.Cfg().Presets["xl-balanced"].Strategy != "priority" {
+	if ae.a.Cfg().Presets["balanced"].Strategy != "priority" {
 		t.Fatal("edit not applied")
 	}
 	_, b = ae.do(t, ck, "GET", "/admin/api/config", nil)
@@ -211,12 +211,12 @@ func TestAdminConfigClientsAndRollback(t *testing.T) {
 	if r, b := ae.do(t, ck, "POST", "/admin/api/rollback", map[string]string{"id": cur.History[0]}); r.StatusCode != 200 {
 		t.Fatalf("rollback: %d %s", r.StatusCode, b)
 	}
-	if ae.a.Cfg().Presets["xl-balanced"].Strategy != "round_robin" {
-		t.Fatalf("rollback did not restore the previous strategy: %s", ae.a.Cfg().Presets["xl-balanced"].Strategy)
+	if ae.a.Cfg().Presets["balanced"].Strategy != "round_robin" {
+		t.Fatalf("rollback did not restore the previous strategy: %s", ae.a.Cfg().Presets["balanced"].Strategy)
 	}
 
 	// ranking and the UI shell are served
-	if r, b := ae.do(t, ck, "GET", "/admin/api/ranking?preset=xl-balanced", nil); r.StatusCode != 200 || !strings.Contains(string(b), "candidates") {
+	if r, b := ae.do(t, ck, "GET", "/admin/api/ranking?preset=balanced", nil); r.StatusCode != 200 || !strings.Contains(string(b), "candidates") {
 		t.Fatalf("ranking: %d %s", r.StatusCode, b)
 	}
 	if r, b := ae.do(t, nil, "GET", "/admin/", nil); r.StatusCode != 200 || !strings.Contains(string(b), "xellter admin") {
@@ -236,4 +236,57 @@ func (ae *adminEnv) post(t *testing.T, key, path, body string) (*http.Response, 
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	return resp, string(b)
+}
+
+func TestAdminUpstreamsCreateDeleteAndOverviewAlerts(t *testing.T) {
+	ae := setupAdmin(t)
+	ck := ae.login(t)
+	if r, b := ae.do(t, ck, "POST", "/admin/api/upstreams", map[string]string{"action": "create", "name": "spare key", "key": "kn-new-secret"}); r.StatusCode != 200 {
+		t.Fatalf("create: %d %s", r.StatusCode, b)
+	}
+	found := false
+	for _, u := range ae.a.Cfg().Upstreams {
+		if u.Name == "spare-key" {
+			found = true
+			if u.KeyEnv != "KENARI_KEY_SPARE_KEY" || u.Tier != "auto" || !u.Enabled {
+				t.Fatalf("defaults wrong: %+v", u)
+			}
+		}
+	}
+	if !found || ae.a.Secrets()["KENARI_KEY_SPARE_KEY"] != "kn-new-secret" {
+		t.Fatal("key not stored")
+	}
+	if cfg, _ := os.ReadFile(ae.a.Path); strings.Contains(string(cfg), "kn-new-secret") {
+		t.Fatal("key value leaked into the config file")
+	}
+	_, b := ae.do(t, ck, "GET", "/admin/api/overview", nil)
+	var ov struct {
+		Alerts  []struct{ Level, Text string }
+		Status  string
+		Presets []struct{ Name, Now string }
+	}
+	_ = json.Unmarshal(b, &ov)
+	if len(ov.Presets) == 0 || ov.Status == "" {
+		t.Fatalf("overview incomplete: %s", b)
+	}
+	tip := false
+	for _, a := range ov.Alerts {
+		if a.Level == "info" && strings.Contains(a.Text, "full-access") {
+			tip = true
+		}
+	}
+	if !tip {
+		t.Fatalf("expected the add-a-full-access-key tip: %+v", ov.Alerts)
+	}
+	if r, b := ae.do(t, ck, "POST", "/admin/api/upstreams", map[string]string{"action": "delete", "name": "spare-key"}); r.StatusCode != 200 {
+		t.Fatalf("delete: %d %s", r.StatusCode, b)
+	}
+	for _, u := range ae.a.Cfg().Upstreams {
+		if u.Name == "spare-key" {
+			t.Fatal("not deleted")
+		}
+	}
+	if r, _ := ae.do(t, ck, "POST", "/admin/api/clients", map[string]string{"action": "delete", "name": "locked"}); r.StatusCode != 200 {
+		t.Fatalf("client delete: %d", r.StatusCode)
+	}
 }

@@ -187,9 +187,9 @@ func setup(t testing.TB, mutate func(*config.Config)) *env {
 	key := "xl-testkey"
 	cfg.Clients = []config.Client{
 		{Name: "babu", Enabled: true, KeyHash: proxy.HashKey(key), Presets: []string{"*"}},
-		{Name: "locked", Enabled: true, KeyHash: proxy.HashKey("xl-locked"), Presets: []string{"xl-budget"}},
+		{Name: "locked", Enabled: true, KeyHash: proxy.HashKey("xl-locked"), Presets: []string{"budget"}},
 		{Name: "off", Enabled: false, KeyHash: proxy.HashKey("xl-off"), Presets: []string{"*"}},
-		{Name: "direct", Enabled: true, KeyHash: proxy.HashKey("xl-direct"), Presets: []string{"xl-balanced"}, Passthrough: []string{"cheap-*"}},
+		{Name: "direct", Enabled: true, KeyHash: proxy.HashKey("xl-direct"), Presets: []string{"balanced"}, Passthrough: []string{"cheap-*"}},
 	}
 	cfg.Presets = config.DefaultPresets()
 	if mutate != nil {
@@ -246,16 +246,16 @@ const chatBody = `{"model":"%s","messages":[{"role":"user","content":"hi"}]}`
 
 func TestAuthAndModelAccess(t *testing.T) {
 	e := setup(t, nil)
-	if r, _ := e.post(t, "", "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-balanced")); r.StatusCode != 401 {
+	if r, _ := e.post(t, "", "/v1/chat/completions", fmt.Sprintf(chatBody, "balanced")); r.StatusCode != 401 {
 		t.Fatalf("no key: %d", r.StatusCode)
 	}
-	if r, _ := e.post(t, "xl-wrong", "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-balanced")); r.StatusCode != 401 {
+	if r, _ := e.post(t, "xl-wrong", "/v1/chat/completions", fmt.Sprintf(chatBody, "balanced")); r.StatusCode != 401 {
 		t.Fatalf("bad key: %d", r.StatusCode)
 	}
-	if r, _ := e.post(t, "xl-off", "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-balanced")); r.StatusCode != 403 {
+	if r, _ := e.post(t, "xl-off", "/v1/chat/completions", fmt.Sprintf(chatBody, "balanced")); r.StatusCode != 403 {
 		t.Fatalf("disabled client: %d", r.StatusCode)
 	}
-	if r, _ := e.post(t, "xl-locked", "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-balanced")); r.StatusCode != 403 {
+	if r, _ := e.post(t, "xl-locked", "/v1/chat/completions", fmt.Sprintf(chatBody, "balanced")); r.StatusCode != 403 {
 		t.Fatalf("preset not allowed: %d", r.StatusCode)
 	}
 	if r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "cheap-b")); r.StatusCode != 403 {
@@ -270,14 +270,14 @@ func TestAuthAndModelAccess(t *testing.T) {
 	if r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "nope")); r.StatusCode != 404 {
 		t.Fatalf("unknown model: %d", r.StatusCode)
 	}
-	if r, _ := e.post(t, e.keyCl, "/v1/images/generations", fmt.Sprintf(chatBody, "xl-balanced")); r.StatusCode != 400 {
+	if r, _ := e.post(t, e.keyCl, "/v1/images/generations", fmt.Sprintf(chatBody, "balanced")); r.StatusCode != 400 {
 		t.Fatalf("modality mismatch must be 400: %d", r.StatusCode)
 	}
 }
 
 func TestPresetRoutesToFreeOrPlanFirstAndRewritesModel(t *testing.T) {
 	e := setup(t, nil)
-	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-balanced"))
+	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "balanced"))
 	if resp.StatusCode != 200 {
 		t.Fatalf("status %d %s", resp.StatusCode, body)
 	}
@@ -291,7 +291,7 @@ func TestPresetRoutesToFreeOrPlanFirstAndRewritesModel(t *testing.T) {
 	if strings.Contains(e.f.last().Auth, "xl-") {
 		t.Fatal("client key leaked upstream")
 	}
-	rk := e.a.Rt.Rankings()["xl-balanced"]
+	rk := e.a.Rt.Rankings()["balanced"]
 	for _, c := range rk.Candidates {
 		if c.Model == "pro-c" && rk.Candidates[0].Model == "pro-c" {
 			t.Fatalf("expensive model must not lead: %+v", rk.Candidates)
@@ -301,9 +301,9 @@ func TestPresetRoutesToFreeOrPlanFirstAndRewritesModel(t *testing.T) {
 
 func TestFallbackOnUpstreamErrorAndRateLimit(t *testing.T) {
 	e := setup(t, func(c *config.Config) {
-		sh := c.Presets["xl-balanced"]
+		sh := c.Presets["balanced"]
 		sh.Mode, sh.Models, sh.Strategy = "combo", []string{"free-a:free", "cheap-b"}, "priority"
-		c.Presets["xl-balanced"] = sh
+		c.Presets["balanced"] = sh
 	})
 	e.f.chat = func(c call, n int) (int, string) {
 		if c.Model == "free-a:free" {
@@ -311,13 +311,13 @@ func TestFallbackOnUpstreamErrorAndRateLimit(t *testing.T) {
 		}
 		return 0, ""
 	}
-	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-balanced"))
+	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "balanced"))
 	if resp.StatusCode != 200 || resp.Header.Get("X-Xellter-Model") != "cheap-b" {
 		t.Fatalf("expected fallback to cheap-b, got %d %s model=%s", resp.StatusCode, body, resp.Header.Get("X-Xellter-Model"))
 	}
 	// the failing model is now blocked: next request goes straight to cheap-b
 	before := e.f.count("free-a:free")
-	e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-balanced"))
+	e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "balanced"))
 	if e.f.count("free-a:free") > before+0 && e.f.count("free-a:free") > 2 {
 		t.Fatalf("blocked model kept being retried: %d calls", e.f.count("free-a:free"))
 	}
@@ -325,9 +325,10 @@ func TestFallbackOnUpstreamErrorAndRateLimit(t *testing.T) {
 
 func TestRateLimitedKeyCoolsDownAndOtherKeyServes(t *testing.T) {
 	e := setup(t, func(c *config.Config) {
-		sh := c.Presets["xl-balanced"]
+		c.Upstreams[0].Account, c.Upstreams[1].Account = "acct-a", "acct-b" // limits are per account
+		sh := c.Presets["balanced"]
 		sh.Mode, sh.Models, sh.Strategy = "combo", []string{"free-a:free"}, "priority"
-		c.Presets["xl-balanced"] = sh
+		c.Presets["balanced"] = sh
 	})
 	e.f.chat = func(c call, n int) (int, string) {
 		if c.Auth == "Bearer secret-plan" || c.Auth == "Bearer secret-topup" {
@@ -337,7 +338,7 @@ func TestRateLimitedKeyCoolsDownAndOtherKeyServes(t *testing.T) {
 		}
 		return 0, ""
 	}
-	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-balanced"))
+	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "balanced"))
 	if resp.StatusCode != 200 {
 		t.Fatalf("second key should have served: %d %s", resp.StatusCode, body)
 	}
@@ -348,11 +349,11 @@ func TestRateLimitedKeyCoolsDownAndOtherKeyServes(t *testing.T) {
 
 func TestStreamingAndUsageAccounting(t *testing.T) {
 	e := setup(t, func(c *config.Config) {
-		sh := c.Presets["xl-balanced"]
+		sh := c.Presets["balanced"]
 		sh.Mode, sh.Models, sh.Strategy = "combo", []string{"cheap-b"}, "priority"
-		c.Presets["xl-balanced"] = sh
+		c.Presets["balanced"] = sh
 	})
-	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", `{"model":"xl-balanced","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", `{"model":"balanced","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
 	if resp.StatusCode != 200 || !strings.Contains(body, "t0") || !strings.Contains(body, "[DONE]") {
 		t.Fatalf("stream not relayed: %d %q", resp.StatusCode, body)
 	}
@@ -372,14 +373,14 @@ func TestStreamingAndUsageAccounting(t *testing.T) {
 func TestClientBudget(t *testing.T) {
 	e := setup(t, func(c *config.Config) {
 		c.Clients[0].DailyBudget = 0.0001
-		sh := c.Presets["xl-balanced"]
+		sh := c.Presets["balanced"]
 		sh.Mode, sh.Models, sh.Strategy = "combo", []string{"pro-c"}, "priority"
-		c.Presets["xl-balanced"] = sh
+		c.Presets["balanced"] = sh
 	})
-	if r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-balanced")); r.StatusCode != 200 {
+	if r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "balanced")); r.StatusCode != 200 {
 		t.Fatalf("first call: %d", r.StatusCode)
 	}
-	if r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-balanced")); r.StatusCode != 429 {
+	if r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "balanced")); r.StatusCode != 429 {
 		t.Fatalf("budget not enforced: %d", r.StatusCode)
 	}
 }
@@ -393,7 +394,7 @@ func TestRTKCompressesToolOutput(t *testing.T) {
 	}
 	diff.WriteString("-old\n+new\n")
 	tool, _ := json.Marshal(diff.String())
-	body := fmt.Sprintf(`{"model":"xl-balanced","messages":[{"role":"user","content":"diff?"},{"role":"tool","tool_call_id":"1","content":%s}]}`, tool)
+	body := fmt.Sprintf(`{"model":"balanced","messages":[{"role":"user","content":"diff?"},{"role":"tool","tool_call_id":"1","content":%s}]}`, tool)
 	if r, b := e.post(t, e.keyCl, "/v1/chat/completions", body); r.StatusCode != 200 {
 		t.Fatalf("%d %s", r.StatusCode, b)
 	}
@@ -414,13 +415,13 @@ func TestRTKCompressesToolOutput(t *testing.T) {
 
 func TestMediaRoutingPrefersFreeAndMultipartModelRewrite(t *testing.T) {
 	e := setup(t, nil)
-	resp, body := e.post(t, e.keyCl, "/v1/images/generations", `{"model":"xl-image","prompt":"cat"}`)
+	resp, body := e.post(t, e.keyCl, "/v1/images/generations", `{"model":"image","prompt":"cat"}`)
 	if resp.StatusCode != 200 || resp.Header.Get("X-Xellter-Model") != "img-free:free" {
 		t.Fatalf("image should use the free model first: %d %s %s", resp.StatusCode, resp.Header.Get("X-Xellter-Model"), body)
 	}
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
-	mw.WriteField("model", "xl-transcribe")
+	mw.WriteField("model", "transcribe")
 	fw, _ := mw.CreateFormFile("file", "a.mp3")
 	fw.Write([]byte("AUDIO"))
 	mw.Close()
@@ -444,16 +445,16 @@ func TestModelListShowsOnlyAllowedPresets(t *testing.T) {
 	r, _ := http.DefaultClient.Do(req)
 	var out struct{ Data []struct{ ID string } }
 	json.NewDecoder(r.Body).Decode(&out)
-	if len(out.Data) != 1 || out.Data[0].ID != "xl-budget" {
+	if len(out.Data) != 1 || out.Data[0].ID != "budget" {
 		t.Fatalf("got %+v", out.Data)
 	}
 }
 
 func TestLearnsAllowedModelsFromRestrictedKey(t *testing.T) {
 	e := setup(t, func(c *config.Config) {
-		sh := c.Presets["xl-balanced"]
+		sh := c.Presets["balanced"]
 		sh.Mode, sh.Models, sh.Strategy = "combo", []string{"pro-c", "cheap-b"}, "priority"
-		c.Presets["xl-balanced"] = sh
+		c.Presets["balanced"] = sh
 		c.Upstreams = c.Upstreams[:1]
 	})
 	e.f.chat = func(c call, n int) (int, string) {
@@ -462,7 +463,7 @@ func TestLearnsAllowedModelsFromRestrictedKey(t *testing.T) {
 		}
 		return 0, ""
 	}
-	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-balanced"))
+	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "balanced"))
 	if resp.StatusCode != 200 || resp.Header.Get("X-Xellter-Model") != "cheap-b" {
 		t.Fatalf("expected cheap-b after learning: %d %s", resp.StatusCode, body)
 	}

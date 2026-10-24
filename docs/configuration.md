@@ -25,7 +25,7 @@ One YAML file (`xellter -config`, default `xellter.yaml`, or `$XELLTER_CONFIG`).
 `name`, `enabled`, `key_hash` (sha256 of the client key; never the key), `key_hint`, `presets` (`["*"]` = all), `passthrough` (real-model globs the client may call directly; empty = none), `upstreams` (restrict to named upstreams), `daily_budget_idr` (catalog cost; 0 = unlimited), `rtk` (`null` = follow global), `note`.
 
 ## presets{}
-A **preset model** is a named recipe that clients call like a model (`xl-balanced`); xellter resolves it to a real model per request. Key = the name clients send. (Configs written before the rename use `shadows:`; they are migrated on load.)
+A **preset model** is a named recipe that clients call like a model (`balanced`); xellter resolves it to a real model per request. Key = the name clients send. (Configs written before the rename use `shadows:`; they are migrated on load.)
 
 | key | meaning |
 |---|---|
@@ -40,7 +40,7 @@ A **preset model** is a named recipe that clients call like a model (`xl-balance
 | `weights` | relative weights of `cost`, `benchmark`, `jev`, `reliability`, `context` |
 | `cost_profile` | reference request: `input_tokens`, `output_tokens`, `cached_ratio` (chat); `images`; `seconds`, `variant` (video/STT); `chars` (TTS) |
 
-Defaults: `xl-balanced` (everyday chat, weights 30/25/20/15/10), `xl-budget` (cheapest acceptable), `xl-smart` (best answers, cost matters less), `xl-coding` (tool use, long context, quality first), and cheapest-first media presets `xl-image`, `xl-video`, `xl-speech` (text to speech), `xl-transcribe` (speech to text), `xl-music`.
+Defaults: `balanced` (everyday chat, weights 30/25/20/15/10), `budget` (cheapest acceptable), `smart` (best answers, cost matters less), `coding` (tool use, long context, quality first), and cheapest-first media presets `image`, `video`, `speech` (text to speech), `transcribe` (speech to text), `music`.
 
 ## rules
 `free_bonus` .10, `plan_bonus` .08, `plan_cost_factor` .3 (a plan-covered request counts for this share of its list price, because plan budget is finite), `promo_bonus_max` .05, `promo_min_remaining_hours` 12, `upcoming_lookahead_hours` 24, `new_model_days` 14, `canary_percent` 5, `canary_min_requests` 20, `canary_min_success` .9, `avoid_sunset_days` 3, `sticky_minutes` 30, `stats_window_hours` 24.

@@ -307,7 +307,7 @@ func (s *Store) Usage(group string, since time.Time) ([]UsageRow, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []UsageRow
+	out := []UsageRow{}
 	for rows.Next() {
 		var u UsageRow
 		var k sql.NullString
@@ -349,7 +349,7 @@ func (s *Store) Recent(limit int) ([]RecentRow, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []RecentRow
+	out := []RecentRow{}
 	for rows.Next() {
 		var r RecentRow
 		var ok, canary int

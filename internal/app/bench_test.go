@@ -31,5 +31,5 @@ func BenchmarkProxyOverhead(b *testing.B) {
 		}
 	}
 	b.Run("direct", run(e.f.srv.URL, "x", "cheap-b"))
-	b.Run("via-xellter", run(e.px.URL, e.keyCl, "xl-balanced"))
+	b.Run("via-xellter", run(e.px.URL, e.keyCl, "balanced"))
 }

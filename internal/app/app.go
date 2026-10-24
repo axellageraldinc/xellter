@@ -75,6 +75,9 @@ func New(path string, src catalog.Source) (*App, error) {
 	a.Px.Logf = func(f string, v ...any) { a.Logf(f, v...) }
 	a.Judge = &jev.Judge{Cfg: a.Cfg, Cat: a.Cat, Pool: a.Pool, St: st, HC: &http.Client{}, Rankings: a.Rt.Rankings, Logf: func(f string, v ...any) { a.Logf(f, v...) }, Now: time.Now}
 	a.Cat.OnUpdate(func(s *catalog.Snapshot) {
+		for _, ac := range a.Pool.Accounts() {
+			ac.SetTopupThreshold(s.Tier.Thresh)
+		}
 		a.Rt.MarkSeen(s)
 		a.Rt.Recompute(time.Now())
 	})
@@ -130,7 +133,11 @@ func (a *App) ProbeKeys(ctx context.Context) {
 	cfg := a.Cfg()
 	hc := &http.Client{Timeout: 20 * time.Second}
 	for _, k := range a.Pool.Keys() {
-		if !k.Config().Enabled || k.Secret == "" {
+		if k.Secret == "" {
+			continue
+		}
+		if !k.Config().Enabled { // read-only account key: used for plan and balance, never for requests
+			a.readAccount(ctx, k)
 			continue
 		}
 		body := []byte(`{"model":"xellter-probe","max_tokens":1,"messages":[{"role":"user","content":"."}]}`)

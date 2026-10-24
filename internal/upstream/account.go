@@ -52,6 +52,7 @@ type Account struct {
 	infoKey        string // key that may read quota (unrestricted), "" = none
 	balanceIDR     float64
 	balanceAt      time.Time
+	topupThreshold float64 // balance (IDR) from which kenari lifts the free-tier limits
 }
 
 func startOfUTCDay(t time.Time) time.Time {
@@ -67,6 +68,13 @@ func (a *Account) SetInfo(info *PlanInfo, key string) {
 	if info != nil && info.Name != "" {
 		a.planBlocked = time.Time{} // fresh numbers replace our guess
 	}
+}
+
+// SetTopupThreshold sets the balance (IDR) from which kenari lifts the free-tier limits.
+func (a *Account) SetTopupThreshold(idr float64) {
+	a.mu.Lock()
+	a.topupThreshold = idr
+	a.mu.Unlock()
 }
 
 // SetBalance stores the account balance in IDR.
@@ -92,9 +100,18 @@ func (a *Account) effTier(now time.Time) string {
 		if a.info.Name != "" {
 			return "plan"
 		}
-		if a.tier == "plan" {
+		if a.tier == "plan" || a.tier == "auto" {
 			return "free" // kenari says there is no plan any more
 		}
+	}
+	if a.tier == "auto" { // nothing read from kenari: infer from what we know
+		switch {
+		case a.planCfg != "":
+			return "plan"
+		case a.balanceAt.After(time.Time{}) && a.balanceIDR >= a.topupThreshold:
+			return "topup"
+		}
+		return "free"
 	}
 	return a.tier
 }

@@ -5,36 +5,54 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>xellter admin</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Cpath d='M8 9l16 14M24 9L8 23' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23206bc4'/%3E%3Cpath d='M8 9l16 14M24 9L8 23' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="vendor/tabler.min.css">
+<link rel="stylesheet" href="app.css">
+<script src="theme.js"></script>
 </head>
 <body>
-<section id="login" hidden>
-  <form id="loginform" class="card login" autocomplete="on">
-    <h1>xellter</h1>
-    <p class="muted">Sign in to the admin panel</p>
-    <label class="f"><span>Username</span><input name="username" autocomplete="username" required></label>
-    <label class="f"><span>Password</span><input name="password" type="password" autocomplete="current-password" required></label>
-    <label class="f"><span>Authenticator or recovery code</span><input name="code" inputmode="numeric" autocomplete="one-time-code" required></label>
-    <button class="primary" type="submit">Sign in</button>
-    <p id="loginerr" class="err" role="alert"></p>
-  </form>
-</section>
-<div id="app" hidden>
-  <header>
-    <div class="brand">xellter</div>
-    <nav id="nav"></nav>
-    <button id="logout" class="ghost" title="Sign out">Sign out</button>
-  </header>
-  <main id="view"></main>
-  <div id="savebar" hidden>
-    <span>Unsaved changes</span>
-    <button id="discard" class="ghost">Discard</button>
-    <button id="save" class="primary">Save &amp; apply</button>
+<div class="page" id="login" hidden>
+  <div class="page-single">
+    <div class="container container-tight py-4">
+      <div class="text-center mb-4"><span class="brand-mark">xellter</span></div>
+      <form class="card card-md" id="loginform" autocomplete="on">
+        <div class="card-body">
+          <h2 class="h2 text-center mb-4">Sign in to the admin panel</h2>
+          <div class="mb-3"><label class="form-label">Username</label><input class="form-control" name="username" autocomplete="username" required></div>
+          <div class="mb-3"><label class="form-label">Password</label><input class="form-control" name="password" type="password" autocomplete="current-password" required></div>
+          <div class="mb-3"><label class="form-label">Authenticator code or recovery code</label><input class="form-control" name="code" inputmode="numeric" autocomplete="one-time-code" required></div>
+          <div class="form-footer"><button class="btn btn-primary w-100" type="submit">Sign in</button></div>
+          <div id="loginerr" class="text-danger mt-3" role="alert"></div>
+        </div>
+      </form>
+    </div>
   </div>
 </div>
-<dialog id="dlg"><div id="dlgbody"></div><form method="dialog"><button class="ghost">Close</button></form></dialog>
-<div id="toast" role="status"></div>
+
+<div class="page" id="app" hidden>
+  <header class="navbar navbar-expand-md d-print-none sticky-top">
+    <div class="container-xl">
+      <span class="navbar-brand brand-mark me-3">xellter</span>
+      <ul class="nav nav-pills flex-nowrap overflow-auto me-auto" id="nav"></ul>
+      <div class="navbar-nav flex-row">
+        <button class="btn btn-ghost-secondary btn-sm me-1" id="theme" title="Light / dark">◐</button>
+        <button class="btn btn-ghost-secondary btn-sm" id="logout">Sign out</button>
+      </div>
+    </div>
+  </header>
+  <div class="page-wrapper">
+    <div class="page-body"><div class="container-xl" id="view"></div></div>
+  </div>
+  <div id="savebar" class="savebar" hidden>
+    <div class="container-xl d-flex align-items-center gap-2">
+      <span class="me-auto fw-bold">You have unsaved changes</span>
+      <button class="btn btn-ghost-secondary" id="discard">Discard</button>
+      <button class="btn btn-primary" id="save">Save &amp; apply</button>
+    </div>
+  </div>
+</div>
+<dialog id="dlg" class="card"><div class="card-body" id="dlgbody"></div></dialog>
+<div id="toast" class="toast-lite" role="status"></div>
 <script src="app.js"></script>
 </body>
 </html>

@@ -39,7 +39,7 @@ clients:
     daily_budget_idr: 0           # 0 = unlimited
 
 # Preset models: the names clients use. Omit `presets:` to get the built-in set
-# (xl-balanced, xl-budget, xl-smart, xl-coding, xl-image, xl-video, xl-speech, xl-transcribe, xl-music).
+# (balanced, budget, smart, coding, image, video, speech, transcribe, music).
 presets:
   xl-research:
     description: Long answers, strongest model that is still cheap

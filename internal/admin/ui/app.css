@@ -1,0 +1,24 @@
+/* Small additions on top of Tabler (vendor/tabler.min.css). */
+.brand-mark { font-weight: 800; font-size: 1.15rem; letter-spacing: .02em; }
+.page-body { margin-top: 1.25rem; padding-bottom: 5rem; }
+.savebar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 1030; padding: .65rem 0; background: var(--tblr-bg-surface); border-top: 1px solid var(--tblr-border-color); box-shadow: 0 -6px 20px rgba(0, 0, 0, .12); }
+.toast-lite { position: fixed; left: 50%; bottom: 4.5rem; transform: translateX(-50%); background: var(--tblr-dark, #182433); color: #fff; padding: .55rem .95rem; border-radius: 8px; opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 2000; max-width: 92vw; }
+.toast-lite.show { opacity: .96; } .toast-lite.bad { background: var(--tblr-danger); }
+dialog#dlg { max-width: min(860px, 94vw); width: 100%; max-height: 88vh; overflow: auto; padding: 0; border: 1px solid var(--tblr-border-color); }
+dialog#dlg::backdrop { background: rgba(0, 0, 0, .5); }
+.mono { font-family: var(--tblr-font-monospace); font-size: .85em; }
+.keybox { background: var(--tblr-bg-surface-secondary); border: 1px dashed var(--tblr-primary); border-radius: 6px; padding: .6rem .75rem; word-break: break-all; user-select: all; }
+.clickable { cursor: pointer; }
+.nowrap { white-space: nowrap; }
+.chart { width: 100%; height: 120px; display: block; }
+.chart rect { fill: var(--tblr-primary); opacity: .85; } .chart rect.err { fill: var(--tblr-danger); opacity: 1; } .chart text { fill: var(--tblr-secondary); font-size: 10px; }
+.progress-sm { height: .45rem; }
+details.adv > summary { cursor: pointer; color: var(--tblr-secondary); list-style: none; padding: .25rem 0; }
+details.adv > summary::-webkit-details-marker { display: none; }
+details.adv > summary::before { content: "▸ "; } details.adv[open] > summary::before { content: "▾ "; }
+.table-responsive { -webkit-overflow-scrolling: touch; }
+.alert-row { display: flex; gap: .6rem; align-items: flex-start; padding: .5rem 0; border-bottom: 1px solid var(--tblr-border-color); }
+.alert-row:last-child { border-bottom: 0; }
+@media (max-width: 767.98px) { #nav { max-width: 100%; } .page-body { margin-top: .75rem; } }
+
+dialog#dlg:not([open]) { display: none; }

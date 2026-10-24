@@ -49,7 +49,10 @@ type Pool struct {
 // NewPool returns an empty pool.
 func NewPool() *Pool { return &Pool{by: map[string]*Key{}, accts: map[string]*Account{}} }
 
-var tierRank = map[string]int{"free": 0, "topup": 1, "plan": 2}
+var tierRank = map[string]int{"auto": 0, "free": 1, "topup": 2, "plan": 3}
+
+// DefaultAccount is the account name of keys that do not set one: most people have one kenari account.
+const DefaultAccount = "main"
 
 // Reload applies a new config; state of keys and accounts with unchanged names
 // is kept. st may be nil (tests); it seeds counters of brand-new keys.
@@ -68,7 +71,7 @@ func (p *Pool) Reload(cfg *config.Config, secrets map[string]string, st *store.S
 		}
 		an := u.Account
 		if an == "" {
-			an = u.Name
+			an = DefaultAccount
 		}
 		a := accts[an]
 		if a == nil {
@@ -78,7 +81,7 @@ func (p *Pool) Reload(cfg *config.Config, secrets map[string]string, st *store.S
 			}
 			accts[an] = a
 			a.mu.Lock() // recomputed below from every member key
-			a.tier, a.planCfg, a.rpmCfg, a.dailyCfg = "free", "", 0, 0
+			a.tier, a.planCfg, a.rpmCfg, a.dailyCfg = "auto", "", 0, 0
 			a.mu.Unlock()
 		}
 		a.mu.Lock()

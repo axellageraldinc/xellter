@@ -10,16 +10,16 @@ import (
 )
 
 func twoEqualModels(c *config.Config) {
-	sh := c.Presets["xl-balanced"]
+	sh := c.Presets["balanced"]
 	sh.Mode, sh.Models, sh.Strategy = "combo", []string{"cheap-b", "pro-c"}, "round_robin"
-	c.Presets["xl-balanced"] = sh
+	c.Presets["balanced"] = sh
 }
 
 func TestRoundRobinRotatesAndSessionsStick(t *testing.T) {
 	e := setup(t, twoEqualModels)
 	seen := map[string]int{}
 	for i := 0; i < 6; i++ { // different prompts = different sessions (identical prompts stick to one model)
-		r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(`{"model":"xl-balanced","messages":[{"role":"user","content":"question %d"}]}`, i))
+		r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(`{"model":"balanced","messages":[{"role":"user","content":"question %d"}]}`, i))
 		seen[r.Header.Get("X-Xellter-Model")]++
 	}
 	if seen["cheap-b"] == 0 || seen["pro-c"] == 0 {
@@ -28,7 +28,7 @@ func TestRoundRobinRotatesAndSessionsStick(t *testing.T) {
 	// with a session header, every request of the session lands on the same model
 	first := ""
 	for i := 0; i < 6; i++ {
-		r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-balanced"), "X-Xellter-Session", "s1")
+		r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "balanced"), "X-Xellter-Session", "s1")
 		m := r.Header.Get("X-Xellter-Model")
 		if first == "" {
 			first = m
@@ -44,11 +44,11 @@ func TestCanarySendsTrafficToNewModelAndFallsBack(t *testing.T) {
 	// mark one model as brand new after the baseline
 	e.a.St.SetSeen("promo-d", time.Now().Unix())
 	e.a.Rt.Recompute(time.Now())
-	rk := e.a.Rt.Rankings()["xl-budget"]
+	rk := e.a.Rt.Rankings()["budget"]
 	if len(rk.Trial) != 1 || rk.Trial[0].Model != "promo-d" {
 		t.Fatalf("trial pool: %+v rejected: %+v", rk.Trial, rk.Rejected)
 	}
-	r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-budget"))
+	r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "budget"))
 	if r.Header.Get("X-Xellter-Model") != "promo-d" {
 		t.Fatalf("canary should serve first, got %s", r.Header.Get("X-Xellter-Model"))
 	}
@@ -60,7 +60,7 @@ func TestCanarySendsTrafficToNewModelAndFallsBack(t *testing.T) {
 	}
 	e.a.Pool.Keys()[0].ResetState()
 	e.a.Pool.Keys()[1].ResetState()
-	r, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "xl-budget"))
+	r, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "budget"))
 	if r.StatusCode != 200 || r.Header.Get("X-Xellter-Model") == "promo-d" {
 		t.Fatalf("a failing canary must fall back to a proven model: %d %s %s", r.StatusCode, r.Header.Get("X-Xellter-Model"), body)
 	}
@@ -82,7 +82,7 @@ func TestJEVEvaluationStoresScoreAndRespectsBudget(t *testing.T) {
 		t.Fatalf("stored: %+v", scores)
 	}
 	e.a.Rt.Recompute(time.Now())
-	for _, c := range e.a.Rt.Rankings()["xl-balanced"].Candidates {
+	for _, c := range e.a.Rt.Rankings()["balanced"].Candidates {
 		if c.Model == "free-a:free" && c.Components["jev"] < 0.89 {
 			t.Fatalf("JEV score must feed the ranking: %+v", c.Components)
 		}
@@ -114,7 +114,7 @@ func TestProbeLearnsAllowListWithoutBilling(t *testing.T) {
 	if len(plan) != 2 || len(topup) != 0 {
 		t.Fatalf("plan=%v topup=%v", plan, topup)
 	}
-	for _, c := range e.a.Rt.Rankings()["xl-balanced"].Candidates {
+	for _, c := range e.a.Rt.Rankings()["balanced"].Candidates {
 		if c.Model == "pro-c" { // topup (unrestricted) can still serve it
 			return
 		}

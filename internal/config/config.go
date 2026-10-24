@@ -224,19 +224,19 @@ func DefaultPresets() map[string]Preset {
 	cp := CostProfile{InputTokens: 4000, OutputTokens: 600, CachedRatio: 0.7}
 	media := Weights{Cost: 70, Benchmark: 10, Reliability: 20}
 	return map[string]Preset{
-		"xl-balanced": {Description: "Everyday chat: good answers at a fair price", Modality: "chat", Mode: "auto", Require: Require{ToolCall: true, MinContext: 32000},
+		"balanced": {Description: "Everyday chat: good answers at a fair price", Modality: "chat", Mode: "auto", Require: Require{ToolCall: true, MinContext: 32000},
 			MinQuality: 0.45, MaxCandidates: 4, Strategy: "round_robin", RRBand: 0.04, Weights: chat, Cost: cp},
-		"xl-budget": {Description: "Cheapest acceptable model for simple tasks", Modality: "chat", Mode: "auto", Require: Require{MinContext: 16000},
+		"budget": {Description: "Cheapest acceptable model for simple tasks", Modality: "chat", Mode: "auto", Require: Require{MinContext: 16000},
 			MinQuality: 0.30, MaxCandidates: 4, Strategy: "round_robin", RRBand: 0.05, Weights: Weights{Cost: 50, Benchmark: 15, JEV: 10, Reliability: 20, Context: 5}, Cost: cp},
-		"xl-smart": {Description: "Best answers; cost matters less", Modality: "chat", Mode: "auto", Require: Require{ToolCall: true, MinContext: 64000},
+		"smart": {Description: "Best answers; cost matters less", Modality: "chat", Mode: "auto", Require: Require{ToolCall: true, MinContext: 64000},
 			MinQuality: 0.6, MaxCandidates: 3, Strategy: "priority", RRBand: 0.03, Weights: Weights{Cost: 10, Benchmark: 35, JEV: 30, Reliability: 15, Context: 10}, Cost: cp},
-		"xl-coding": {Description: "Coding agents: tool use, long context, quality first", Modality: "chat", Mode: "auto", Require: Require{ToolCall: true, MinContext: 64000},
+		"coding": {Description: "Coding agents: tool use, long context, quality first", Modality: "chat", Mode: "auto", Require: Require{ToolCall: true, MinContext: 64000},
 			MinQuality: 0.55, MaxCandidates: 4, Strategy: "priority", RRBand: 0.03, Weights: Weights{Cost: 20, Benchmark: 35, JEV: 20, Reliability: 15, Context: 10}, Cost: cp},
-		"xl-image":      {Description: "Image generation, cheapest first", Modality: "images", Mode: "auto", MaxCandidates: 4, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Images: 1}},
-		"xl-video":      {Description: "Video generation, cheapest first", Modality: "videos", Mode: "auto", MaxCandidates: 3, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Seconds: 5, Variant: "720p"}},
-		"xl-speech":     {Description: "Text to speech, cheapest first", Modality: "audio_speech", Mode: "auto", MaxCandidates: 3, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Chars: 1000}},
-		"xl-transcribe": {Description: "Speech to text, cheapest first", Modality: "audio_transcription", Mode: "auto", MaxCandidates: 3, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Seconds: 60}},
-		"xl-music":      {Description: "Music generation, cheapest first", Modality: "music", Mode: "auto", MaxCandidates: 2, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{}},
+		"image":      {Description: "Image generation, cheapest first", Modality: "images", Mode: "auto", MaxCandidates: 4, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Images: 1}},
+		"video":      {Description: "Video generation, cheapest first", Modality: "videos", Mode: "auto", MaxCandidates: 3, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Seconds: 5, Variant: "720p"}},
+		"speech":     {Description: "Text to speech, cheapest first", Modality: "audio_speech", Mode: "auto", MaxCandidates: 3, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Chars: 1000}},
+		"transcribe": {Description: "Speech to text, cheapest first", Modality: "audio_transcription", Mode: "auto", MaxCandidates: 3, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Seconds: 60}},
+		"music":      {Description: "Music generation, cheapest first", Modality: "music", Mode: "auto", MaxCandidates: 2, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{}},
 	}
 }
 
@@ -364,7 +364,7 @@ func (c *Config) fillDefaults() {
 	}
 	for i := range c.Upstreams {
 		if c.Upstreams[i].Tier == "" {
-			c.Upstreams[i].Tier = "free"
+			c.Upstreams[i].Tier = "auto"
 		}
 	}
 	for name, s := range c.Presets {
@@ -409,8 +409,8 @@ func (c *Config) Validate() error {
 		if !envRe.MatchString(u.KeyEnv) {
 			bad("upstream %q: key_env must look like KENARI_KEY_X", u.Name)
 		}
-		if u.Tier != "free" && u.Tier != "topup" && u.Tier != "plan" {
-			bad("upstream %q: tier must be free, topup or plan", u.Name)
+		if u.Tier != "auto" && u.Tier != "free" && u.Tier != "topup" && u.Tier != "plan" {
+			bad("upstream %q: tier must be auto, free, topup or plan", u.Name)
 		}
 		checkGlobs(&errs, "upstream "+u.Name+".allow", u.Allow)
 	}
