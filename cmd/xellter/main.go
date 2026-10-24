@@ -21,6 +21,7 @@ import (
 	"github.com/axellageraldinc/xellter/internal/auth"
 	"github.com/axellageraldinc/xellter/internal/config"
 	"github.com/axellageraldinc/xellter/internal/proxy"
+	"github.com/axellageraldinc/xellter/internal/store"
 )
 
 const usage = `xellter - LLM gateway for kenari.id
@@ -172,6 +173,7 @@ func adminCmd(args []string) error {
 	user := fs.String("username", "admin", "admin username")
 	from := fs.String("from-record", "", "reuse an existing record (for example aixell's auth-record.json)")
 	out := fs.String("credentials-out", "", "write the generated credentials to this file (mode 0600) instead of stdout")
+	force := fs.Bool("force", false, "replace an existing login: new password, new authenticator secret, all sessions ended")
 	_ = fs.Parse(args[1:])
 	c, err := config.Load(*path)
 	if err != nil {
@@ -181,7 +183,16 @@ func adminCmd(args []string) error {
 		return err
 	}
 	if _, err := os.Stat(c.Server.AuthRecord); err == nil {
-		return fmt.Errorf("%s already exists; remove it first to re-initialise", c.Server.AuthRecord)
+		if !*force {
+			return fmt.Errorf("%s already exists; pass -force to replace it", c.Server.AuthRecord)
+		}
+		for _, f := range []string{"login-state.json", "recovery-used.json"} {
+			_ = os.Remove(filepath.Join(c.Server.DataDir, f))
+		}
+		if st, err := store.Open(c.Server.DataDir); err == nil {
+			st.DeleteAllSessions() // old logins must not survive a credential reset
+			_ = st.Close()
+		}
 	}
 	if *from != "" {
 		rec, err := auth.ReadRecord(*from)

@@ -16,7 +16,7 @@ Status: **P0-P6 delivered in the first build**; rollout and tuning continue (see
 1. Run on the tailnet only; owner tests with curl and the panel. (current)
 2. Move **polifin** first (smallest key, one model), then **aixell**, then **Babu**: change `base_url` and key in each profile, keep the old direct key as a rollback.
 3. Watch Overview and Usage for a few days; adjust weights and benchmarks.
-4. Open the public domain (`xellter.wongjvm.my.id`) and flip the repo to public when the owner says so.
+4. Open the public domain (`xellter.<your-domain>`) and flip the repo to public when the owner says so.
 
 ## Next (not in v1)
 - Benchmarks file curated for the owner's workloads; JEV golden prompts in Indonesian and tool-calling.

@@ -6,7 +6,7 @@ make build
 cp config.example.yaml xellter.yaml            # edit upstreams, admin_hosts
 install -d -m 700 data
 printf 'KENARI_KEY_X=kn-...\n' > data/secrets.env && chmod 600 data/secrets.env
-./bin/xellter admin init -credentials-out data/FIRST-LOGIN.txt      # or: -from-record <aixell auth-record.json>
+./bin/xellter admin init -credentials-out data/FIRST-LOGIN.txt      # generates its own password and authenticator secret
 ./bin/xellter client add -name babu -out data/babu.key
 ./bin/xellter serve
 ```
@@ -37,4 +37,4 @@ Expose only what clients need. Because `/admin` answers only for hostnames liste
 - Upstream key values: only in `data/secrets.env` (0600), never in config, logs or responses.
 - Admin: Host allowlist, scrypt (N=2^17) + mandatory TOTP, single-use recovery codes, 5 attempts/15 min per client and 30 global, `HttpOnly` + `SameSite=Strict` cookie (`Secure` behind HTTPS), `X-Xellter` header required on writes, CSP and frame denial.
 - Request log has metadata only (client, model, tokens, cost, timing, error), no prompts or answers.
-- Reset a lost login: stop nothing; delete `data/auth-record.json` and run `xellter admin init` again, then restart.
+- Reset a lost login or rotate the authenticator: `xellter admin init -force -credentials-out data/FIRST-LOGIN.txt`, then restart the service (it ends all sessions and prints a new password, TOTP secret and recovery codes).

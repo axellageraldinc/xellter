@@ -64,7 +64,7 @@ func TestLsLongFormat(t *testing.T) {
 	var b strings.Builder
 	b.WriteString("total 4000\n")
 	for i := 0; i < 200; i++ {
-		fmt.Fprintf(&b, "-rw-r--r-- 1 wongjava wongjava %d Oct 24 05:00 file-%03d.txt\n", i*10, i)
+		fmt.Fprintf(&b, "-rw-r--r-- 1 user user %d Oct 24 05:00 file-%03d.txt\n", i*10, i)
 	}
 	out, f := Compress(b.String(), cfg())
 	if f != "ls" || !strings.Contains(out, "file-000.txt 0") || !strings.Contains(out, "more entries") {
