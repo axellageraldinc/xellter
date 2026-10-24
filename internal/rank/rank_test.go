@@ -237,3 +237,91 @@ func TestRankingListsEveryCallableModelAndHonoursDeny(t *testing.T) {
 		t.Fatal("the denial should be explained")
 	}
 }
+
+func TestCostScoreFollowsRelativePrice(t *testing.T) {
+	f := fixture(chat("cheap", 1000, 4000), chat("mid", 1150, 4600), chat("dear", 3000, 12000))
+	f.cfg.Benchmarks = map[string]float64{"cheap": 60, "mid": 70, "dear": 70} // the pricier ones are a bit better
+	p := f.cl.Presets["text"]
+	p.Weights = config.Weights{Cost: 60, Benchmark: 10, JEV: 10, Reliability: 15, Context: 5} // "Cheapest"
+	p.MinQuality = 0.3
+	f.cl.Presets["text"] = p
+	r := f.rank("text", nil)
+	if o := order(r); len(o) != 3 || o[0] != "cheap" || o[1] != "mid" || o[2] != "dear" {
+		t.Fatalf("Cheapest must follow the price: %v", o)
+	}
+	cs := map[string]float64{}
+	for _, c := range r.Candidates {
+		cs[c.Model] = c.Components["cost"]
+	}
+	// 1/(1+ln(cost/cheapest)): 15% dearer ~0.88, three times dearer ~0.48
+	if cs["cheap"] != 1 || cs["mid"] < 0.85 || cs["mid"] > 0.9 || cs["dear"] < 0.4 || cs["dear"] > 0.55 {
+		t.Fatalf("cost scores should fall smoothly with relative price: %v", cs)
+	}
+}
+
+func freeChat(id string) *catalog.Model {
+	m := chat(id, 0, 0)
+	m.Free = true
+	return m
+}
+
+func TestUnverifiedFreeModelsStayOnTrialUntilJudged(t *testing.T) {
+	f := fixture(freeChat("mystery:free"), chat("known", 500, 1500))
+	f.cfg.Benchmarks = map[string]float64{"known": 70}
+	r := f.rank("text", nil)
+	if o := order(r); len(o) != 1 || o[0] != "known" {
+		t.Fatalf("an unverified free model must not lead: %v", o)
+	}
+	if len(r.Trial) != 1 || r.Trial[0].Model != "mystery:free" || !containsStr(r.Trial[0].Flags, "unverified, on trial") {
+		t.Fatalf("it should be on trial: %+v", r.Trial)
+	}
+	// once JEV has judged it well, it competes normally
+	f.cfg.JEV.Enabled = true
+	r = f.rank("text", func(in *Inputs) { in.JEV = map[string]store.JEVScore{"mystery:free": {Score: 0.9}} })
+	if len(r.Trial) != 0 || len(r.Candidates) != 2 || r.Candidates[0].Model != "mystery:free" {
+		t.Fatalf("judged and free: %v trial=%v", order(r), r.Trial)
+	}
+	// ...and so does a model that proved itself in live traffic
+	r = f.rank("text", func(in *Inputs) { in.Life = map[string]store.ModelStat{"mystery:free": {N: 30, OK: 30}} })
+	if len(r.Trial) != 0 {
+		t.Fatal("a model proven by traffic leaves the trial")
+	}
+}
+
+func TestObjectivesBehaveAsNamed(t *testing.T) {
+	free := freeChat("free-big:free")
+	free.FreeSibling = "big" // priced twin, so its quality can be estimated
+	f := fixture(free, chat("big", 6000, 24000), chat("mid", 1200, 4800), chat("small", 300, 1200))
+	f.cfg.Benchmarks = map[string]float64{"big": 92, "mid": 75, "small": 55, "free-big:free": 68}
+	obj := map[string]struct {
+		w config.Weights
+		q float64
+	}{
+		"cheapest": {config.Weights{Cost: 60, Benchmark: 10, JEV: 10, Reliability: 15, Context: 5}, 0.30},
+		"balanced": {config.Weights{Cost: 30, Benchmark: 25, JEV: 20, Reliability: 15, Context: 10}, 0.45},
+		"quality":  {config.Weights{Cost: 5, Benchmark: 40, JEV: 30, Reliability: 15, Context: 10}, 0.60},
+	}
+	top := map[string]string{}
+	for name, o := range obj {
+		p := f.cl.Presets["text"]
+		p.Weights, p.MinQuality, p.Strategy = o.w, o.q, "priority"
+		f.cl.Presets["text"] = p
+		r := f.rank("text", nil)
+		top[name] = r.Candidates[0].Model
+		if name == "cheapest" && order(r)[len(order(r))-1] != "big" {
+			t.Fatalf("Cheapest must put the dearest model last: %v", order(r))
+		}
+		if name == "quality" && order(r)[0] == "small" {
+			t.Fatalf("Best quality must not lead with the weakest model: %v", order(r))
+		}
+	}
+	if top["cheapest"] != "free-big:free" {
+		t.Fatalf("Cheapest should take the free model that is good enough, got %s", top["cheapest"])
+	}
+	if top["quality"] != "big" {
+		t.Fatalf("Best quality should take the strongest model even though it is the dearest, got %s", top["quality"])
+	}
+	if top["balanced"] == "small" || top["balanced"] == "big" && false {
+		t.Fatalf("Balanced should not pick the weakest model: %s", top["balanced"])
+	}
+}

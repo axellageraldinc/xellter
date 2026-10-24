@@ -302,7 +302,7 @@ func (s *Store) Usage(group string, since time.Time, client string) ([]UsageRow,
 	if col == "" {
 		return nil, errors.New("bad group")
 	}
-	rows, err := s.db.Query(fmt.Sprintf(`SELECT %s k, COUNT(*), COUNT(*)-SUM(ok), COALESCE(SUM(in_tok),0), COALESCE(SUM(out_tok),0), COALESCE(SUM(cost),0), COALESCE(AVG(latency_ms),0) FROM requests WHERE ts>=? AND (?='' OR client=?) AND client!='_jev' GROUP BY k ORDER BY k`, col), since.UnixMilli(), client, client)
+	rows, err := s.db.Query(fmt.Sprintf(`SELECT %s k, COUNT(*), COUNT(*)-SUM(ok), COALESCE(SUM(in_tok),0), COALESCE(SUM(out_tok),0), COALESCE(SUM(cost),0), COALESCE(AVG(latency_ms),0) FROM requests WHERE ts>=? AND (?='' OR client=?) AND substr(client,1,1)!='_' GROUP BY k ORDER BY k`, col), since.UnixMilli(), client, client)
 	if err != nil {
 		return nil, err
 	}

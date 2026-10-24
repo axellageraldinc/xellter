@@ -81,6 +81,7 @@ func All(in Inputs) map[string]*Ranking {
 }
 
 type scored struct {
+	trial     bool // new or unverified and not yet proven: only receives canary traffic
 	m         *catalog.Model
 	cost      float64
 	costKnown bool
@@ -184,33 +185,43 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 	}
 	assignBench(in, pool, sh)
 
-	// cost normalisation: log scale between the cheapest and the dearest paid model of this modality in
-	// the whole catalog, so a lone expensive candidate never looks cheap just because it has no rival
-	var lo, hi = math.Inf(1), 0.0
-	for _, m := range in.Snap.Models {
-		if m.Endpoint != sh.Modality || m.Free {
-			continue
+	// Trial = models we have no evidence for yet. A model is on trial when it is new, or (text only) when it has
+	// neither a configured benchmark, nor a price to estimate from, nor a JEV score: for such a model a "free"
+	// label says nothing about quality, so it must not lead any preset until it is judged or has proven itself.
+	for _, s := range pool {
+		m := s.m
+		isNew := false
+		if t, ok := in.Seen[m.ID]; ok && t.Unix() > 0 && in.Now.Sub(t) < time.Duration(rules.NewModelDays)*24*time.Hour {
+			isNew = true
 		}
-		if c, ok := RefCost(m, sh.Cost, in.Now, look); ok && c > 0 {
-			lo, hi = math.Min(lo, c), math.Max(hi, c)
+		life := in.Life[m.ID]
+		proven := life.N >= rules.CanaryMinRequests && float64(life.OK)/math.Max(float64(life.N), 1) >= rules.CanaryMinSuccess
+		_, judged := in.JEV[m.ID]
+		unverified := sh.Modality == "chat" && s.benchSrc == "unknown" && !judged
+		s.trial = (isNew || unverified) && !proven
+		if unverified {
+			s.flags = append(s.flags, "unverified")
 		}
 	}
-	for _, s := range pool { // plan discounts can undercut the catalog minimum
-		if s.costKnown && s.cost > 0 {
-			lo, hi = math.Min(lo, s.cost), math.Max(hi, s.cost)
+
+	// cost score: free = 1; a paid model scores 1/(1+ln(cost/reference)) where the reference is the cheapest paid
+	// model that is not on trial: equal price 1.0, 13% dearer 0.89, twice 0.59, ten times 0.30. Smooth, so small
+	// price differences count (a log scale over the whole catalog made them invisible) and a very expensive model
+	// does not collapse to exactly 0.
+	cheapest := math.Inf(1)
+	for _, s := range pool {
+		if !s.trial && s.costKnown && s.cost > 0 {
+			cheapest = math.Min(cheapest, s.cost)
 		}
 	}
-	span := math.Max(math.Log(hi/lo), math.Log(4))
 	costScore := func(s *scored) float64 {
 		switch {
 		case !s.costKnown:
 			return 0.4
-		case s.cost == 0:
-			return 1
-		case math.IsInf(lo, 1):
+		case s.cost == 0 || math.IsInf(cheapest, 1) || s.cost <= cheapest:
 			return 1
 		}
-		return clamp(1 - math.Log(s.cost/lo)/span)
+		return clamp(1 / (1 + math.Log(s.cost/cheapest)))
 	}
 
 	// reliability reference
@@ -227,6 +238,12 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 	}
 
 	w := sh.Weights
+	// Free / plan / promo bonuses express "money matters". They scale with how much this preset cares about cost
+	// (balanced = 1x, cheapest = 2x, best quality = a third), so they cannot outvote quality when quality is the goal.
+	bonusScale := 1.0
+	if tot := w.Cost + w.Benchmark + w.JEV + w.Reliability + w.Context; tot > 0 {
+		bonusScale = math.Max(0.25, math.Min(2, (w.Cost/tot)/0.30))
+	}
 	minCtx := float64(sh.Require.MinContext)
 	if minCtx <= 0 {
 		minCtx = 8000
@@ -279,14 +296,14 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 		bon := map[string]float64{}
 		flags := append([]string(nil), s.flags...)
 		if m.Free {
-			bon["free"] = rules.FreeBonus
+			bon["free"] = rules.FreeBonus * bonusScale
 			flags = append(flags, "free")
 		} else if s.covered {
-			bon["plan"] = rules.PlanBonus
+			bon["plan"] = rules.PlanBonus * bonusScale
 			flags = append(flags, "plan")
 		}
 		if m.PromoActive(in.Now, minRemain) {
-			bon["promo"] = rules.PromoBonusMax * m.Promo.PercentOff / 100
+			bon["promo"] = rules.PromoBonusMax * bonusScale * m.Promo.PercentOff / 100
 			flags = append(flags, fmt.Sprintf("promo -%.0f%% until %s", m.Promo.PercentOff, m.Promo.EndsAt.Format("01-02 15:04")))
 		}
 		if m.Upcoming != nil && m.Upcoming.EffectiveAt.Sub(in.Now) < look {
@@ -298,26 +315,21 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 		c := Candidate{Model: m.ID, Score: round(score), Quality: round(quality), CostIDR: round4(s.cost), ListCost: round4(s.listCost),
 			Components: roundMap(comp), Bonuses: roundMap(bon), Flags: flags, BenchSource: s.benchSrc}
 
-		isNew := false
-		if t, ok := in.Seen[m.ID]; ok && t.Unix() > 0 && in.Now.Sub(t) < time.Duration(rules.NewModelDays)*24*time.Hour {
-			isNew = true
-		}
-		life := in.Life[m.ID]
-		proven := life.N >= rules.CanaryMinRequests && float64(life.OK)/math.Max(float64(life.N), 1) >= rules.CanaryMinSuccess
 		jev, hasJEV := in.JEV[m.ID]
 		switch {
 		case hasJEV && jev.Score < in.Cfg.JEV.PassThreshold && in.Cfg.JEV.Enabled:
 			reject(m.ID, fmt.Sprintf("JEV score %.2f below threshold %.2f", jev.Score, in.Cfg.JEV.PassThreshold))
-		case isNew && !proven:
-			c.Flags = append(c.Flags, "new, on trial")
-			c.Reason = describe(c, "trial candidate: receives canary traffic until proven")
+		case s.trial:
+			label, note := "new, on trial", "trial candidate: receives canary traffic until proven"
+			if containsStr(flags, "unverified") {
+				label, note = "unverified, on trial", "no quality evidence yet: judged by JEV or proven by traffic before it can lead"
+			}
+			c.Flags = append(c.Flags, label)
+			c.Reason = describe(c, note)
 			trial = append(trial, c)
 		case quality < sh.MinQuality:
 			reject(m.ID, fmt.Sprintf("quality %.2f below minimum %.2f", quality, sh.MinQuality))
 		default:
-			if isNew {
-				c.Flags = append(c.Flags, "proven")
-			}
 			c.Reason = describe(c, "")
 			main = append(main, c)
 		}
@@ -447,6 +459,15 @@ func describe(c Candidate, extra string) string {
 		s += " " + extra
 	}
 	return s
+}
+
+func containsStr(l []string, v string) bool {
+	for _, x := range l {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 func clamp(v float64) float64  { return math.Max(0, math.Min(1, v)) }

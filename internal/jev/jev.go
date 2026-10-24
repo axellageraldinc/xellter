@@ -174,7 +174,7 @@ func (j *Judge) RunDue(ctx context.Context, max int) (int, error) {
 		if _, err := j.Evaluate(ctx, m); err != nil {
 			j.Logf("jev evaluate %s: %v", m, err)
 			lastErr = err
-			if errors.Is(err, errJudgeDown) {
+			if errors.Is(err, errJudgeDown) || errors.Is(err, errNoSystemKey) {
 				break // every other model would fail the same way; try again next round
 			}
 			lastErr = fmt.Errorf("%s: %w", m, err)
@@ -205,9 +205,9 @@ func (j *Judge) Evaluate(ctx context.Context, model string) (float64, error) {
 	if j.Now().Before(down) {
 		return 0, fmt.Errorf("%w; next try at %s", errJudgeDown, down.Format("15:04"))
 	}
-	key := j.pickKey(cfg, snap, m)
-	if key == nil {
-		return 0, errors.New("no usable key for model")
+	key, err := j.systemKey(snap, m)
+	if err != nil {
+		return 0, err
 	}
 	judge := snap.Models[cfg.JEV.Model]
 	if judge == nil {
@@ -248,29 +248,26 @@ func (j *Judge) Evaluate(ctx context.Context, model string) (float64, error) {
 }
 
 func (j *Judge) log(model, key string, err error, in, out int) {
-	r := store.Request{TS: j.Now().UnixMilli(), Client: "_jev", Model: model, Upstream: key, Path: "jev", Status: 200, OK: err == nil, InTok: in, OutTok: out, Billing: "payg"}
+	r := store.Request{TS: j.Now().UnixMilli(), Client: "_system", Model: model, Upstream: key, Path: "jev", Status: 200, OK: err == nil, InTok: in, OutTok: out, Billing: "payg"}
 	if err != nil {
 		r.Status, r.Err = 0, err.Error()
 	}
 	j.St.Log(r)
 }
 
-func (j *Judge) pickKey(cfg *config.Config, snap *catalog.Snapshot, m *catalog.Model) *upstream.Key {
-	now := j.Now()
-	var best *upstream.Key
-	for _, k := range j.Pool.Keys() {
-		if cfg.JEV.Upstream != "" && k.Name != cfg.JEV.Upstream {
-			continue
-		}
-		if !k.AllowedModel(cfg.JEV.Model) || k.Check(m, snap, now) != upstream.OK {
-			continue
-		}
-		if k.Reserve(m, snap, now) == upstream.OK {
-			best = k
-			break
-		}
+// errNoSystemKey is returned when no account key is configured.
+var errNoSystemKey = errors.New("judging needs the dashboard's account key: add it on the Overview page (Kenari plan & balance)")
+
+// systemKey returns the dashboard's own key, reserved for one request of model m.
+func (j *Judge) systemKey(snap *catalog.Snapshot, m *catalog.Model) (*upstream.Key, error) {
+	k := j.Pool.SystemKey()
+	if k == nil {
+		return nil, errNoSystemKey
 	}
-	return best
+	if why := k.ReserveSystem(m, snap, j.Now()); why != upstream.OK {
+		return nil, fmt.Errorf("the account key cannot take a request now: %s", why)
+	}
+	return k, nil
 }
 
 func (j *Judge) post(ctx context.Context, cfg *config.Config, key *upstream.Key, path string, body any, out any) error {

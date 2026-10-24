@@ -79,6 +79,11 @@ func TestJEVEvaluationStoresScoreAndRespectsBudget(t *testing.T) {
 	if err != nil || score < 0.89 || score > 0.91 {
 		t.Fatalf("score=%v err=%v", score, err)
 	}
+	for _, c := range e.f.calls {
+		if (c.Path == "/v1/systemone" || c.Model == "free-a:free") && c.Auth != "Bearer secret-account" {
+			t.Fatalf("a call that belongs to no client must use the account key, used %q on %s", c.Auth, c.Path)
+		}
+	}
 	scores, _ := e.a.St.JEVScores()
 	if scores["free-a:free"].N != 2 {
 		t.Fatalf("stored: %+v", scores)
@@ -296,5 +301,16 @@ func TestClientsNeverSeeEachOthersModels(t *testing.T) {
 	r, _ := e.post(t, "xl-one", "/v1/chat/completions", `{"model":"text","messages":[{"role":"user","content":"hi"}]}`)
 	if r.Header.Get("X-Xellter-Model") != "cheap-b" {
 		t.Fatalf("served by %q", r.Header.Get("X-Xellter-Model"))
+	}
+}
+
+func TestJEVNeedsTheAccountKey(t *testing.T) {
+	e := setup(t, func(c *config.Config) { c.JEV.Enabled = true; c.Kenari.AccountKeyEnv = "KENARI_NOT_SET" })
+	e.a.Judge.HC = e.f.srv.Client()
+	if _, err := e.a.Judge.Evaluate(context.Background(), "cheap-b"); err == nil || !strings.Contains(err.Error(), "account key") {
+		t.Fatalf("judging without an account key must say so, got %v", err)
+	}
+	if len(e.f.calls) != 0 {
+		t.Fatal("no call may be made with a client's key")
 	}
 }

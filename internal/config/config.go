@@ -167,7 +167,6 @@ type Resilience struct {
 type JEV struct {
 	Enabled        bool     `yaml:"enabled" json:"enabled"`
 	Model          string   `yaml:"model" json:"model"`
-	Upstream       string   `yaml:"upstream" json:"upstream"` // upstream name used for evaluation calls
 	DailyBudgetIDR float64  `yaml:"daily_budget_idr" json:"daily_budget_idr"`
 	EveryHours     int      `yaml:"every_hours" json:"every_hours"`
 	PassThreshold  float64  `yaml:"pass_threshold" json:"pass_threshold"`

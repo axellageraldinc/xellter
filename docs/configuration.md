@@ -56,7 +56,7 @@ Key = the name the app sends as `model`.
 | `weights` | relative weights of `cost`, `benchmark`, `jev`, `reliability`, `context` |
 | `cost_profile` | reference request: `input_tokens`, `output_tokens`, `cached_ratio` (chat); `images`; `seconds`, `variant` (video/STT); `chars` (TTS) |
 
-In the panel, "Models it may use" on a preset card lists every model the client's keys can call; unticking one adds it to `deny`. The "Optimise for" buttons set `weights` and `min_quality` together: Cheapest (60/10/10/15/5, .30), Balanced (30/25/20/15/10, .45), Best quality (10/35/30/15/10, .60).
+In the panel, "Models it may use" on a preset card lists every model the client's keys can call; unticking one adds it to `deny`. The "Optimise for" buttons set `weights` and `min_quality` together: Cheapest (60/10/10/15/5, .30), Balanced (30/25/20/15/10, .45), Best quality (5/40/30/15/10, .60).
 
 ## rules
 `free_bonus` .10, `plan_bonus` .08, `plan_cost_factor` .3 (a plan-covered request counts for this share of its list price, because plan budget is finite), `promo_bonus_max` .05, `promo_min_remaining_hours` 12, `upcoming_lookahead_hours` 24, `new_model_days` 14, `canary_percent` 5, `canary_min_requests` 20, `canary_min_success` .9, `avoid_sunset_days` 3, `sticky_minutes` 30, `stats_window_hours` 24.
@@ -67,7 +67,7 @@ Sticky sessions are keyed by `X-Xellter-Session` (also `X-Session-Id`, `X-Claude
 `max_attempts` 4, `cooldown_base_s` 30, `cooldown_max_s` 900, `breaker_failures` 5, `breaker_open_s` 120.
 
 ## jev
-`enabled` (false), `model` (`jev-1-13:free`), `upstream` (restrict calls to one key), `daily_budget_idr` (1000), `every_hours` (24), `pass_threshold` (.6), `prompts` (golden prompts). Candidates answer the prompts, the judge answers one `noul` question per answer ("is this correct, complete, on-topic, right language?"); the average is stored per model.
+`enabled` (false), `model` (`jev-1-13:free`; pick a System One model in the panel), `daily_budget_idr` (1000), `every_hours` (24), `pass_threshold` (.6), `prompts` (golden prompts). Judging uses the dashboard's account key, never a client's key. Candidates answer the prompts, the judge answers one `noul` question per answer ("is this correct, complete, on-topic, right language?"); the average is stored per model.
 
 ## rtk
 `enabled`, `min_chars` (2000), `max_chars` (12000), `git_diff`, `grep`, `ls`, `logs`, `truncate`, `diff_context` (1). Per request: header `X-Xellter-RTK: off`.

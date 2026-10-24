@@ -36,6 +36,7 @@ User systemd unit `xellter.service` (`~/infra/systemd/user/`), listens on `127.0
 - Hot path stays allocation-light and non-blocking: no per-request catalog fetch, no synchronous DB writes (logging is queued), streaming is copied through without buffering.
 - `internal/rank` stays pure (no I/O). Every ranking decision must be explainable (`Candidate.Reason`, `Rejected`).
 - Config is the single source of truth and is hot-reloaded through `app.Apply`; never mutate `*config.Config` in place after it has been published.
+- **System calls use the account key.** Anything that needs an LLM but belongs to no client (JEV judging, future digests) goes through `Pool.SystemKey()` / `Key.ReserveSystem`, never through a client's key; log it as client `_system`.
 - Never log prompts or responses. The request log stores metadata only.
 - Decisions worth remembering go in `docs/adr/` (short, numbered). Phase status lives in `docs/plan.md`.
 - Language: code, comments, docs, commits in English.

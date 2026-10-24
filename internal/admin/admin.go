@@ -396,13 +396,7 @@ func (h *Handler) jevInfo(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	var keys []string
-	for _, k := range h.a.Pool.Keys() {
-		if k.Client != "" && k.Config().Enabled {
-			keys = append(keys, k.Name)
-		}
-	}
-	jok(w, map[string]any{"enabled": h.a.Cfg().JEV.Enabled, "model": h.a.Cfg().JEV.Model, "upstream": h.a.Cfg().JEV.Upstream, "scores": scores, "spent_idr": spent, "budget_idr": limit, "judges": judges, "keys": keys, "last": h.a.Judge.Last()})
+	jok(w, map[string]any{"enabled": h.a.Cfg().JEV.Enabled, "model": h.a.Cfg().JEV.Model, "scores": scores, "spent_idr": spent, "budget_idr": limit, "judges": judges, "system_key": h.a.Pool.SystemKey() != nil, "last": h.a.Judge.Last()})
 }
 
 func (h *Handler) jevRun(w http.ResponseWriter, r *http.Request) {

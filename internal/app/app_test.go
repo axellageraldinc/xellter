@@ -229,7 +229,7 @@ func setup(t testing.TB, mutate func(*config.Config)) *env {
 	if err := config.Save(path, cfg); err != nil {
 		t.Fatal(err)
 	}
-	for k, v := range map[string]string{"KEY_PLAN": "secret-plan", "KEY_TOPUP": "secret-topup", "KEY_LOCKED": "secret-locked", "KEY_DIRECT": "secret-direct"} {
+	for k, v := range map[string]string{"KEY_PLAN": "secret-plan", "KEY_TOPUP": "secret-topup", "KEY_LOCKED": "secret-locked", "KEY_DIRECT": "secret-direct", "KENARI_ACCOUNT_KEY": "secret-account"} {
 		if err := config.SetSecret(cfg.Server.SecretsFile, k, v); err != nil {
 			t.Fatal(err)
 		}

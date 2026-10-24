@@ -311,7 +311,7 @@ function keySettings(u) {
 const OBJECTIVES = {
   cheapest: { label: 'Cheapest', w: { cost: 60, benchmark: 10, jev: 10, reliability: 15, context: 5 }, q: 0.30 },
   balanced: { label: 'Balanced', w: { cost: 30, benchmark: 25, jev: 20, reliability: 15, context: 10 }, q: 0.45 },
-  quality: { label: 'Best quality', w: { cost: 10, benchmark: 35, jev: 30, reliability: 15, context: 10 }, q: 0.60 },
+  quality: { label: 'Best quality', w: { cost: 5, benchmark: 40, jev: 30, reliability: 15, context: 10 }, q: 0.60 },
 };
 const objectiveOf = p => Object.entries(OBJECTIVES).find(([, o]) => Object.entries(o.w).every(([k, v]) => (p.weights || {})[k] === v))?.[0] || 'custom';
 const MODALITIES = { chat: 'Text', images: 'Image', videos: 'Video', audio_speech: 'Text to speech', audio_transcription: 'Speech to text', music: 'Music' };
@@ -443,7 +443,8 @@ views.settings = async function () {
       h('div', { class: 'mb-2' }, badge(j.enabled ? 'on' : 'off', j.enabled ? 'green' : 'secondary'), badge(`today Rp ${idr(j.spent_idr)} of Rp ${idr(j.budget_idr)}`)),
       field(c.jev, 'enabled', { type: 'switch', label: 'Judge models automatically' }),
       field(c.jev, 'model', { type: 'select', label: 'Judge model', opts: (j.judges || []).map(x => [x.id, x.free ? `${x.id} (free)` : `${x.id} (Rp ${idr(x.in_idr)} per 1M input tokens)`]), help: 'a System One model from kenari' }),
-      field(c.jev, 'upstream', { type: 'select', label: 'Key used for judging', opts: [['', 'Any key that can call both models (first match)'], ...(j.keys || []).map(k => [k, k])], help: 'judging calls count against that key\'s account, and show up under the "_jev" client in the request log' }),
+      j.system_key ? h('div', { class: 'small text-secondary mb-3' }, icon('shield-check', 'me-1 text-green'), 'Uses the dashboard\'s own account key (the one that reads plan and balance), never a client\'s key. Judging calls show up as "_system" in the request list.')
+        : h('div', { class: 'alert alert-warning py-2' }, 'Judging needs the account key. Add it on the ', h('a', { class: 'clickable', onclick: () => go('overview') }, 'Overview'), ' page, under Kenari plan & balance.'),
       field(c.jev, 'daily_budget_idr', { type: 'num', label: 'Daily limit (Rp)' }),
       j.last && j.last.at && !String(j.last.at).startsWith('0001') ? h('div', { class: 'small mb-2 ' + (j.last.error ? 'text-danger' : 'text-secondary') }, `Last round ${ago(j.last.at)} ago: judged ${j.last.judged} model${j.last.judged === 1 ? '' : 's'}${j.last.error ? ' · ' + j.last.error : ''}`) : h('div', { class: 'small text-secondary mb-2' }, 'No round yet. The first one starts about a minute after you switch it on and save.'),
       btn('Judge pending models now', 'btn-outline-primary btn-sm mb-3', () => api('jev/run', { method: 'POST', body: {} }).then(() => { toast('Started in the background'); setTimeout(render, 8000); }, fail)),
