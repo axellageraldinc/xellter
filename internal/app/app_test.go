@@ -219,6 +219,8 @@ func setup(t testing.TB, mutate func(*config.Config)) *env {
 		{Name: "off", Enabled: false, KeyHash: proxy.HashKey("xl-off"), Presets: config.DefaultPresets(), Seeded: config.PresetModalities},
 		{Name: "direct", Enabled: true, KeyHash: proxy.HashKey("xl-direct"), Keys: one("KEY_DIRECT"), Presets: map[string]config.Preset{"text": config.DefaultPreset("chat")}, Passthrough: []string{"cheap-*"}, Seeded: config.PresetModalities},
 	}
+	// known qualities keep the fixture's ranking independent of the price-based estimate
+	cfg.Benchmarks = map[string]float64{"free-a:free": 55, "cheap-b": 60, "pro-c": 85, "promo-d": 55}
 	if mutate != nil {
 		mutate(cfg)
 	}
