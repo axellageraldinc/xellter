@@ -50,6 +50,7 @@ type Rejected struct {
 
 // Ranking is the result for one preset.
 type Ranking struct {
+	Client      string      `json:"client"`
 	Preset      string      `json:"preset"`
 	Modality    string      `json:"modality"`
 	Mode        string      `json:"mode"`
@@ -58,14 +59,22 @@ type Ranking struct {
 	Trial       []Candidate `json:"trial"`      // canary pool (new, unproven)
 	Rejected    []Rejected  `json:"rejected"`
 	Unavailable []string    `json:"unavailable"` // right modality, but no enabled key may call them
+	Callable    int         `json:"callable"`    // distinct models this client's keys can call for the preset
 	Computed    time.Time   `json:"computed"`
 }
 
-// All computes rankings for every preset.
+// Key is the map key of a client's preset ranking.
+func Key(client, preset string) string { return client + "/" + preset }
+
+// All computes rankings for every preset of every client. A client's presets
+// only consider the models its own kenari keys can call.
 func All(in Inputs) map[string]*Ranking {
-	out := make(map[string]*Ranking, len(in.Cfg.Presets))
-	for name, sh := range in.Cfg.Presets {
-		out[name] = One(in, name, sh)
+	out := map[string]*Ranking{}
+	for i := range in.Cfg.Clients {
+		cl := &in.Cfg.Clients[i]
+		for name, p := range cl.Presets {
+			out[Key(cl.Name, name)] = One(in, cl, name, p)
+		}
 	}
 	return out
 }
@@ -82,8 +91,8 @@ type scored struct {
 }
 
 // One ranks a single preset.
-func One(in Inputs, name string, sh config.Preset) *Ranking {
-	r := &Ranking{Preset: name, Modality: sh.Modality, Mode: sh.Mode, Computed: in.Now}
+func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
+	r := &Ranking{Client: cl.Name, Preset: name, Modality: sh.Modality, Mode: sh.Mode, Computed: in.Now}
 	if sh.Mode == "combo" {
 		return combo(in, r, sh)
 	}
@@ -93,7 +102,7 @@ func One(in Inputs, name string, sh config.Preset) *Ranking {
 	reject := func(id, why string) { r.Rejected = append(r.Rejected, Rejected{id, why}) }
 
 	anyPlanKey := false
-	for _, k := range in.Pool.Keys() {
+	for _, k := range in.Pool.ClientKeys(cl.Name) {
 		if c := k.Config(); c.Enabled && c.Tier == "plan" {
 			anyPlanKey = true
 		}
@@ -132,7 +141,7 @@ func One(in Inputs, name string, sh config.Preset) *Ranking {
 		}
 		s := &scored{m: m}
 		usable, covered := false, false
-		for _, k := range in.Pool.Keys() {
+		for _, k := range in.Pool.ClientKeys(cl.Name) {
 			c := k.Config()
 			if !c.Enabled || k.Secret == "" || !k.AllowedModel(id) {
 				continue
@@ -157,6 +166,7 @@ func One(in Inputs, name string, sh config.Preset) *Ranking {
 		}
 		pool = append(pool, s)
 	}
+	r.Callable = len(pool)
 	if len(pool) == 0 {
 		return r
 	}

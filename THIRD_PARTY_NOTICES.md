@@ -8,3 +8,8 @@
 | [golang.org/x/crypto](https://pkg.go.dev/golang.org/x/crypto) | Go dependency | BSD-3-Clause |
 
 Go dependency versions are pinned in `go.mod` / `go.sum`; transitive modules carry their own licenses.
+
+| Component | Where | License |
+|---|---|---|
+| [Tabler Icons](https://github.com/tabler/tabler-icons) 3.34.1 (a subset of the outline icons) | `internal/admin/ui/icons.js` | MIT |
+| [Inter](https://github.com/rsms/inter) variable font, latin subset (via `@fontsource-variable/inter` 5.3.0) | `internal/admin/ui/vendor/fonts/` | SIL Open Font License 1.1 |

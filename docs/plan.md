@@ -10,6 +10,7 @@ Status: **P0-P6 delivered in the first build**; rollout and tuning continue (see
 | P3 Auto-rank | free / plan / promo / new-model rules, tier quotas, plan ledger, JEV gate and score, canary, media combos | ranking fixtures; JEV test with fake System One | done |
 | P4 Dashboard + login | panel for everything configurable, scrypt + TOTP login, history + rollback | login/CSRF/host/config tests; desktop + mobile check | done |
 | P5 RTK | diff / grep / ls / log / truncate filters, per-client and per-request switch | unit tests; end-to-end size assertion | done |
+| P7 Client-centric model | clients own kenari keys; presets generated per client from the models its keys can call; account key for real plan numbers; panel rebuilt on Tabler | tests for generation, per-client routing, account quota; browser check desktop + mobile | done |
 | P6 Hardening + rollout | systemd unit, Tailscale exposure, REGISTRY, secret scan, clients moved one at a time | see "Rollout" | in progress |
 
 ## Rollout

@@ -297,12 +297,12 @@ type UsageRow struct {
 }
 
 // Usage groups requests by client, model, upstream, preset or hour.
-func (s *Store) Usage(group string, since time.Time) ([]UsageRow, error) {
+func (s *Store) Usage(group string, since time.Time, client string) ([]UsageRow, error) {
 	col := map[string]string{"client": "client", "model": "model", "upstream": "upstream", "preset": "preset", "hour": "strftime('%Y-%m-%d %H:00', ts/1000, 'unixepoch')"}[group]
 	if col == "" {
 		return nil, errors.New("bad group")
 	}
-	rows, err := s.db.Query(fmt.Sprintf(`SELECT %s k, COUNT(*), COUNT(*)-SUM(ok), COALESCE(SUM(in_tok),0), COALESCE(SUM(out_tok),0), COALESCE(SUM(cost),0), COALESCE(AVG(latency_ms),0) FROM requests WHERE ts>=? GROUP BY k ORDER BY k`, col), since.UnixMilli())
+	rows, err := s.db.Query(fmt.Sprintf(`SELECT %s k, COUNT(*), COUNT(*)-SUM(ok), COALESCE(SUM(in_tok),0), COALESCE(SUM(out_tok),0), COALESCE(SUM(cost),0), COALESCE(AVG(latency_ms),0) FROM requests WHERE ts>=? AND (?='' OR client=?) AND client!='_jev' GROUP BY k ORDER BY k`, col), since.UnixMilli(), client, client)
 	if err != nil {
 		return nil, err
 	}
@@ -343,8 +343,8 @@ type RecentRow struct {
 }
 
 // Recent returns the newest rows first.
-func (s *Store) Recent(limit int) ([]RecentRow, error) {
-	rows, err := s.db.Query(`SELECT ts,client,preset,requested,model,upstream,status,ok,latency_ms,ttft_ms,in_tok,out_tok,cost,billing,attempt,canary,rtk_saved,err FROM requests ORDER BY id DESC LIMIT ?`, limit)
+func (s *Store) Recent(limit int, client string) ([]RecentRow, error) {
+	rows, err := s.db.Query(`SELECT ts,client,preset,requested,model,upstream,status,ok,latency_ms,ttft_ms,in_tok,out_tok,cost,billing,attempt,canary,rtk_saved,err FROM requests WHERE (?='' OR client=?) ORDER BY id DESC LIMIT ?`, client, client, limit)
 	if err != nil {
 		return nil, err
 	}

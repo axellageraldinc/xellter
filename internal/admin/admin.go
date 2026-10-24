@@ -8,16 +8,12 @@ package admin
 
 import (
 	"context"
-	"crypto/rand"
 	"embed"
-	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"io"
 	"io/fs"
 	"net"
 	"net/http"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,10 +23,7 @@ import (
 
 	"github.com/axellageraldinc/xellter/internal/app"
 	"github.com/axellageraldinc/xellter/internal/auth"
-	"github.com/axellageraldinc/xellter/internal/catalog"
 	"github.com/axellageraldinc/xellter/internal/config"
-	"github.com/axellageraldinc/xellter/internal/proxy"
-	"github.com/axellageraldinc/xellter/internal/upstream"
 )
 
 //go:embed ui
@@ -58,8 +51,8 @@ func New(a *app.App) *Handler {
 	api("config", h.config)
 	api("rollback", h.rollback)
 	api("clients", h.clients)
-	api("secret", h.secret)
-	api("upstreams", h.upstreams)
+	api("keys", h.keys)
+	api("account-key", h.accountKey)
 	api("keys/reset", h.resetKey)
 	api("keys/probe", h.probeKeys)
 	api("ranking", h.ranking)
@@ -193,219 +186,7 @@ func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 
 // ---- overview ----
 
-func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
-	snap := h.a.Cat.Snapshot()
-	now := time.Now()
-	out := map[string]any{
-		"uptime_s": int(now.Sub(h.a.Started).Seconds()),
-		"requests": map[string]any{"total": h.a.Px.Total.Load(), "failed": h.a.Px.Failed.Load(), "inflight": h.a.Px.Inflight.Load(), "rtk_saved_chars": h.a.Px.RTKSaved.Load()},
-	}
-	var keys []upstream.Status
-	var accts []upstream.AccountStatus
-	if snap != nil {
-		out["catalog"] = map[string]any{"models": len(snap.Models), "age_s": int(now.Sub(snap.Fetched).Seconds()), "degraded": snap.Degraded, "plans": len(snap.Plans), "tier": snap.Tier, "usd_idr": snap.USDIDR}
-		for _, k := range h.a.Pool.Keys() {
-			keys = append(keys, k.Status(now))
-		}
-		for _, a := range h.a.Pool.Accounts() {
-			accts = append(accts, a.Status(snap, now))
-		}
-	}
-	out["accounts"] = accts
-	out["keys"] = keys
-	out["alerts"], out["status"] = h.alerts(snap, keys, accts, now)
-	out["presets"] = h.presetSummary()
-	if snap != nil {
-		var plans []string
-		for _, p := range snap.Plans {
-			plans = append(plans, p.Name)
-		}
-		out["plan_names"] = plans
-	}
-	spent, limit := h.a.Judge.Budget()
-	out["jev"] = map[string]any{"enabled": h.a.Cfg().JEV.Enabled, "spent_idr": spent, "budget_idr": limit}
-	since := now.Add(-24 * time.Hour)
-	out["by_client"], _ = h.a.St.Usage("client", since)
-	out["by_preset"], _ = h.a.St.Usage("preset", since)
-	var clients []map[string]any
-	for _, c := range h.a.Cfg().Clients {
-		clients = append(clients, map[string]any{"name": c.Name, "enabled": c.Enabled, "spent_today": h.a.Px.SpentToday(c.Name), "budget": c.DailyBudget})
-	}
-	out["clients"] = clients
-	jok(w, out)
-}
-
-type alert struct {
-	Level string `json:"level"` // info | warn | bad
-	Text  string `json:"text"`
-	Go    string `json:"go,omitempty"` // tab to open
-}
-
-func (h *Handler) alerts(snap *catalog.Snapshot, keys []upstream.Status, accts []upstream.AccountStatus, now time.Time) ([]alert, string) {
-	var out []alert
-	add := func(level, text, tab string) { out = append(out, alert{level, text, tab}) }
-	cfg := h.a.Cfg()
-	if snap == nil {
-		add("bad", "Model catalog not loaded yet.", "")
-	} else if snap.Degraded {
-		add("warn", "kenari is unreachable: serving from the last known catalog.", "")
-	}
-	if len(cfg.Clients) == 0 {
-		add("info", "No clients yet. Create one so an app can call xellter.", "clients")
-	}
-	for _, k := range keys {
-		switch {
-		case !k.Enabled:
-		case !k.HasSecret:
-			add("bad", "Key \""+k.Name+"\" has no key value.", "upstreams")
-		case k.CooldownEnd.After(now) || k.BreakerEnd.After(now):
-			add("warn", "Key \""+k.Name+"\" is paused after errors"+lastErr(k.LastError)+".", "upstreams")
-		}
-	}
-	for _, a := range accts {
-		if a.QuotaKey == "" {
-			add("info", "Plan usage of account \""+a.Name+"\" is estimated. Add a full-access kenari key to read the real numbers.", "upstreams")
-		}
-		for name, w := range a.Windows {
-			switch {
-			case w.UsedFrac >= 0.97:
-				add("bad", fmt.Sprintf("Plan %s budget is %.0f%% used; plan models are paused until it resets.", name, w.UsedFrac*100), "")
-			case w.UsedFrac >= 0.8:
-				add("warn", fmt.Sprintf("Plan %s budget is %.0f%% used.", name, w.UsedFrac*100), "")
-			}
-		}
-		if a.Cooldown.After(now) {
-			add("warn", "Account \""+a.Name+"\" is rate limited by kenari; requests wait or move to other models.", "")
-		}
-		if a.FreeBlocked.After(now) {
-			add("warn", "Free models are paused on account \""+a.Name+"\" (free quota used).", "")
-		}
-		if a.PlanBlocked.After(now) {
-			add("warn", "kenari reported the plan limit on account \""+a.Name+"\"; plan models are paused for a few minutes.", "")
-		}
-	}
-	for _, p := range h.presetSummary() {
-		if p.Now == "" {
-			add("warn", "Preset \""+p.Name+"\" has no usable model right now.", "presets")
-		}
-	}
-	status := "ok"
-	for _, a := range out {
-		if a.Level == "bad" {
-			status = "bad"
-		} else if a.Level == "warn" && status == "ok" {
-			status = "warn"
-		}
-	}
-	return out, status
-}
-
-func lastErr(s string) string {
-	if s == "" {
-		return ""
-	}
-	return " (" + s + ")"
-}
-
-type presetRow struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Modality    string   `json:"modality"`
-	Now         string   `json:"now"`
-	Flags       []string `json:"flags"`
-	Next        []string `json:"next"`
-	Trial       int      `json:"trial"`
-}
-
-func (h *Handler) presetSummary() []presetRow {
-	cfg := h.a.Cfg()
-	rk := h.a.Rt.Rankings()
-	names := make([]string, 0, len(cfg.Presets))
-	for n := range cfg.Presets {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	var rows []presetRow
-	for _, n := range names {
-		p := cfg.Presets[n]
-		r := presetRow{Name: n, Description: p.Description, Modality: p.Modality}
-		if x := rk[n]; x != nil {
-			r.Trial = len(x.Trial)
-			for i, c := range x.Candidates {
-				switch {
-				case i == 0:
-					r.Now, r.Flags = c.Model, c.Flags
-				case i <= 2:
-					r.Next = append(r.Next, c.Model)
-				}
-			}
-		}
-		rows = append(rows, r)
-	}
-	return rows
-}
-
 // ---- upstream keys ----
-
-var nonEnv = regexp.MustCompile(`[^A-Z0-9]+`)
-
-func (h *Handler) upstreams(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		Action string `json:"action"` // create | delete
-		Name   string `json:"name"`
-		Key    string `json:"key"`
-	}
-	if r.Method != http.MethodPost || readJSON(r, &in) != nil {
-		jerr(w, 400, "POST {action, name, key}")
-		return
-	}
-	next := *h.a.Cfg()
-	next.Upstreams = append([]config.Upstream(nil), next.Upstreams...)
-	switch in.Action {
-	case "create":
-		in.Key = strings.TrimSpace(in.Key)
-		in.Name = strings.Join(strings.Fields(in.Name), "-") // "my key" -> "my-key"
-		if in.Name == "" || in.Key == "" {
-			jerr(w, 422, "name and key are required")
-			return
-		}
-		env := "KENARI_KEY_" + strings.Trim(nonEnv.ReplaceAllString(strings.ToUpper(in.Name), "_"), "_")
-		next.Upstreams = append(next.Upstreams, config.Upstream{Name: in.Name, KeyEnv: env, Enabled: true, Tier: "auto"})
-		if err := config.Normalize(&next); err != nil {
-			jerr(w, 422, err.Error())
-			return
-		}
-		if err := config.SetSecret(next.Server.SecretsFile, env, in.Key); err != nil {
-			jerr(w, 422, err.Error())
-			return
-		}
-	case "delete":
-		kept := next.Upstreams[:0:0]
-		for _, u := range next.Upstreams {
-			if u.Name != in.Name {
-				kept = append(kept, u)
-			}
-		}
-		next.Upstreams = kept
-		for i := range next.Clients { // drop dangling restrictions
-			var ups []string
-			for _, n := range next.Clients[i].Upstreams {
-				if n != in.Name {
-					ups = append(ups, n)
-				}
-			}
-			next.Clients[i].Upstreams = ups
-		}
-	default:
-		jerr(w, 400, "action must be create or delete")
-		return
-	}
-	if err := h.a.Apply(&next); err != nil {
-		jerr(w, 422, err.Error())
-		return
-	}
-	jok(w, map[string]any{"ok": true})
-}
 
 // ---- config ----
 
@@ -495,92 +276,6 @@ func (h *Handler) rollback(w http.ResponseWriter, r *http.Request) {
 
 // ---- clients ----
 
-func newKey() string {
-	b := make([]byte, 24)
-	_, _ = rand.Read(b)
-	return "xl-" + hex.EncodeToString(b)
-}
-
-func (h *Handler) clients(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		Action string        `json:"action"` // create | rotate
-		Client config.Client `json:"client"`
-		Name   string        `json:"name"`
-	}
-	if r.Method != http.MethodPost || readJSON(r, &in) != nil {
-		jerr(w, 400, "POST {action, client|name}")
-		return
-	}
-	next := *h.a.Cfg()
-	next.Clients = append([]config.Client(nil), next.Clients...)
-	key := newKey()
-	switch in.Action {
-	case "create":
-		c := in.Client
-		c.Enabled = true
-		c.KeyHash, c.KeyHint = proxy.HashKey(key), "…"+key[len(key)-4:]
-		if len(c.Presets) == 0 {
-			c.Presets = []string{"*"}
-		}
-		next.Clients = append(next.Clients, c)
-	case "rotate":
-		found := false
-		for i := range next.Clients {
-			if next.Clients[i].Name == in.Name {
-				next.Clients[i].KeyHash, next.Clients[i].KeyHint = proxy.HashKey(key), "…"+key[len(key)-4:]
-				found = true
-			}
-		}
-		if !found {
-			jerr(w, 404, "no such client")
-			return
-		}
-	case "delete":
-		kept := next.Clients[:0:0]
-		for _, c := range next.Clients {
-			if c.Name != in.Name {
-				kept = append(kept, c)
-			}
-		}
-		next.Clients = kept
-	default:
-		jerr(w, 400, "action must be create, rotate or delete")
-		return
-	}
-	if err := config.Normalize(&next); err != nil {
-		jerr(w, 422, err.Error())
-		return
-	}
-	if err := h.a.Apply(&next); err != nil {
-		jerr(w, 422, err.Error())
-		return
-	}
-	jok(w, map[string]any{"ok": true, "key": key, "note": "shown once; store it in the client's environment"})
-}
-
-func (h *Handler) secret(w http.ResponseWriter, r *http.Request) {
-	var in struct{ Name, Value string }
-	if r.Method != http.MethodPut || readJSON(r, &in) != nil || in.Value == "" {
-		jerr(w, 400, "PUT {name, value}")
-		return
-	}
-	known := false
-	for _, u := range h.a.Cfg().Upstreams {
-		if u.KeyEnv == in.Name {
-			known = true
-		}
-	}
-	if !known {
-		jerr(w, 422, "no upstream uses key_env "+in.Name)
-		return
-	}
-	if err := h.a.SetSecret(in.Name, strings.TrimSpace(in.Value)); err != nil {
-		jerr(w, 422, err.Error())
-		return
-	}
-	jok(w, map[string]any{"ok": true})
-}
-
 func (h *Handler) resetKey(w http.ResponseWriter, r *http.Request) {
 	var in struct{ Name string }
 	if readJSON(r, &in) != nil {
@@ -605,19 +300,6 @@ func (h *Handler) probeKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---- ranking / catalog ----
-
-func (h *Handler) ranking(w http.ResponseWriter, r *http.Request) {
-	rk := h.a.Rt.Rankings()
-	if s := r.URL.Query().Get("preset"); s != "" {
-		if x := rk[s]; x != nil {
-			jok(w, x)
-			return
-		}
-		jerr(w, 404, "no such preset")
-		return
-	}
-	jok(w, rk)
-}
 
 func (h *Handler) recompute(w http.ResponseWriter, r *http.Request) {
 	h.a.Rt.Recompute(time.Now())
@@ -678,7 +360,7 @@ func (h *Handler) usage(w http.ResponseWriter, r *http.Request) {
 	if g == "" {
 		g = "model"
 	}
-	rows, err := h.a.St.Usage(g, time.Now().Add(-time.Duration(hours)*time.Hour))
+	rows, err := h.a.St.Usage(g, time.Now().Add(-time.Duration(hours)*time.Hour), r.URL.Query().Get("client"))
 	if err != nil {
 		jerr(w, 400, err.Error())
 		return
@@ -692,7 +374,7 @@ func (h *Handler) requests(w http.ResponseWriter, r *http.Request) {
 	if n <= 0 || n > 500 {
 		n = 100
 	}
-	rows, _ := h.a.St.Recent(n)
+	rows, _ := h.a.St.Recent(n, r.URL.Query().Get("client"))
 	jok(w, rows)
 }
 

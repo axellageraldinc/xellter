@@ -7,19 +7,20 @@ import (
 	"time"
 
 	"github.com/axellageraldinc/xellter/internal/config"
+	"github.com/axellageraldinc/xellter/internal/proxy"
 )
 
 func twoEqualModels(c *config.Config) {
-	sh := c.Presets["balanced"]
+	sh := c.Clients[0].Presets["text"]
 	sh.Mode, sh.Models, sh.Strategy = "combo", []string{"cheap-b", "pro-c"}, "round_robin"
-	c.Presets["balanced"] = sh
+	c.Clients[0].Presets["text"] = sh
 }
 
 func TestRoundRobinRotatesAndSessionsStick(t *testing.T) {
 	e := setup(t, twoEqualModels)
 	seen := map[string]int{}
 	for i := 0; i < 6; i++ { // different prompts = different sessions (identical prompts stick to one model)
-		r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(`{"model":"balanced","messages":[{"role":"user","content":"question %d"}]}`, i))
+		r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(`{"model":"text","messages":[{"role":"user","content":"question %d"}]}`, i))
 		seen[r.Header.Get("X-Xellter-Model")]++
 	}
 	if seen["cheap-b"] == 0 || seen["pro-c"] == 0 {
@@ -28,7 +29,7 @@ func TestRoundRobinRotatesAndSessionsStick(t *testing.T) {
 	// with a session header, every request of the session lands on the same model
 	first := ""
 	for i := 0; i < 6; i++ {
-		r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "balanced"), "X-Xellter-Session", "s1")
+		r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "text"), "X-Xellter-Session", "s1")
 		m := r.Header.Get("X-Xellter-Model")
 		if first == "" {
 			first = m
@@ -44,7 +45,7 @@ func TestCanarySendsTrafficToNewModelAndFallsBack(t *testing.T) {
 	// mark one model as brand new after the baseline
 	e.a.St.SetSeen("promo-d", time.Now().Unix())
 	e.a.Rt.Recompute(time.Now())
-	rk := e.a.Rt.Rankings()["budget"]
+	rk := e.a.Rt.Rankings()["babu/budget"]
 	if len(rk.Trial) != 1 || rk.Trial[0].Model != "promo-d" {
 		t.Fatalf("trial pool: %+v rejected: %+v", rk.Trial, rk.Rejected)
 	}
@@ -82,7 +83,7 @@ func TestJEVEvaluationStoresScoreAndRespectsBudget(t *testing.T) {
 		t.Fatalf("stored: %+v", scores)
 	}
 	e.a.Rt.Recompute(time.Now())
-	for _, c := range e.a.Rt.Rankings()["balanced"].Candidates {
+	for _, c := range e.a.Rt.Rankings()["babu/text"].Candidates {
 		if c.Model == "free-a:free" && c.Components["jev"] < 0.89 {
 			t.Fatalf("JEV score must feed the ranking: %+v", c.Components)
 		}
@@ -105,7 +106,7 @@ func TestProbeLearnsAllowListWithoutBilling(t *testing.T) {
 	var plan, topup []string
 	for _, k := range e.a.Pool.Keys() {
 		st := k.Status(time.Now())
-		if st.Name == "plan" {
+		if st.Client == "babu" && st.Label == "plan" {
 			plan = st.Learned
 		} else {
 			topup = st.Learned
@@ -114,7 +115,7 @@ func TestProbeLearnsAllowListWithoutBilling(t *testing.T) {
 	if len(plan) != 2 || len(topup) != 0 {
 		t.Fatalf("plan=%v topup=%v", plan, topup)
 	}
-	for _, c := range e.a.Rt.Rankings()["balanced"].Candidates {
+	for _, c := range e.a.Rt.Rankings()["babu/text"].Candidates {
 		if c.Model == "pro-c" { // topup (unrestricted) can still serve it
 			return
 		}
@@ -124,11 +125,11 @@ func TestProbeLearnsAllowListWithoutBilling(t *testing.T) {
 
 func TestAccountQuotaFromUnrestrictedKeyReplacesGuess(t *testing.T) {
 	e := setup(t, func(c *config.Config) {
-		for i := range c.Upstreams {
-			c.Upstreams[i].Account = "main"
-			c.Upstreams[i].Plan = "WrongGuess"
+		for i := range c.Clients[0].Keys {
+			c.Clients[0].Keys[i].Account = "main"
+			c.Clients[0].Keys[i].Plan = "WrongGuess"
 		}
-		c.Upstreams[0].Tier, c.Upstreams[1].Tier = "plan", "plan"
+		c.Clients[0].Keys[0].Tier, c.Clients[0].Keys[1].Tier = "plan", "plan"
 	})
 	reset := time.Now().Add(48 * time.Hour).UTC().Format(time.RFC3339)
 	e.f.account = func(auth string) (int, string) {
@@ -139,7 +140,7 @@ func TestAccountQuotaFromUnrestrictedKeyReplacesGuess(t *testing.T) {
 	}
 	e.a.ProbeKeys(context.Background())
 	st := e.a.Pool.Accounts()[0].Status(e.a.Cat.Snapshot(), time.Now())
-	if st.Plan != "Indie" || st.PlanSource != "kenari" || st.QuotaKey != "topup" || st.Windows["week"].UsedRP != 990 {
+	if st.Plan != "Indie" || st.PlanSource != "kenari" || st.QuotaKey != "babu/topup" || st.Windows["week"].UsedRP != 990 {
 		t.Fatalf("account not read from kenari: %+v", st)
 	}
 	if st.BalanceIDR != 24998.5 {
@@ -159,7 +160,7 @@ func TestAccountQuotaFromUnrestrictedKeyReplacesGuess(t *testing.T) {
 
 func TestFreeQuotaErrorsAreAccountWide(t *testing.T) {
 	e := setup(t, func(c *config.Config) {
-		c.Upstreams[0].Account, c.Upstreams[1].Account = "main", "main"
+		c.Clients[0].Keys[0].Account, c.Clients[0].Keys[1].Account = "main", "main"
 	})
 	free := e.a.Cat.Snapshot().Models["free-a:free"]
 	paid := e.a.Cat.Snapshot().Models["pro-c"]
@@ -171,5 +172,65 @@ func TestFreeQuotaErrorsAreAccountWide(t *testing.T) {
 	}
 	if r := k1.Check(paid, e.a.Cat.Snapshot(), now); r != "" {
 		t.Fatalf("paid models must stay usable: %q", r)
+	}
+}
+
+func TestPresetsAreGeneratedFromWhatTheKeysCanCall(t *testing.T) {
+	e := setup(t, func(c *config.Config) {
+		c.Clients = append(c.Clients, config.Client{Name: "gen", Enabled: true, KeyHash: proxy.HashKey("xl-gen"),
+			Keys: []config.Upstream{{Name: "limited", KeyEnv: "KEY_GEN", Enabled: true, Tier: "topup"}}})
+	})
+	if err := config.SetSecret(e.a.Cfg().Server.SecretsFile, "KEY_GEN", "secret-gen"); err != nil {
+		t.Fatal(err)
+	}
+	e.a.Pool.Reload(e.a.Cfg(), e.a.Secrets(), e.a.St)
+	e.f.chat = func(c call, n int) (int, string) {
+		if c.Model == "xellter-probe" && c.Auth == "Bearer secret-gen" {
+			return 400, `{"error":{"code":"bad_request","message":"model 'xellter-probe' is not allowed by this key. Allowed models: cheap-b, free-a:free, img-free:free, jev-1-13:free"}}`
+		}
+		return 0, ""
+	}
+	e.a.ProbeKeys(context.Background())
+	gen := func() config.Client {
+		for _, c := range e.a.Cfg().Clients {
+			if c.Name == "gen" {
+				return c
+			}
+		}
+		return config.Client{}
+	}
+	got := gen()
+	if _, ok := got.Presets["text"]; !ok || got.Presets["image"].Modality != "images" || len(got.Presets) != 2 {
+		t.Fatalf("expected exactly text and image, got %v", got.Presets)
+	}
+	if rk := e.a.Rt.Rankings()["gen/text"]; rk == nil || rk.Callable != 2 { // cheap-b and free-a:free: deduplicated, limited to the key's models and the preset's needs
+		t.Fatalf("text ranking: %+v", rk)
+	}
+	if rk := e.a.Rt.Rankings()["gen/video"]; rk != nil {
+		t.Fatal("no video preset without video models")
+	}
+	// a preset the owner deleted is not generated again, and edits survive later probes
+	next := *e.a.Cfg()
+	next.Clients = append([]config.Client(nil), next.Clients...)
+	for i := range next.Clients {
+		if next.Clients[i].Name == "gen" {
+			cl := next.Clients[i]
+			cl.Presets = map[string]config.Preset{"image": cl.Presets["image"]}
+			p := cl.Presets["image"]
+			p.Strategy = "round_robin"
+			cl.Presets["image"] = p
+			next.Clients[i] = cl
+		}
+	}
+	if err := e.a.Apply(&next); err != nil {
+		t.Fatal(err)
+	}
+	e.a.ProbeKeys(context.Background())
+	got = gen()
+	if _, ok := got.Presets["text"]; ok {
+		t.Fatal("a deleted preset came back")
+	}
+	if got.Presets["image"].Strategy != "round_robin" {
+		t.Fatal("an edited preset was overwritten")
 	}
 }

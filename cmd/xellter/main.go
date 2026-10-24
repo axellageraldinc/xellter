@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -52,6 +53,8 @@ func main() {
 		err = adminCmd(os.Args[2:])
 	case "client":
 		err = clientCmd(os.Args[2:])
+	case "key":
+		err = keyCmd(os.Args[2:])
 	case "version":
 		fmt.Println("xellter", app.Version)
 	default:
@@ -89,7 +92,7 @@ func serve(args []string) error {
 	mux.Handle("/admin/", admin.New(a))
 	mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/admin/", http.StatusFound) })
 	mux.Handle("/", a.Px)
-	srv := &http.Server{Addr: a.Cfg().Server.Listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
+	srv := &http.Server{Addr: a.Cfg().Server.Listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 15 * time.Minute}
 	log.Println(a.Describe())
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
@@ -112,14 +115,20 @@ func check(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("ok: %d upstreams, %d clients, %d presets\n", len(c.Upstreams), len(c.Clients), len(c.Presets))
+	keys, presets := 0, 0
+	for _, cl := range c.Clients {
+		keys += len(cl.Keys)
+		presets += len(cl.Presets)
+	}
+	fmt.Printf("ok: %d clients, %d kenari keys, %d presets\n", len(c.Clients), keys, presets)
 	return nil
 }
 
 func explain(args []string) error {
 	fs := flag.NewFlagSet("explain", flag.ExitOnError)
 	path := cfgPath(fs)
-	only := fs.String("preset", "", "only this preset model")
+	onlyClient := fs.String("client", "", "only this client")
+	only := fs.String("preset", "", "only this preset")
 	_ = fs.Parse(args)
 	abs, _ := filepath.Abs(*path)
 	a, err := app.New(abs, nil)
@@ -136,15 +145,15 @@ func explain(args []string) error {
 	a.Rt.MarkSeen(a.Cat.Snapshot())
 	a.ProbeKeys(ctx)
 	names := make([]string, 0)
-	for n := range a.Rt.Rankings() {
-		if *only == "" || *only == n {
+	for n, r := range a.Rt.Rankings() {
+		if (*only == "" || *only == r.Preset) && (*onlyClient == "" || *onlyClient == r.Client) {
 			names = append(names, n)
 		}
 	}
 	sort.Strings(names)
 	for _, n := range names {
 		r := a.Rt.Rankings()[n]
-		fmt.Printf("\n== %s (%s, %s)  round-robin group: %d\n", n, r.Modality, r.Mode, r.Front)
+		fmt.Printf("\n== %s / %s (%s, %s)  models callable: %d  round-robin group: %d\n", r.Client, r.Preset, r.Modality, r.Mode, r.Callable, r.Front)
 		for i, c := range r.Candidates {
 			fmt.Printf("%2d. %-34s %s\n", i+1, c.Model, c.Reason)
 		}
@@ -158,7 +167,7 @@ func explain(args []string) error {
 			fmt.Printf("    x %-32s %s\n", x.Model, x.Why)
 		}
 		if len(r.Unavailable) > 0 {
-			fmt.Printf("    (%d catalog models are not callable with the configured keys)\n", len(r.Unavailable))
+			fmt.Printf("    (%d catalog models are not callable with this client's keys)\n", len(r.Unavailable))
 		}
 	}
 	return nil
@@ -233,9 +242,7 @@ func clientCmd(args []string) error {
 	fs := flag.NewFlagSet("client add", flag.ExitOnError)
 	path := cfgPath(fs)
 	name := fs.String("name", "", "client name")
-	presets := fs.String("presets", "*", "comma separated preset models (or *)")
 	pass := fs.String("passthrough", "", "comma separated real-model globs the client may call directly")
-	ups := fs.String("upstreams", "", "comma separated upstream names (empty = all)")
 	budget := fs.Float64("budget", 0, "daily budget in IDR (0 = unlimited)")
 	out := fs.String("out", "", "write the API key to this file (mode 0600) instead of stdout")
 	_ = fs.Parse(args[1:])
@@ -244,8 +251,7 @@ func clientCmd(args []string) error {
 		return err
 	}
 	key := "xl-" + auth.RandomHex(24)
-	cl := config.Client{Name: *name, Enabled: true, KeyHash: proxy.HashKey(key), KeyHint: "…" + key[len(key)-4:], Presets: split(*presets), Passthrough: split(*pass), Upstreams: split(*ups), DailyBudget: *budget}
-	c.Clients = append(c.Clients, cl)
+	c.Clients = append(c.Clients, config.Client{Name: *name, Enabled: true, KeyHash: proxy.HashKey(key), KeyHint: "…" + key[len(key)-4:], Passthrough: split(*pass), DailyBudget: *budget, Presets: map[string]config.Preset{}})
 	if err := config.Save(*path, c); err != nil {
 		return err
 	}
@@ -258,6 +264,45 @@ func clientCmd(args []string) error {
 	}
 	fmt.Printf("client %q added; API key (shown once): %s\n", *name, key)
 	return nil
+}
+
+func keyCmd(args []string) error {
+	if len(args) == 0 || args[0] != "add" {
+		return errors.New("usage: xellter key add -client C -name K  (key on stdin)")
+	}
+	fs := flag.NewFlagSet("key add", flag.ExitOnError)
+	path := cfgPath(fs)
+	client := fs.String("client", "", "client name")
+	name := fs.String("name", "", "key name")
+	_ = fs.Parse(args[1:])
+	raw, err := io.ReadAll(io.LimitReader(os.Stdin, 4096))
+	if err != nil {
+		return err
+	}
+	value := strings.TrimSpace(string(raw))
+	if value == "" || *client == "" || *name == "" {
+		return errors.New("need -client, -name and the key on stdin")
+	}
+	c, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	for i := range c.Clients {
+		if c.Clients[i].Name != *client {
+			continue
+		}
+		env := "KENARI_KEY_" + strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(*client+"_"+*name))
+		c.Clients[i].Keys = append(c.Clients[i].Keys, config.Upstream{Name: *name, KeyEnv: env, Enabled: true, Tier: "auto"})
+		if err := config.SetSecret(c.Server.SecretsFile, env, value); err != nil {
+			return err
+		}
+		if err := config.Save(*path, c); err != nil {
+			return err
+		}
+		fmt.Printf("key %q added to client %q (restart or use the panel to have it probed)\n", *name, *client)
+		return nil
+	}
+	return fmt.Errorf("no such client %q", *client)
 }
 
 func split(s string) []string {

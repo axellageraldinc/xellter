@@ -9,6 +9,7 @@ The first panel used hand-written CSS and exposed every config field as a form i
 
 ## Decision
 - Build on an existing design system instead of custom styling: **Tabler** (MIT, Bootstrap-based admin kit), vendored as one CSS file (`internal/admin/ui/vendor/tabler.min.css`, no JavaScript, no CDN, no build step) and embedded in the binary. Dark mode uses its `data-bs-theme`. Only a small `app.css` adds a dialog, toast and chart.
+- Layout: vertical sidebar (Overview, Clients, Usage, Settings, Config file), hash routes (`#/clients/babu`), Inter variable font and a Tabler Icons subset vendored next to the CSS.
 - Default view of every page shows what matters and a few plain-language controls; everything else sits behind an "Advanced" disclosure.
   - Overview: health banner with actionable warnings, 24 h numbers, live plan budget and balance, which model each preset serves now, key states.
   - Presets: what it serves now, "Optimise for" (cheapest / balanced / best quality, which sets the weights), tie behaviour, required capabilities.

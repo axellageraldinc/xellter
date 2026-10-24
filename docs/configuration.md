@@ -16,21 +16,37 @@ One YAML file (`xellter -config`, default `xellter.yaml`, or `$XELLTER_CONFIG`).
 | `session_hours` | `12` | admin session lifetime |
 
 ## kenari
-`base_url` (`https://kenari.id`), `sync_minutes` (10), `first_byte_timeout_s` (120; non-streaming requests get 3×), `music_timeout_s` (900), `user_agent`.
-
-## upstreams[]
-`name`, `key_env` (secret name, e.g. `KENARI_KEY_BABU`), `enabled`, `tier` (`free`|`topup`|`plan`), `plan` (fallback plan name for `tier: plan`; the real one is read from kenari when an unrestricted key of the account exists), `account` (keys of one kenari account share plan budget), `rpm` / `daily_free` (override tier limits; `-1` = unlimited), `allow` (model globs; usually learned by probing), `note`.
+`base_url` (`https://kenari.id`), `account_key_env` (secret name of the optional full-access account key; it only reads plan, usage and balance), `sync_minutes` (10), `first_byte_timeout_s` (120; non-streaming requests get 3×), `music_timeout_s` (900), `user_agent`.
 
 ## clients[]
-`name`, `enabled`, `key_hash` (sha256 of the client key; never the key), `key_hint`, `presets` (`["*"]` = all), `passthrough` (real-model globs the client may call directly; empty = none), `upstreams` (restrict to named upstreams), `daily_budget_idr` (catalog cost; 0 = unlimited), `rtk` (`null` = follow global), `note`.
+A client is one app that calls xellter. It has its own kenari keys and its own presets.
 
-## presets{}
-A **preset model** is a named recipe that clients call like a model (`balanced`); xellter resolves it to a real model per request. Key = the name clients send. (Configs written before the rename use `shadows:`; they are migrated on load.)
+| key | meaning |
+|---|---|
+| `name` | letters, digits, dot, dash, underscore |
+| `enabled` | a disabled client gets 403 |
+| `key_hash`, `key_hint` | sha256 of the xellter key the app uses, and its last 4 characters; never the key itself |
+| `keys[]` | the client's kenari API keys, see below |
+| `presets{}` | name -> preset. **Generated automatically** from the models the client's keys can call (see below); every field is editable |
+| `seeded[]` | kinds (`chat`, `images`, `videos`, `audio_speech`, `audio_transcription`, `music`) that already got a generated preset, so a deleted or edited preset is never recreated |
+| `passthrough` | real-model globs the app may also call directly; normally empty |
+| `daily_budget_idr` | spending cap at list price, free and plan traffic included; 0 = unlimited |
+| `rtk` | `null` = follow the global token saver setting |
+| `note` | free text |
+
+### keys[]
+`name`, `key_env` (name of the secret that holds the key value in `data/secrets.env`; unique across clients), `enabled`, `tier` (`auto` detects it; `free`/`topup`/`plan` override), `plan` (only needed when no account key is set and the tier is `plan`), `account` (default `main`: keys of one kenari account share its limits and plan), `rpm` / `daily_free` (override kenari defaults; `-1` = unlimited), `allow` (model globs; normally detected by probing), `note`.
+
+### Generated presets
+For each kind that has at least one model callable by the client's keys, xellter creates one preset once: `text` (chat), `image`, `video`, `tts` (text to speech), `stt` (speech to text), `music`. A client is only seeded after all its enabled keys have been probed. Add more presets by hand (for example `coding` next to `text`); preset names take precedence over real model names.
+
+## presets (per client)
+Key = the name the app sends as `model`.
 
 | key | meaning |
 |---|---|
 | `modality` | `chat`, `images`, `videos`, `audio_speech`, `audio_transcription`, `music` |
-| `mode` | `auto` (rank the catalog) or `combo` (use `models` in order) |
+| `mode` | `auto` (rank the callable models) or `combo` (use `models` in order) |
 | `models` | combo list |
 | `allow` / `deny` | model globs (auto) |
 | `require` | `tool_call`, `vision`, `reasoning`, `min_context` |
@@ -40,7 +56,7 @@ A **preset model** is a named recipe that clients call like a model (`balanced`)
 | `weights` | relative weights of `cost`, `benchmark`, `jev`, `reliability`, `context` |
 | `cost_profile` | reference request: `input_tokens`, `output_tokens`, `cached_ratio` (chat); `images`; `seconds`, `variant` (video/STT); `chars` (TTS) |
 
-Defaults: `balanced` (everyday chat, weights 30/25/20/15/10), `budget` (cheapest acceptable), `smart` (best answers, cost matters less), `coding` (tool use, long context, quality first), and cheapest-first media presets `image`, `video`, `speech` (text to speech), `transcribe` (speech to text), `music`.
+The panel's "Optimise for" buttons set `weights` and `min_quality` together: Cheapest (60/10/10/15/5, .30), Balanced (30/25/20/15/10, .45), Best quality (10/35/30/15/10, .60).
 
 ## rules
 `free_bonus` .10, `plan_bonus` .08, `plan_cost_factor` .3 (a plan-covered request counts for this share of its list price, because plan budget is finite), `promo_bonus_max` .05, `promo_min_remaining_hours` 12, `upcoming_lookahead_hours` 24, `new_model_days` 14, `canary_percent` 5, `canary_min_requests` 20, `canary_min_success` .9, `avoid_sunset_days` 3, `sticky_minutes` 30, `stats_window_hours` 24.

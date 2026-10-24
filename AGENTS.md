@@ -3,7 +3,7 @@
 Server-wide rules: `~/AGENTS.md` (security first, scan before push, commit + push to `main`). This file only adds project specifics. `CLAUDE.md` just imports this file.
 
 ## What this is
-xellter is a Go LLM gateway/router in front of kenari.id: preset models (`balanced`, ...) are resolved to real models by a ranking engine (live prices, promos, plans, free tiers, benchmark/JEV quality, reliability), with failover, round-robin, per-client keys, RTK tool-output compression and an admin panel. Architecture: `docs/architecture.md`.
+xellter is a Go LLM gateway/router in front of kenari.id. A *client* (an app) owns one or more kenari keys; xellter generates the client's *presets* (`text`, `image`, `video`, `tts`, `stt`) from the models those keys can call, and resolves a preset to a real model per request with a ranking engine (live prices, promos, plans, free tiers, benchmark/JEV quality, reliability), failover, round-robin, RTK tool-output compression and an admin panel. Architecture: `docs/architecture.md`.
 
 ## Run / test
 - Go lives at `~/.local/go-root/go/bin` (not on PATH by default). `scripts/ci.sh` sets it up.
@@ -24,8 +24,8 @@ internal/proxy     data plane: auth, body rewrite, streaming relay, usage accoun
 internal/rtk       tool-output compression filters
 internal/jev       System One quality judge (budget-capped)
 internal/auth      admin login: scrypt + TOTP + recovery codes (aixell-compatible record)
-internal/admin     /admin API + embedded UI (vanilla JS, no build step)
-internal/app       wiring + hot reload (Apply) + background loops
+internal/admin     /admin API + embedded UI: plain JS on vendored Tabler CSS, Inter font and a Tabler Icons subset (no build step, no CDN)
+internal/app       wiring + hot reload (Apply) + background loops + preset generation (seedPresets)
 ```
 
 ## Deploy

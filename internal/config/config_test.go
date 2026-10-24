@@ -7,27 +7,46 @@ import (
 	"testing"
 )
 
-func TestDefaultsAreValidAndMinimalYAMLWorks(t *testing.T) {
-	c, err := Parse([]byte("upstreams:\n  - {name: a, key_env: KENARI_KEY_A, enabled: true, tier: plan, plan: Indie}\n"))
+func TestMinimalYAMLWorksAndDefaultsFill(t *testing.T) {
+	c, err := Parse([]byte("clients:\n  - name: babu\n    enabled: true\n    keys:\n      - {name: main, key_env: KENARI_KEY_BABU_MAIN, enabled: true}\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.Presets) < 8 || c.Presets["balanced"].Weights.Cost != 30 || c.Server.Listen != "127.0.0.1:8480" {
-		t.Fatalf("defaults missing: %+v", c.Server)
+	if c.Server.Listen != "127.0.0.1:8480" || c.Clients[0].Keys[0].Tier != "auto" || c.Kenari.AccountKeyEnv != "KENARI_ACCOUNT_KEY" {
+		t.Fatalf("defaults missing: %+v", c.Clients[0].Keys[0])
+	}
+}
+
+func TestGeneratedPresetsCoverEveryKind(t *testing.T) {
+	want := map[string]string{"chat": "text", "images": "image", "videos": "video", "audio_speech": "tts", "audio_transcription": "stt", "music": "music"}
+	for kind, name := range want {
+		if PresetName(kind) != name {
+			t.Errorf("%s -> %s", kind, PresetName(kind))
+		}
+		p := DefaultPreset(kind)
+		if p.Modality != kind || p.Mode != "auto" || p.MaxCandidates == 0 || p.Weights.Cost == 0 {
+			t.Errorf("preset %s incomplete: %+v", kind, p)
+		}
+	}
+	if p := DefaultPreset("chat"); !p.Require.ToolCall || p.MinQuality == 0 {
+		t.Error("text preset must require tool calling and a quality floor")
 	}
 }
 
 func TestValidationCatchesMistakes(t *testing.T) {
+	good := "    keys:\n      - {name: main, key_env: KENARI_KEY_A, enabled: true}\n"
 	cases := map[string]string{
-		"unknown preset for client": "clients:\n  - {name: x, presets: [nope]}\n",
-		"bad tier":                  "upstreams:\n  - {name: a, key_env: KENARI_KEY_A, tier: gold}\n",
-		"bad key_env":               "upstreams:\n  - {name: a, key_env: sk-live-123, tier: free}\n",
-		"duplicate upstream":        "upstreams:\n  - {name: a, key_env: K, tier: free}\n  - {name: a, key_env: K2, tier: free}\n",
-		"combo without models":      "presets:\n  s: {modality: chat, mode: combo, strategy: priority, weights: {cost: 1}}\n",
-		"bad modality":              "presets:\n  s: {modality: telepathy, mode: auto, strategy: priority, weights: {cost: 1}}\n",
-		"negative weight":           "presets:\n  s: {modality: chat, mode: auto, strategy: priority, weights: {cost: -1}}\n",
-		"canary over 100":           "rules: {canary_percent: 150}\n",
-		"client unknown upstream":   "clients:\n  - {name: x, upstreams: [ghost]}\n",
+		"bad tier":                 "clients:\n  - name: x\n    keys:\n      - {name: main, key_env: KENARI_KEY_A, tier: gold}\n",
+		"bad secret name":          "clients:\n  - name: x\n    keys:\n      - {name: main, key_env: sk-live-123}\n",
+		"duplicate key in client":  "clients:\n  - name: x\n    keys:\n      - {name: a, key_env: K1}\n      - {name: a, key_env: K2}\n",
+		"secret shared by clients": "clients:\n  - name: x\n    keys:\n      - {name: a, key_env: K1}\n  - name: y\n    keys:\n      - {name: a, key_env: K1}\n",
+		"duplicate client":         "clients:\n  - {name: x}\n  - {name: x}\n",
+		"combo without models":     "clients:\n  - name: x\n" + good + "    presets:\n      p: {modality: chat, mode: combo, strategy: priority, weights: {cost: 1}}\n",
+		"bad modality":             "clients:\n  - name: x\n    presets:\n      p: {modality: telepathy, mode: auto, strategy: priority, weights: {cost: 1}}\n",
+		"negative weight":          "clients:\n  - name: x\n    presets:\n      p: {modality: chat, mode: auto, strategy: priority, weights: {cost: -1}}\n",
+		"bad preset name":          "clients:\n  - name: x\n    presets:\n      'a b': {modality: chat, mode: auto, strategy: priority, weights: {cost: 1}}\n",
+		"canary over 100":          "rules: {canary_percent: 150}\n",
+		"bad account key env":      "kenari: {account_key_env: not-an-env}\n",
 	}
 	for name, y := range cases {
 		if _, err := Parse([]byte(y)); err == nil {
@@ -41,8 +60,7 @@ func TestSaveKeepsHistoryAndNeverStoresSecrets(t *testing.T) {
 	file := filepath.Join(dir, "xellter.yaml")
 	c := Default()
 	c.Server.DataDir = filepath.Join(dir, "data")
-	c.Presets = DefaultPresets()
-	c.Upstreams = []Upstream{{Name: "a", KeyEnv: "KENARI_KEY_A", Enabled: true, Tier: "free"}}
+	c.Clients = []Client{{Name: "babu", Enabled: true, Keys: []Upstream{{Name: "main", KeyEnv: "KENARI_KEY_BABU_MAIN", Enabled: true, Tier: "auto"}}, Presets: DefaultPresets()}}
 	for i := 0; i < 3; i++ {
 		c.Rules.CanaryPercent = float64(i)
 		if err := Save(file, c); err != nil {
@@ -56,33 +74,30 @@ func TestSaveKeepsHistoryAndNeverStoresSecrets(t *testing.T) {
 	if st.Mode().Perm() != 0o600 {
 		t.Fatalf("config mode %v", st.Mode())
 	}
-	if err := SetSecret(filepath.Join(dir, "s.env"), "KENARI_KEY_A", "super-secret"); err != nil {
+	if err := SetSecret(filepath.Join(dir, "s.env"), "KENARI_KEY_BABU_MAIN", "super-secret"); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(file)
 	if strings.Contains(string(b), "super-secret") {
 		t.Fatal("secret leaked into config")
 	}
-	if LoadSecrets(filepath.Join(dir, "s.env"))["KENARI_KEY_A"] != "super-secret" {
+	if LoadSecrets(filepath.Join(dir, "s.env"))["KENARI_KEY_BABU_MAIN"] != "super-secret" {
 		t.Fatal("secret not stored")
+	}
+	if err := DeleteSecret(filepath.Join(dir, "s.env"), "KENARI_KEY_BABU_MAIN"); err != nil || len(LoadSecrets(filepath.Join(dir, "s.env"))) != 0 {
+		t.Fatal("secret not deleted")
 	}
 	if _, err := ReadHistory(c.Server.DataDir, "../../etc/passwd"); err == nil {
 		t.Fatal("history id path traversal")
+	}
+	back, err := Load(file)
+	if err != nil || len(back.Clients[0].Presets) != 6 {
+		t.Fatalf("round trip lost presets: %v %+v", err, back)
 	}
 }
 
 func TestMatchAny(t *testing.T) {
 	if !MatchAny([]string{"*"}, "x") || !MatchAny([]string{"deepseek-*"}, "deepseek-v4") || MatchAny([]string{"deepseek-*"}, "glm-5") || MatchAny(nil, "x") {
 		t.Fatal("glob matching broken")
-	}
-}
-
-func TestOldShadowsKeysAreMigratedToPresets(t *testing.T) {
-	c, err := Parse([]byte("shadows:\n  xl-old: {modality: chat, mode: auto, strategy: priority, weights: {cost: 1}}\nclients:\n  - {name: x, shadows: [xl-old]}\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := c.Presets["xl-old"]; !ok || len(c.Clients[0].Presets) != 1 || c.OldShadows != nil {
-		t.Fatalf("not migrated: %+v %+v", c.Presets, c.Clients)
 	}
 }

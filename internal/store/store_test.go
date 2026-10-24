@@ -22,10 +22,10 @@ func TestOpenRenamesLegacyShadowColumn(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	st.Log(Request{TS: time.Now().UnixMilli(), Client: "c", Preset: "balanced", Model: "m", OK: true})
+	st.Log(Request{TS: time.Now().UnixMilli(), Client: "c", Preset: "text", Model: "m", OK: true})
 	st.Flush()
-	rows, err := st.Usage("preset", time.Now().Add(-time.Hour))
-	if err != nil || len(rows) != 1 || rows[0].Key != "balanced" {
+	rows, err := st.Usage("preset", time.Now().Add(-time.Hour), "")
+	if err != nil || len(rows) != 1 || rows[0].Key != "text" {
 		t.Fatalf("rows=%v err=%v", rows, err)
 	}
 }

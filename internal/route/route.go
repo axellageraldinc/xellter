@@ -145,11 +145,8 @@ func (r *Router) Rankings() map[string]*rank.Ranking {
 
 // Models returns the model ids a client may list: its presets plus passthrough models.
 func (r *Router) Models(cl *config.Client) (presets []string, real []string) {
-	cfg := r.cfg.Load()
-	for name := range cfg.Presets {
-		if config.MatchAny(cl.Presets, name) {
-			presets = append(presets, name)
-		}
+	for name := range cl.Presets {
+		presets = append(presets, name)
 	}
 	sort.Strings(presets)
 	if snap := r.cat.Snapshot(); snap != nil && len(cl.Passthrough) > 0 {
@@ -176,15 +173,12 @@ func (r *Router) Plan(cl *config.Client, requested, session, path string, now ti
 	reasons := map[string]string{}
 
 	var order []orderItem
-	if sh, ok := cfg.Presets[requested]; ok {
-		if !config.MatchAny(cl.Presets, requested) {
-			return nil, &Error{403, "model_not_allowed", fmt.Sprintf("client %q may not use %q", cl.Name, requested), 0}
-		}
+	if sh, ok := cl.Presets[requested]; ok {
 		if want := modalityOfPath(path); want != "" && want != sh.Modality {
 			return nil, &Error{400, "bad_request", fmt.Sprintf("%s is a %s model; this endpoint serves %s", requested, sh.Modality, want), 0}
 		}
 		p.Preset, p.Modality = requested, sh.Modality
-		rk := r.Rankings()[requested]
+		rk := r.Rankings()[rank.Key(cl.Name, requested)]
 		if rk == nil || len(rk.Candidates)+len(rk.Trial) == 0 {
 			return nil, &Error{503, "no_candidates", fmt.Sprintf("no eligible model for %q right now", requested), 30 * time.Second}
 		}
@@ -195,7 +189,7 @@ func (r *Router) Plan(cl *config.Client, requested, session, path string, now ti
 			return nil, &Error{404, "model_not_found", fmt.Sprintf("unknown model %q", requested), 0}
 		}
 		if !config.MatchAny(cl.Passthrough, requested) {
-			return nil, &Error{403, "model_not_allowed", fmt.Sprintf("client %q may not call %q directly; use one of its preset models", cl.Name, requested), 0}
+			return nil, &Error{403, "model_not_allowed", fmt.Sprintf("client %q may not call %q directly; use one of its presets", cl.Name, requested), 0}
 		}
 		p.Passthrough, p.Modality = true, m.Endpoint
 		order = []orderItem{{model: m}}
@@ -253,7 +247,7 @@ func (r *Router) order(cfg *config.Config, cl *config.Client, rk *rank.Ranking, 
 		}
 	}
 	if len(rk.Trial) > 0 && cfg.Rules.CanaryPercent > 0 && r.rnd()*100 < cfg.Rules.CanaryPercent {
-		t := rk.Trial[int(r.rotation(rk.Preset+"/trial"))%len(rk.Trial)]
+		t := rk.Trial[int(r.rotation(rk.Client+"/"+rk.Preset+"/trial"))%len(rk.Trial)]
 		add(t.Model, true, "")
 	}
 	front := rk.Front
@@ -261,7 +255,7 @@ func (r *Router) order(cfg *config.Config, cl *config.Client, rk *rank.Ranking, 
 		front = len(rk.Candidates)
 	}
 	if front > 1 {
-		off := int(r.rotation(rk.Preset) % uint64(front))
+		off := int(r.rotation(rk.Client+"/"+rk.Preset) % uint64(front))
 		for i := 0; i < front; i++ {
 			add(rk.Candidates[(i+off)%front].Model, false, "")
 		}
@@ -291,10 +285,7 @@ func (r *Router) keysFor(cl *config.Client, m *catalog.Model, snap *catalog.Snap
 		tier int
 	}
 	var ks []kc
-	for _, k := range r.pool.Keys() {
-		if len(cl.Upstreams) > 0 && !containsStr(cl.Upstreams, k.Name) {
-			continue
-		}
+	for _, k := range r.pool.ClientKeys(cl.Name) {
 		if why := k.Check(m, snap, now); why != upstream.OK {
 			reasons[k.Name+"/"+m.ID] = why
 			continue

@@ -25,10 +25,7 @@ import (
 type Config struct {
 	Server     Server             `yaml:"server" json:"server"`
 	Kenari     Kenari             `yaml:"kenari" json:"kenari"`
-	Upstreams  []Upstream         `yaml:"upstreams" json:"upstreams"`
 	Clients    []Client           `yaml:"clients" json:"clients"`
-	Presets    map[string]Preset  `yaml:"presets" json:"presets"`
-	OldShadows map[string]Preset  `yaml:"shadows,omitempty" json:"-"` // pre-rename name, migrated on load
 	Rules      Rules              `yaml:"rules" json:"rules"`
 	Resilience Resilience         `yaml:"resilience" json:"resilience"`
 	JEV        JEV                `yaml:"jev" json:"jev"`
@@ -57,37 +54,41 @@ type Kenari struct {
 	UserAgent       string `yaml:"user_agent" json:"user_agent"`
 	FirstByteSecs   int    `yaml:"first_byte_timeout_s" json:"first_byte_timeout_s"`
 	MusicTimeoutSec int    `yaml:"music_timeout_s" json:"music_timeout_s"`
+	// AccountKeyEnv names the secret holding an optional full-access key of the
+	// kenari account. It is only used to read plan quota and balance, never to serve requests.
+	AccountKeyEnv string `yaml:"account_key_env" json:"account_key_env"`
 }
 
-// Upstream is one kenari API key. Tier drives rate limits; Plan names the
-// subscription (for plan-covered models) when Tier is "plan".
+// Upstream is one kenari API key of a client. Tier drives rate limits; Plan
+// names the subscription (for plan-covered models) when Tier is "plan".
 type Upstream struct {
 	Name    string   `yaml:"name" json:"name"`
 	KeyEnv  string   `yaml:"key_env" json:"key_env"`
 	Enabled bool     `yaml:"enabled" json:"enabled"`
 	Tier    string   `yaml:"tier" json:"tier"` // free | topup | plan
 	Plan    string   `yaml:"plan" json:"plan"`
-	Account string   `yaml:"account" json:"account"`       // keys of one kenari account share plan spend; default: own account
+	Account string   `yaml:"account" json:"account"`       // keys of one kenari account share its limits and plan; default "main"
 	RPM     int      `yaml:"rpm" json:"rpm"`               // 0 = tier default
 	Daily   int      `yaml:"daily_free" json:"daily_free"` // 0 = tier default, -1 = unlimited
 	Allow   []string `yaml:"allow" json:"allow"`           // model globs this key may use; empty = all (learned from 400s)
 	Note    string   `yaml:"note" json:"note"`
 }
 
-// Client is a consumer of xellter (Babu, aixell, polifin, ...). Each client has
-// exactly one API key, stored only as a hash.
+// Client is an app that calls xellter (Babu, aixell, polifin, ...). It has one
+// xellter API key (stored only as a hash), its own kenari keys and its own
+// presets, which xellter generates from the models those keys can use.
 type Client struct {
-	Name        string   `yaml:"name" json:"name"`
-	Enabled     bool     `yaml:"enabled" json:"enabled"`
-	KeyHash     string   `yaml:"key_hash" json:"key_hash"`
-	KeyHint     string   `yaml:"key_hint" json:"key_hint"`
-	Presets     []string `yaml:"presets" json:"presets"`                   // preset models this client may call; "*" = all
-	OldShadows  []string `yaml:"shadows,omitempty" json:"-"`               // pre-rename name, migrated on load
-	Passthrough []string `yaml:"passthrough" json:"passthrough"`           // real model globs allowed directly; empty = none
-	Upstreams   []string `yaml:"upstreams" json:"upstreams"`               // restrict to these upstream names; empty = all
-	DailyBudget float64  `yaml:"daily_budget_idr" json:"daily_budget_idr"` // 0 = unlimited
-	RTK         *bool    `yaml:"rtk" json:"rtk"`                           // nil = follow global
-	Note        string   `yaml:"note" json:"note"`
+	Name        string            `yaml:"name" json:"name"`
+	Enabled     bool              `yaml:"enabled" json:"enabled"`
+	KeyHash     string            `yaml:"key_hash" json:"key_hash"`
+	KeyHint     string            `yaml:"key_hint" json:"key_hint"`
+	Keys        []Upstream        `yaml:"keys" json:"keys"`                         // kenari API keys of this client
+	Presets     map[string]Preset `yaml:"presets" json:"presets"`                   // name -> preset; generated automatically, editable
+	Seeded      []string          `yaml:"seeded" json:"seeded"`                     // modalities already offered a generated preset
+	Passthrough []string          `yaml:"passthrough" json:"passthrough"`           // real model globs allowed directly; empty = none
+	DailyBudget float64           `yaml:"daily_budget_idr" json:"daily_budget_idr"` // 0 = unlimited
+	RTK         *bool             `yaml:"rtk" json:"rtk"`                           // nil = follow global
+	Note        string            `yaml:"note" json:"note"`
 }
 
 // Weights are relative weights of the ranking components.
@@ -197,7 +198,7 @@ func Default() *Config {
 			LogRequests: true, TrustedProxy: true, SessionHours: 12,
 			AdminHosts: []string{"localhost", "127.0.0.1"},
 		},
-		Kenari: Kenari{BaseURL: "https://kenari.id", SyncMinutes: 10, UserAgent: "xellter/1.0", FirstByteSecs: 120, MusicTimeoutSec: 900},
+		Kenari: Kenari{BaseURL: "https://kenari.id", SyncMinutes: 10, UserAgent: "xellter/1.0", FirstByteSecs: 120, MusicTimeoutSec: 900, AccountKeyEnv: "KENARI_ACCOUNT_KEY"},
 		Rules: Rules{
 			FreeBonus: 0.10, PlanBonus: 0.08, PlanCostFactor: 0.3, PromoBonusMax: 0.05, PromoMinRemainingHrs: 12, UpcomingLookaheadHrs: 24,
 			NewModelDays: 14, CanaryPercent: 5, CanaryMinRequests: 20, CanaryMinSuccess: 0.9, AvoidSunsetDays: 3,
@@ -218,26 +219,41 @@ func Default() *Config {
 	return c
 }
 
-// DefaultPresets is the starter set used when a config has no presets.
-func DefaultPresets() map[string]Preset {
-	chat := Weights{Cost: 30, Benchmark: 25, JEV: 20, Reliability: 15, Context: 10}
-	cp := CostProfile{InputTokens: 4000, OutputTokens: 600, CachedRatio: 0.7}
+// PresetModalities lists the kinds of presets xellter generates, in display order.
+var PresetModalities = []string{"chat", "images", "videos", "audio_speech", "audio_transcription", "music"}
+
+// PresetName is the generated preset name for a modality.
+func PresetName(modality string) string {
+	return map[string]string{"chat": "text", "images": "image", "videos": "video", "audio_speech": "tts", "audio_transcription": "stt", "music": "music"}[modality]
+}
+
+// DefaultPreset returns the generated preset for a modality.
+func DefaultPreset(modality string) Preset {
 	media := Weights{Cost: 70, Benchmark: 10, Reliability: 20}
-	return map[string]Preset{
-		"balanced": {Description: "Everyday chat: good answers at a fair price", Modality: "chat", Mode: "auto", Require: Require{ToolCall: true, MinContext: 32000},
-			MinQuality: 0.45, MaxCandidates: 4, Strategy: "round_robin", RRBand: 0.04, Weights: chat, Cost: cp},
-		"budget": {Description: "Cheapest acceptable model for simple tasks", Modality: "chat", Mode: "auto", Require: Require{MinContext: 16000},
-			MinQuality: 0.30, MaxCandidates: 4, Strategy: "round_robin", RRBand: 0.05, Weights: Weights{Cost: 50, Benchmark: 15, JEV: 10, Reliability: 20, Context: 5}, Cost: cp},
-		"smart": {Description: "Best answers; cost matters less", Modality: "chat", Mode: "auto", Require: Require{ToolCall: true, MinContext: 64000},
-			MinQuality: 0.6, MaxCandidates: 3, Strategy: "priority", RRBand: 0.03, Weights: Weights{Cost: 10, Benchmark: 35, JEV: 30, Reliability: 15, Context: 10}, Cost: cp},
-		"coding": {Description: "Coding agents: tool use, long context, quality first", Modality: "chat", Mode: "auto", Require: Require{ToolCall: true, MinContext: 64000},
-			MinQuality: 0.55, MaxCandidates: 4, Strategy: "priority", RRBand: 0.03, Weights: Weights{Cost: 20, Benchmark: 35, JEV: 20, Reliability: 15, Context: 10}, Cost: cp},
-		"image":      {Description: "Image generation, cheapest first", Modality: "images", Mode: "auto", MaxCandidates: 4, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Images: 1}},
-		"video":      {Description: "Video generation, cheapest first", Modality: "videos", Mode: "auto", MaxCandidates: 3, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Seconds: 5, Variant: "720p"}},
-		"speech":     {Description: "Text to speech, cheapest first", Modality: "audio_speech", Mode: "auto", MaxCandidates: 3, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Chars: 1000}},
-		"transcribe": {Description: "Speech to text, cheapest first", Modality: "audio_transcription", Mode: "auto", MaxCandidates: 3, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Seconds: 60}},
-		"music":      {Description: "Music generation, cheapest first", Modality: "music", Mode: "auto", MaxCandidates: 2, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{}},
+	switch modality {
+	case "chat":
+		return Preset{Description: "Text and chat. Picks the best model that is cheap enough.", Modality: "chat", Mode: "auto", Require: Require{ToolCall: true, MinContext: 32000},
+			MinQuality: 0.45, MaxCandidates: 4, Strategy: "round_robin", RRBand: 0.04, Weights: Weights{Cost: 30, Benchmark: 25, JEV: 20, Reliability: 15, Context: 10},
+			Cost: CostProfile{InputTokens: 4000, OutputTokens: 600, CachedRatio: 0.7}}
+	case "images":
+		return Preset{Description: "Image generation, free and cheap models first.", Modality: "images", Mode: "auto", MaxCandidates: 4, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Images: 1}}
+	case "videos":
+		return Preset{Description: "Video generation, cheapest first.", Modality: "videos", Mode: "auto", MaxCandidates: 3, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Seconds: 5, Variant: "720p"}}
+	case "audio_speech":
+		return Preset{Description: "Text to speech, cheapest first.", Modality: "audio_speech", Mode: "auto", MaxCandidates: 3, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Chars: 1000}}
+	case "audio_transcription":
+		return Preset{Description: "Speech to text, cheapest first.", Modality: "audio_transcription", Mode: "auto", MaxCandidates: 3, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Seconds: 60}}
 	}
+	return Preset{Description: "Music generation, cheapest first.", Modality: "music", Mode: "auto", MaxCandidates: 2, Strategy: "priority", RRBand: 0.03, Weights: media}
+}
+
+// DefaultPresets returns every generated preset keyed by name (used by tests and as a template).
+func DefaultPresets() map[string]Preset {
+	out := map[string]Preset{}
+	for _, m := range PresetModalities {
+		out[PresetName(m)] = DefaultPreset(m)
+	}
+	return out
 }
 
 // Parse decodes YAML on top of defaults and validates the result.
@@ -245,10 +261,6 @@ func Parse(data []byte) (*Config, error) {
 	c := Default()
 	if err := yaml.Unmarshal(data, c); err != nil {
 		return nil, fmt.Errorf("parse yaml: %w", err)
-	}
-	c.migrate()
-	if len(c.Presets) == 0 {
-		c.Presets = DefaultPresets()
 	}
 	if c.Benchmarks == nil {
 		c.Benchmarks = map[string]float64{}
@@ -260,26 +272,9 @@ func Parse(data []byte) (*Config, error) {
 	return c, nil
 }
 
-// migrate moves the pre-rename "shadows" keys into "presets".
-func (c *Config) migrate() {
-	if len(c.Presets) == 0 && len(c.OldShadows) > 0 {
-		c.Presets = c.OldShadows
-	}
-	c.OldShadows = nil
-	for i := range c.Clients {
-		if len(c.Clients[i].Presets) == 0 && len(c.Clients[i].OldShadows) > 0 {
-			c.Clients[i].Presets = c.Clients[i].OldShadows
-		}
-		c.Clients[i].OldShadows = nil
-	}
-}
-
 // Normalize fills defaults and validates a config built outside Parse (for
 // example decoded from the admin panel's JSON).
 func Normalize(c *Config) error {
-	if len(c.Presets) == 0 {
-		c.Presets = DefaultPresets()
-	}
 	if c.Benchmarks == nil {
 		c.Benchmarks = map[string]float64{}
 	}
@@ -362,25 +357,31 @@ func (c *Config) fillDefaults() {
 	if len(c.JEV.Prompts) == 0 {
 		c.JEV.Prompts = d.JEV.Prompts
 	}
-	for i := range c.Upstreams {
-		if c.Upstreams[i].Tier == "" {
-			c.Upstreams[i].Tier = "auto"
-		}
+	if c.Kenari.AccountKeyEnv == "" {
+		c.Kenari.AccountKeyEnv = d.Kenari.AccountKeyEnv
 	}
-	for name, s := range c.Presets {
-		if s.Mode == "" {
-			s.Mode = "auto"
+	for i := range c.Clients {
+		cl := &c.Clients[i]
+		for j := range cl.Keys {
+			if cl.Keys[j].Tier == "" {
+				cl.Keys[j].Tier = "auto"
+			}
 		}
-		if s.Strategy == "" {
-			s.Strategy = "round_robin"
+		for name, s := range cl.Presets {
+			if s.Mode == "" {
+				s.Mode = "auto"
+			}
+			if s.Strategy == "" {
+				s.Strategy = "round_robin"
+			}
+			if s.MaxCandidates <= 0 {
+				s.MaxCandidates = 4
+			}
+			if s.RRBand < 0 {
+				s.RRBand = 0
+			}
+			cl.Presets[name] = s
 		}
-		if s.MaxCandidates <= 0 {
-			s.MaxCandidates = 4
-		}
-		if s.RRBand < 0 {
-			s.RRBand = 0
-		}
-		c.Presets[name] = s
 	}
 }
 
@@ -397,24 +398,7 @@ func (c *Config) Validate() error {
 	if !strings.Contains(c.Server.Listen, ":") {
 		bad("server.listen must be host:port")
 	}
-	seen := map[string]bool{}
-	for i, u := range c.Upstreams {
-		if !nameRe.MatchString(u.Name) {
-			bad("upstreams[%d].name is invalid", i)
-		}
-		if seen[u.Name] {
-			bad("duplicate upstream %q", u.Name)
-		}
-		seen[u.Name] = true
-		if !envRe.MatchString(u.KeyEnv) {
-			bad("upstream %q: key_env must look like KENARI_KEY_X", u.Name)
-		}
-		if u.Tier != "auto" && u.Tier != "free" && u.Tier != "topup" && u.Tier != "plan" {
-			bad("upstream %q: tier must be auto, free, topup or plan", u.Name)
-		}
-		checkGlobs(&errs, "upstream "+u.Name+".allow", u.Allow)
-	}
-	cseen := map[string]bool{}
+	cseen, envSeen := map[string]bool{}, map[string]string{}
 	for i, cl := range c.Clients {
 		if !nameRe.MatchString(cl.Name) {
 			bad("clients[%d].name is invalid", i)
@@ -426,46 +410,61 @@ func (c *Config) Validate() error {
 		if cl.KeyHash != "" && !hashRe.MatchString(cl.KeyHash) {
 			bad("client %q: key_hash must be sha256 hex", cl.Name)
 		}
-		for _, s := range cl.Presets {
-			if _, ok := c.Presets[s]; !ok && s != "*" {
-				bad("client %q: unknown preset %q", cl.Name, s)
-			}
-		}
-		for _, un := range cl.Upstreams {
-			if !seen[un] {
-				bad("client %q: unknown upstream %q", cl.Name, un)
-			}
-		}
 		checkGlobs(&errs, "client "+cl.Name+".passthrough", cl.Passthrough)
+		kseen := map[string]bool{}
+		for _, u := range cl.Keys {
+			if !nameRe.MatchString(u.Name) {
+				bad("client %q: key name %q is invalid (letters, digits, dot, dash, underscore)", cl.Name, u.Name)
+			}
+			if kseen[u.Name] {
+				bad("client %q: duplicate key %q", cl.Name, u.Name)
+			}
+			kseen[u.Name] = true
+			if !envRe.MatchString(u.KeyEnv) {
+				bad("client %q key %q: secret name must look like KENARI_KEY_X", cl.Name, u.Name)
+			}
+			if other, dup := envSeen[u.KeyEnv]; dup {
+				bad("secret name %s is used by both %s and %s/%s", u.KeyEnv, other, cl.Name, u.Name)
+			}
+			envSeen[u.KeyEnv] = cl.Name + "/" + u.Name
+			if u.Tier != "auto" && u.Tier != "free" && u.Tier != "topup" && u.Tier != "plan" {
+				bad("client %q key %q: tier must be auto, free, topup or plan", cl.Name, u.Name)
+			}
+			checkGlobs(&errs, "key "+cl.Name+"/"+u.Name+".allow", u.Allow)
+		}
+		for name, s := range cl.Presets {
+			where := "client " + cl.Name + " preset " + name
+			if !nameRe.MatchString(name) {
+				bad("%s: invalid name", where)
+			}
+			if !contains(Modalities, s.Modality) {
+				bad("%s: modality must be one of %v", where, Modalities)
+			}
+			if s.Mode != "auto" && s.Mode != "combo" {
+				bad("%s: mode must be auto or combo", where)
+			}
+			if s.Mode == "combo" && len(s.Models) == 0 {
+				bad("%s: combo needs models", where)
+			}
+			if s.Strategy != "round_robin" && s.Strategy != "priority" {
+				bad("%s: strategy must be round_robin or priority", where)
+			}
+			w := s.Weights
+			if w.Cost < 0 || w.Benchmark < 0 || w.JEV < 0 || w.Reliability < 0 || w.Context < 0 {
+				bad("%s: weights must be >= 0", where)
+			}
+			if s.Mode == "auto" && w.Cost+w.Benchmark+w.JEV+w.Reliability+w.Context <= 0 {
+				bad("%s: at least one weight must be > 0", where)
+			}
+			if s.MinQuality < 0 || s.MinQuality > 1 {
+				bad("%s: min_quality must be 0..1", where)
+			}
+			checkGlobs(&errs, where+".allow", s.Allow)
+			checkGlobs(&errs, where+".deny", s.Deny)
+		}
 	}
-	for name, s := range c.Presets {
-		if !nameRe.MatchString(name) {
-			bad("preset name %q is invalid", name)
-		}
-		if !contains(Modalities, s.Modality) {
-			bad("preset %q: modality must be one of %v", name, Modalities)
-		}
-		if s.Mode != "auto" && s.Mode != "combo" {
-			bad("preset %q: mode must be auto or combo", name)
-		}
-		if s.Mode == "combo" && len(s.Models) == 0 {
-			bad("preset %q: combo needs models", name)
-		}
-		if s.Strategy != "round_robin" && s.Strategy != "priority" {
-			bad("preset %q: strategy must be round_robin or priority", name)
-		}
-		w := s.Weights
-		if w.Cost < 0 || w.Benchmark < 0 || w.JEV < 0 || w.Reliability < 0 || w.Context < 0 {
-			bad("preset %q: weights must be >= 0", name)
-		}
-		if s.Mode == "auto" && w.Cost+w.Benchmark+w.JEV+w.Reliability+w.Context <= 0 {
-			bad("preset %q: at least one weight must be > 0", name)
-		}
-		if s.MinQuality < 0 || s.MinQuality > 1 {
-			bad("preset %q: min_quality must be 0..1", name)
-		}
-		checkGlobs(&errs, "preset "+name+".allow", s.Allow)
-		checkGlobs(&errs, "preset "+name+".deny", s.Deny)
+	if c.Kenari.AccountKeyEnv != "" && !envRe.MatchString(c.Kenari.AccountKeyEnv) {
+		bad("kenari.account_key_env must look like KENARI_ACCOUNT_KEY")
 	}
 	if c.Rules.CanaryPercent < 0 || c.Rules.CanaryPercent > 100 {
 		bad("rules.canary_percent must be 0..100")
@@ -655,6 +654,29 @@ func SetSecret(file, name, value string) error {
 	}
 	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
 		return err
+	}
+	tmp := file + ".tmp"
+	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, file)
+}
+
+// DeleteSecret removes one secret from the secrets file.
+func DeleteSecret(file, name string) error {
+	m := LoadSecrets(file)
+	if _, ok := m[name]; !ok {
+		return nil
+	}
+	delete(m, name)
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		b.WriteString(k + "=" + m[k] + "\n")
 	}
 	tmp := file + ".tmp"
 	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {

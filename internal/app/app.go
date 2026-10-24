@@ -167,7 +167,98 @@ func (a *App) ProbeKeys(ctx context.Context) {
 			a.Logf("probe %s: unrestricted key, plan %q read from kenari", k.Name, k.Account().Status(a.Cat.Snapshot(), time.Now()).Plan)
 		}
 	}
+	a.seedPresets()
 	a.Rt.Recompute(time.Now())
+}
+
+// seedPresets generates the presets of every client from the models its keys can
+// call: one per kind (text, image, video, tts, stt, music) that has at least one
+// model. Kinds are offered once; presets the owner edits or deletes are never
+// recreated or overwritten. A client is only seeded after all its keys were probed.
+func (a *App) seedPresets() {
+	snap := a.Cat.Snapshot()
+	if snap == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	cur := a.Cfg()
+	next := *cur
+	next.Clients = make([]config.Client, len(cur.Clients))
+	changed := false
+	for i, cl := range cur.Clients {
+		cl.Presets = clonePresets(cl.Presets)
+		cl.Seeded = append([]string(nil), cl.Seeded...)
+		keys := a.Pool.ClientKeys(cl.Name)
+		ready := len(keys) > 0
+		for _, k := range keys {
+			if k.Config().Enabled && k.Secret != "" && !k.Probed() {
+				ready = false
+			}
+		}
+		for _, kind := range config.PresetModalities {
+			if !ready || containsStr(cl.Seeded, kind) || !kindAvailable(snap, keys, kind) {
+				continue
+			}
+			if cl.Presets == nil {
+				cl.Presets = map[string]config.Preset{}
+			}
+			if _, exists := cl.Presets[config.PresetName(kind)]; !exists {
+				cl.Presets[config.PresetName(kind)] = config.DefaultPreset(kind)
+			}
+			cl.Seeded = append(cl.Seeded, kind)
+			changed = true
+		}
+		next.Clients[i] = cl
+	}
+	if !changed {
+		return
+	}
+	if err := config.Normalize(&next); err != nil {
+		a.Logf("preset generation: %v", err)
+		return
+	}
+	if err := config.Save(a.Path, &next); err != nil {
+		a.Logf("preset generation: %v", err)
+		return
+	}
+	a.cfg.Store(&next)
+	a.Px.SetConfig(&next)
+	a.Rt.SetConfig(&next)
+	a.Logf("presets generated from the models each client's keys can use")
+}
+
+func clonePresets(m map[string]config.Preset) map[string]config.Preset {
+	out := make(map[string]config.Preset, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func containsStr(l []string, s string) bool {
+	for _, v := range l {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// kindAvailable reports whether any enabled key can call a catalog model of the kind.
+func kindAvailable(snap *catalog.Snapshot, keys []*upstream.Key, kind string) bool {
+	for _, id := range snap.IDs() {
+		m := snap.Models[id]
+		if m.Endpoint != kind {
+			continue
+		}
+		for _, k := range keys {
+			if k.Config().Enabled && k.Secret != "" && k.AllowedModel(id) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 type quotaResp struct {
@@ -313,5 +404,10 @@ func (a *App) Describe() string {
 	if s := a.Cat.Snapshot(); s != nil {
 		n = len(s.Models)
 	}
-	return fmt.Sprintf("xellter %s: %d upstreams, %d clients, %d presets, %d catalog models, listening on %s", Version, len(c.Upstreams), len(c.Clients), len(c.Presets), n, c.Server.Listen)
+	keys, presets := 0, 0
+	for _, cl := range c.Clients {
+		keys += len(cl.Keys)
+		presets += len(cl.Presets)
+	}
+	return fmt.Sprintf("xellter %s: %d clients, %d kenari keys, %d presets, %d catalog models, listening on %s", Version, len(c.Clients), keys, presets, n, c.Server.Listen)
 }

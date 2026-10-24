@@ -21,7 +21,9 @@ import (
 // Key is one upstream API key with its own failure state. Limits that kenari
 // applies per account are on its Account.
 type Key struct {
-	Name   string
+	Name   string // unique id: "<client>/<key name>", or "account" for the read-only account key
+	Label  string // the key name inside its client
+	Client string // owner client ("" for the account key)
 	Secret string
 
 	mu       sync.Mutex
@@ -33,6 +35,7 @@ type Key struct {
 	blocked  map[string]time.Time // model -> until
 	blockN   map[string]int
 	learned  map[string]struct{} // models this key may use (probed / learned from 400s); nil = unrestricted
+	probed   bool                // the allow list above is known (a probe succeeded)
 	lastErr  string
 	lastOK   time.Time
 }
@@ -59,15 +62,30 @@ const DefaultAccount = "main"
 func (p *Pool) Reload(cfg *config.Config, secrets map[string]string, st *store.Store) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	next := make([]*Key, 0, len(cfg.Upstreams))
+	type entry struct {
+		id, client string
+		u          config.Upstream
+	}
+	var entries []entry
+	for _, cl := range cfg.Clients {
+		for _, u := range cl.Keys {
+			entries = append(entries, entry{cl.Name + "/" + u.Name, cl.Name, u})
+		}
+	}
+	if env := cfg.Kenari.AccountKeyEnv; env != "" && secrets[env] != "" {
+		// the account key only reads plan quota and balance; it is never enabled for requests
+		entries = append(entries, entry{"account", "", config.Upstream{Name: "account", KeyEnv: env, Enabled: false, Tier: "auto", Account: DefaultAccount}})
+	}
+	next := make([]*Key, 0, len(entries))
 	by := map[string]*Key{}
 	accts := map[string]*Account{}
 	now := time.Now()
-	for _, u := range cfg.Upstreams {
-		k := p.by[u.Name]
+	for _, e := range entries {
+		u := e.u
+		k := p.by[e.id]
 		isNew := k == nil
 		if isNew {
-			k = &Key{Name: u.Name, blocked: map[string]time.Time{}, blockN: map[string]int{}}
+			k = &Key{Name: e.id, blocked: map[string]time.Time{}, blockN: map[string]int{}}
 		}
 		an := u.Account
 		if an == "" {
@@ -98,24 +116,37 @@ func (p *Pool) Reload(cfg *config.Config, secrets map[string]string, st *store.S
 			a.dailyCfg = u.Daily
 		}
 		if isNew && st != nil {
-			if t, err := st.FreeTimes(u.Name, startOfUTCDay(now)); err == nil {
+			if t, err := st.FreeTimes(e.id, startOfUTCDay(now)); err == nil {
 				a.free = append(a.free, t...)
 			}
-			if t, err := st.AllTimes(u.Name, now.Add(-time.Minute)); err == nil {
+			if t, err := st.AllTimes(e.id, now.Add(-time.Minute)); err == nil {
 				a.rpm = append(a.rpm, t...)
 			}
-			if sp, err := st.PlanSpend(u.Name, now.Add(-30*24*time.Hour)); err == nil {
+			if sp, err := st.PlanSpend(e.id, now.Add(-30*24*time.Hour)); err == nil {
 				a.spend = append(a.spend, sp...)
 			}
 		}
 		a.mu.Unlock()
 		k.mu.Lock()
-		k.cfg, k.Secret, k.acct = u, secrets[u.KeyEnv], a
+		k.cfg, k.Secret, k.acct, k.Label, k.Client = u, secrets[u.KeyEnv], a, u.Name, e.client
 		k.mu.Unlock()
 		next = append(next, k)
-		by[u.Name] = k
+		by[e.id] = k
 	}
 	p.keys, p.by, p.accts = next, by, accts
+}
+
+// ClientKeys returns the keys that belong to a client.
+func (p *Pool) ClientKeys(client string) []*Key {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	var out []*Key
+	for _, k := range p.keys {
+		if k.Client == client && client != "" {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // Keys returns the current keys.
@@ -290,6 +321,7 @@ func (k *Key) RecordSpend(ts time.Time, cost float64) {
 func (k *Key) SetAllowed(models []string) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	k.probed = true
 	if models == nil {
 		k.learned = nil
 		return
@@ -298,6 +330,13 @@ func (k *Key) SetAllowed(models []string) {
 	for _, m := range models {
 		k.learned[m] = struct{}{}
 	}
+}
+
+// Probed reports whether the key's model access has been determined.
+func (k *Key) Probed() bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.probed
 }
 
 // ParseAllowed extracts the model list from a kenari "not allowed by this key" error body.
@@ -469,6 +508,8 @@ func errorInfo(body []byte) (code, msg string) {
 // Status is the dashboard view of a key.
 type Status struct {
 	Name         string    `json:"name"`
+	Label        string    `json:"label"`
+	Client       string    `json:"client"`
 	Account      string    `json:"account"`
 	Tier         string    `json:"tier"`
 	Enabled      bool      `json:"enabled"`
@@ -486,7 +527,7 @@ type Status struct {
 func (k *Key) Status(now time.Time) Status {
 	k.mu.Lock()
 	a := k.acct
-	st := Status{Name: k.Name, Account: a.Name, Tier: k.cfg.Tier, Enabled: k.cfg.Enabled, HasSecret: k.Secret != "", CooldownEnd: k.cooldown, BreakerEnd: k.breaker, LastError: k.lastErr, LastOK: k.lastOK}
+	st := Status{Name: k.Name, Label: k.Label, Client: k.Client, Account: a.Name, Tier: k.cfg.Tier, Enabled: k.cfg.Enabled, HasSecret: k.Secret != "", CooldownEnd: k.cooldown, BreakerEnd: k.breaker, LastError: k.lastErr, LastOK: k.lastOK}
 	for m, until := range k.blocked {
 		if now.Before(until) {
 			st.Blocked = append(st.Blocked, m)
@@ -507,7 +548,7 @@ func (k *Key) Status(now time.Time) Status {
 func (k *Key) ResetState() {
 	k.mu.Lock()
 	k.cooldown, k.breaker = time.Time{}, time.Time{}
-	k.blocked, k.blockN, k.learned, k.fails = map[string]time.Time{}, map[string]int{}, nil, 0
+	k.blocked, k.blockN, k.learned, k.fails, k.probed = map[string]time.Time{}, map[string]int{}, nil, 0, false
 	a := k.acct
 	k.mu.Unlock()
 	a.reset()

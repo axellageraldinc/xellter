@@ -22,7 +22,7 @@ func snap() *catalog.Snapshot {
 func key(t *testing.T, u config.Upstream) *Key {
 	cfg := config.Default()
 	u.Enabled = true
-	cfg.Upstreams = []config.Upstream{u}
+	cfg.Clients = []config.Client{{Name: "c", Enabled: true, Keys: []config.Upstream{u}}}
 	p := NewPool()
 	p.Reload(cfg, map[string]string{u.KeyEnv: "secret"}, nil)
 	return p.Keys()[0]
@@ -142,10 +142,10 @@ func TestSeededFromStoreAndConfigAllowList(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	st.Log(store.Request{TS: time.Now().UnixMilli(), Upstream: "k", Model: "f:free", OK: true, Billing: "free"})
+	st.Log(store.Request{TS: time.Now().UnixMilli(), Upstream: "c/k", Model: "f:free", OK: true, Billing: "free"})
 	st.Flush()
 	cfg := config.Default()
-	cfg.Upstreams = []config.Upstream{{Name: "k", KeyEnv: "K", Enabled: true, Tier: "free", Allow: []string{"deepseek-*"}}}
+	cfg.Clients = []config.Client{{Name: "c", Enabled: true, Keys: []config.Upstream{{Name: "k", KeyEnv: "K", Enabled: true, Tier: "free", Allow: []string{"deepseek-*"}}}}}
 	p := NewPool()
 	p.Reload(cfg, map[string]string{"K": "s"}, st)
 	k := p.Keys()[0]

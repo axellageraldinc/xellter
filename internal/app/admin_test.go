@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -151,29 +152,45 @@ func TestAdminConfigClientsAndRollback(t *testing.T) {
 	ae := setupAdmin(t)
 	ck := ae.login(t)
 
-	// create a client: the key is returned once and works immediately
-	resp, b := ae.do(t, ck, "POST", "/admin/api/clients", map[string]any{"action": "create", "client": map[string]any{"name": "polifin", "presets": []string{"budget"}}})
+	// create a client and give it a kenari key: presets appear on their own, the xellter key works at once
+	resp, b := ae.do(t, ck, "POST", "/admin/api/clients", map[string]any{"action": "create", "name": "polifin"})
 	var created struct{ Key string }
 	_ = json.Unmarshal(b, &created)
 	if resp.StatusCode != 200 || !strings.HasPrefix(created.Key, "xl-") {
 		t.Fatalf("create client: %d %s", resp.StatusCode, b)
 	}
-	if r, _ := ae.post(t, created.Key, "/v1/chat/completions", `{"model":"budget","messages":[{"role":"user","content":"hi"}]}`); r.StatusCode != 200 {
+	if r, b := ae.do(t, ck, "POST", "/admin/api/keys", map[string]any{"client": "polifin", "action": "add", "name": "main", "key": "kn-polifin"}); r.StatusCode != 200 {
+		t.Fatalf("add key: %d %s", r.StatusCode, b)
+	}
+	ae.a.ProbeKeys(context.Background())
+	var polifin config.Client
+	for _, c := range ae.a.Cfg().Clients {
+		if c.Name == "polifin" {
+			polifin = c
+		}
+	}
+	if _, ok := polifin.Presets["text"]; !ok || polifin.Presets["image"].Modality != "images" {
+		t.Fatalf("presets were not generated: %+v", polifin.Presets)
+	}
+	if r, _ := ae.post(t, created.Key, "/v1/chat/completions", `{"model":"text","messages":[{"role":"user","content":"hi"}]}`); r.StatusCode != 200 {
 		t.Fatalf("new client key rejected: %d", r.StatusCode)
 	}
-	if r, _ := ae.post(t, created.Key, "/v1/chat/completions", `{"model":"balanced","messages":[{"role":"user","content":"hi"}]}`); r.StatusCode != 403 {
-		t.Fatalf("client must be limited to its presets: %d", r.StatusCode)
+	if r, _ := ae.post(t, created.Key, "/v1/chat/completions", `{"model":"cheap-b","messages":[{"role":"user","content":"hi"}]}`); r.StatusCode != 403 {
+		t.Fatalf("direct models must be off by default: %d", r.StatusCode)
 	}
 	data, _ := os.ReadFile(ae.a.Path)
-	if strings.Contains(string(data), created.Key) {
-		t.Fatal("plain client key must never be written to the config")
+	if strings.Contains(string(data), created.Key) || strings.Contains(string(data), "kn-polifin") {
+		t.Fatal("plain client key or kenari key must never be written to the config")
+	}
+	if ae.a.Secrets()["KENARI_KEY_POLIFIN_MAIN"] != "kn-polifin" {
+		t.Fatal("kenari key not stored in the secrets file")
 	}
 
 	// rotate: old key dies
 	resp, b = ae.do(t, ck, "POST", "/admin/api/clients", map[string]any{"action": "rotate", "name": "polifin"})
 	var rot struct{ Key string }
 	_ = json.Unmarshal(b, &rot)
-	if r, _ := ae.post(t, created.Key, "/v1/models", ``); r.StatusCode != 401 && r.StatusCode != 405 {
+	if r, _ := ae.post(t, created.Key, "/v1/chat/completions", `{"model":"text","messages":[]}`); r.StatusCode != 401 {
 		t.Fatalf("old key still valid: %d", r.StatusCode)
 	}
 	if rot.Key == "" || rot.Key == created.Key {
@@ -181,26 +198,29 @@ func TestAdminConfigClientsAndRollback(t *testing.T) {
 	}
 
 	// an invalid config is rejected and nothing changes
-	resp, b = ae.do(t, ck, "GET", "/admin/api/config", nil)
+	_, b = ae.do(t, ck, "GET", "/admin/api/config", nil)
 	var cur struct {
 		Config  map[string]any
 		History []string
 	}
 	_ = json.Unmarshal(b, &cur)
-	cur.Config["presets"].(map[string]any)["balanced"].(map[string]any)["strategy"] = "nonsense"
+	text := func() map[string]any {
+		return cur.Config["clients"].([]any)[0].(map[string]any)["presets"].(map[string]any)["text"].(map[string]any)
+	}
+	text()["strategy"] = "nonsense"
 	if r, _ := ae.do(t, ck, "PUT", "/admin/api/config", map[string]any{"config": cur.Config}); r.StatusCode != 422 {
 		t.Fatalf("invalid config accepted: %d", r.StatusCode)
 	}
-	if ae.a.Cfg().Presets["balanced"].Strategy == "nonsense" {
+	if ae.a.Cfg().Clients[0].Presets["text"].Strategy == "nonsense" {
 		t.Fatal("invalid config was applied")
 	}
 
 	// a valid edit applies live and is reversible
-	cur.Config["presets"].(map[string]any)["balanced"].(map[string]any)["strategy"] = "priority"
+	text()["strategy"] = "priority"
 	if r, b := ae.do(t, ck, "PUT", "/admin/api/config", map[string]any{"config": cur.Config}); r.StatusCode != 200 {
 		t.Fatalf("valid config rejected: %d %s", r.StatusCode, b)
 	}
-	if ae.a.Cfg().Presets["balanced"].Strategy != "priority" {
+	if ae.a.Cfg().Clients[0].Presets["text"].Strategy != "priority" {
 		t.Fatal("edit not applied")
 	}
 	_, b = ae.do(t, ck, "GET", "/admin/api/config", nil)
@@ -211,16 +231,85 @@ func TestAdminConfigClientsAndRollback(t *testing.T) {
 	if r, b := ae.do(t, ck, "POST", "/admin/api/rollback", map[string]string{"id": cur.History[0]}); r.StatusCode != 200 {
 		t.Fatalf("rollback: %d %s", r.StatusCode, b)
 	}
-	if ae.a.Cfg().Presets["balanced"].Strategy != "round_robin" {
-		t.Fatalf("rollback did not restore the previous strategy: %s", ae.a.Cfg().Presets["balanced"].Strategy)
+	if got := ae.a.Cfg().Clients[0].Presets["text"].Strategy; got != "round_robin" {
+		t.Fatalf("rollback did not restore the previous strategy: %s", got)
 	}
 
 	// ranking and the UI shell are served
-	if r, b := ae.do(t, ck, "GET", "/admin/api/ranking?preset=balanced", nil); r.StatusCode != 200 || !strings.Contains(string(b), "candidates") {
+	if r, b := ae.do(t, ck, "GET", "/admin/api/ranking?client=babu&preset=text", nil); r.StatusCode != 200 || !strings.Contains(string(b), "candidates") {
 		t.Fatalf("ranking: %d %s", r.StatusCode, b)
 	}
 	if r, b := ae.do(t, nil, "GET", "/admin/", nil); r.StatusCode != 200 || !strings.Contains(string(b), "xellter admin") {
 		t.Fatalf("ui: %d", r.StatusCode)
+	}
+}
+
+func TestAdminKeysAndOverview(t *testing.T) {
+	ae := setupAdmin(t)
+	ck := ae.login(t)
+	if r, b := ae.do(t, ck, "POST", "/admin/api/keys", map[string]string{"client": "babu", "action": "add", "name": "spare key", "key": "kn-new-secret"}); r.StatusCode != 200 {
+		t.Fatalf("add: %d %s", r.StatusCode, b)
+	}
+	found := false
+	for _, k := range ae.a.Cfg().Clients[0].Keys {
+		if k.Name == "spare-key" {
+			found = true
+			if k.KeyEnv != "KENARI_KEY_BABU_SPARE_KEY" || k.Tier != "auto" || !k.Enabled {
+				t.Fatalf("defaults wrong: %+v", k)
+			}
+		}
+	}
+	if !found || ae.a.Secrets()["KENARI_KEY_BABU_SPARE_KEY"] != "kn-new-secret" {
+		t.Fatal("key not stored")
+	}
+	if cfg, _ := os.ReadFile(ae.a.Path); strings.Contains(string(cfg), "kn-new-secret") {
+		t.Fatal("key value leaked into the config file")
+	}
+	if r, _ := ae.do(t, ck, "POST", "/admin/api/keys", map[string]string{"client": "babu", "action": "add", "name": "spare-key", "key": "kn-x"}); r.StatusCode != 422 {
+		t.Fatalf("duplicate key name accepted: %d", r.StatusCode)
+	}
+	_, b := ae.do(t, ck, "GET", "/admin/api/overview", nil)
+	var ov struct {
+		Alerts  []struct{ Level, Text string }
+		Status  string
+		Clients []struct {
+			Name    string
+			Keys    []struct{ Label string }
+			Presets []struct {
+				Name   string
+				Models int
+			}
+		}
+	}
+	if err := json.Unmarshal(b, &ov); err != nil || ov.Status == "" || len(ov.Clients) != 4 {
+		t.Fatalf("overview incomplete: %v %s", err, b)
+	}
+	if len(ov.Clients[0].Keys) != 3 || len(ov.Clients[0].Presets) == 0 || ov.Clients[0].Presets[0].Name != "text" || ov.Clients[0].Presets[0].Models == 0 {
+		t.Fatalf("client row wrong: %+v", ov.Clients[0])
+	}
+	noKey := false
+	for _, a := range ov.Alerts {
+		if a.Level == "info" && strings.Contains(a.Text, "off has no kenari key") {
+			noKey = true
+		}
+	}
+	if !noKey {
+		t.Fatalf("expected a hint for the client without keys: %+v", ov.Alerts)
+	}
+	if r, b := ae.do(t, ck, "POST", "/admin/api/keys", map[string]string{"client": "babu", "action": "remove", "name": "spare-key"}); r.StatusCode != 200 {
+		t.Fatalf("remove: %d %s", r.StatusCode, b)
+	}
+	if _, ok := ae.a.Secrets()["KENARI_KEY_BABU_SPARE_KEY"]; ok {
+		t.Fatal("removed key must also leave the secrets file")
+	}
+	if r, _ := ae.do(t, ck, "POST", "/admin/api/clients", map[string]string{"action": "delete", "name": "locked"}); r.StatusCode != 200 {
+		t.Fatalf("client delete: %d", r.StatusCode)
+	}
+	if _, ok := ae.a.Secrets()["KEY_LOCKED"]; ok {
+		t.Fatal("deleting a client must remove its kenari keys from the secrets file")
+	}
+	if r, b := ae.do(t, ck, "POST", "/admin/api/account-key", map[string]string{"key": "kn-account"}); r.StatusCode != 200 || ae.a.Secrets()["KENARI_ACCOUNT_KEY"] != "kn-account" {
+		t.Fatalf("account key: %d %s", r.StatusCode, b)
 	}
 }
 
@@ -236,57 +325,4 @@ func (ae *adminEnv) post(t *testing.T, key, path, body string) (*http.Response, 
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	return resp, string(b)
-}
-
-func TestAdminUpstreamsCreateDeleteAndOverviewAlerts(t *testing.T) {
-	ae := setupAdmin(t)
-	ck := ae.login(t)
-	if r, b := ae.do(t, ck, "POST", "/admin/api/upstreams", map[string]string{"action": "create", "name": "spare key", "key": "kn-new-secret"}); r.StatusCode != 200 {
-		t.Fatalf("create: %d %s", r.StatusCode, b)
-	}
-	found := false
-	for _, u := range ae.a.Cfg().Upstreams {
-		if u.Name == "spare-key" {
-			found = true
-			if u.KeyEnv != "KENARI_KEY_SPARE_KEY" || u.Tier != "auto" || !u.Enabled {
-				t.Fatalf("defaults wrong: %+v", u)
-			}
-		}
-	}
-	if !found || ae.a.Secrets()["KENARI_KEY_SPARE_KEY"] != "kn-new-secret" {
-		t.Fatal("key not stored")
-	}
-	if cfg, _ := os.ReadFile(ae.a.Path); strings.Contains(string(cfg), "kn-new-secret") {
-		t.Fatal("key value leaked into the config file")
-	}
-	_, b := ae.do(t, ck, "GET", "/admin/api/overview", nil)
-	var ov struct {
-		Alerts  []struct{ Level, Text string }
-		Status  string
-		Presets []struct{ Name, Now string }
-	}
-	_ = json.Unmarshal(b, &ov)
-	if len(ov.Presets) == 0 || ov.Status == "" {
-		t.Fatalf("overview incomplete: %s", b)
-	}
-	tip := false
-	for _, a := range ov.Alerts {
-		if a.Level == "info" && strings.Contains(a.Text, "full-access") {
-			tip = true
-		}
-	}
-	if !tip {
-		t.Fatalf("expected the add-a-full-access-key tip: %+v", ov.Alerts)
-	}
-	if r, b := ae.do(t, ck, "POST", "/admin/api/upstreams", map[string]string{"action": "delete", "name": "spare-key"}); r.StatusCode != 200 {
-		t.Fatalf("delete: %d %s", r.StatusCode, b)
-	}
-	for _, u := range ae.a.Cfg().Upstreams {
-		if u.Name == "spare-key" {
-			t.Fatal("not deleted")
-		}
-	}
-	if r, _ := ae.do(t, ck, "POST", "/admin/api/clients", map[string]string{"action": "delete", "name": "locked"}); r.StatusCode != 200 {
-		t.Fatalf("client delete: %d", r.StatusCode)
-	}
 }

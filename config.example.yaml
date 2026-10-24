@@ -1,70 +1,49 @@
-# xellter example configuration. Copy to xellter.yaml (git-ignored) and edit,
-# or let the admin panel manage it. Everything except `upstreams` and `clients`
-# has working defaults, so a minimal file is fine. See docs/configuration.md.
+# xellter example configuration. Copy to xellter.yaml (git-ignored) or let the
+# admin panel create and edit it. Almost everything has a working default, so a
+# minimal file is fine. See docs/configuration.md.
 
 server:
-  listen: 127.0.0.1:8480          # put a reverse proxy / `tailscale serve` in front
+  listen: 127.0.0.1:8480          # put `tailscale serve` / a reverse proxy in front
   data_dir: data                  # SQLite, catalog cache, secrets, config history (relative to this file)
   admin_hosts: [localhost, 127.0.0.1, my-host.my-tailnet.ts.net]  # Host headers allowed to open /admin
   trusted_proxy: true             # honour X-Forwarded-For/Proto from the proxy in front
-  log_retention_days: 30
 
 kenari:
   base_url: https://kenari.id
-  sync_minutes: 10                # catalog, prices, promos, plans
+  # Optional full-access key of your kenari account. Put its value in data/secrets.env
+  # (KENARI_ACCOUNT_KEY=kn-...) or paste it in the panel. It only reads plan, usage
+  # and balance; it is never used to serve requests.
+  account_key_env: KENARI_ACCOUNT_KEY
 
-# One entry per kenari API key. The key VALUE never goes in this file: put
-# KENARI_KEY_BABU=... in data/secrets.env (mode 0600) or set it in the panel.
-upstreams:
-  - name: babu
-    key_env: KENARI_KEY_BABU
-    enabled: true
-    tier: plan                    # free | topup | plan  (decides rpm / daily free quota)
-    plan: Indie                   # plan name from kenari /api/plans (tier=plan only)
-    account: main                 # keys of one kenari account share plan budget
-  - name: spare
-    key_env: KENARI_KEY_SPARE
-    enabled: false
-    tier: topup
-
-# One entry per consumer. API keys are created with `xellter client add` or in
-# the panel and stored only as sha256 hashes.
+# A client is one app that calls xellter. It has its own kenari keys, and xellter
+# generates its presets from the models those keys can call.
 clients:
   - name: babu
     enabled: true
-    key_hash: ""                  # filled by `xellter client add`
-    presets: ["*"]                # preset models this client may call
-    passthrough: []               # real model globs it may call directly, e.g. ["deepseek-*"]
-    upstreams: []                 # empty = may use every upstream
+    key_hash: ""                  # sha256 of the xellter key; created by `xellter client add` or the panel
+    keys:                         # kenari API keys of this client (values live in data/secrets.env)
+      - name: main
+        key_env: KENARI_KEY_BABU_MAIN
+        enabled: true
+        tier: auto                # auto | free | topup | plan; auto detects it
+    presets: {}                   # filled automatically: text, image, video, tts, stt, music
+    seeded: []                    # kinds that already got a generated preset
     daily_budget_idr: 0           # 0 = unlimited
-
-# Preset models: the names clients use. Omit `presets:` to get the built-in set
-# (balanced, budget, smart, coding, image, video, speech, transcribe, music).
-presets:
-  xl-research:
-    description: Long answers, strongest model that is still cheap
-    modality: chat
-    mode: auto                    # auto = rank the catalog; combo = explicit ordered `models`
-    strategy: priority            # round_robin rotates among near-equal scores (rr_band)
-    allow: ["*"]
-    require: {tool_call: true, min_context: 128000}
-    min_quality: 0.55
-    max_candidates: 3
-    weights: {cost: 20, benchmark: 35, jev: 25, reliability: 10, context: 10}
-    cost_profile: {input_tokens: 8000, output_tokens: 1500, cached_ratio: 0.6}
-
-  xl-pinned:
-    description: Fixed fallback chain
-    modality: chat
-    mode: combo
-    models: [deepseek-v4-1-flash, mimo-v2-6-flash]
-    strategy: priority
+    passthrough: []               # real model globs the app may also call directly, normally empty
+    # You can also write presets by hand, for example a second text preset:
+    # presets:
+    #   coding:
+    #     modality: chat
+    #     mode: auto
+    #     strategy: priority
+    #     require: {tool_call: true, min_context: 64000}
+    #     min_quality: 0.55
+    #     weights: {cost: 20, benchmark: 35, jev: 20, reliability: 15, context: 10}
 
 rules:
   free_bonus: 0.10
   plan_bonus: 0.08
   promo_bonus_max: 0.05
-  promo_min_remaining_hours: 12
   new_model_days: 14
   canary_percent: 5
   sticky_minutes: 30
@@ -75,7 +54,6 @@ benchmarks: {}
 
 jev:
   enabled: false                  # System One quality judge; costs a little, capped by daily_budget_idr
-  model: jev-1-13:free
   daily_budget_idr: 1000
 
 rtk:

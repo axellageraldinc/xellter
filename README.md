@@ -9,37 +9,31 @@ shrinks tool output before it is paid for. One static Go binary, no runtime depe
 
 ## What it does
 
-- **Preset models.** A preset is a named recipe clients call like a model (`balanced`, `budget`, `smart`, `coding`, `image`, ...); xellter chooses the real model behind it.
-  Rank is computed from live kenari prices, promos, plans and free tiers, a quality score
-  (benchmarks, a System One "JEV" judge, context size) and measured reliability.
-- **Auto rules.** Free models, plan-covered models and models on discount are preferred; new models get
-  a small canary share until proven; non-text modalities (image, video, TTS, STT, music) are ordered
-  by price, free first.
-- **Routing.** Round-robin or priority across models and keys, combos with fallback, session
-  stickiness (keeps provider caches warm), cooldowns and a circuit breaker per key.
-- **Many keys, many clients.** Several kenari keys behind one endpoint (restricted keys are probed
-  for free); one xellter key per client with its own allowed models and daily budget.
+- **Clients, keys, presets.** You add a *client* (an app such as Babu or aixell), give it one or more kenari API keys, and xellter generates its **presets** from the models those keys can call, duplicates merged: `text`, `image`, `video`, `tts`, `stt` (and `music`). The app uses a preset name as the model; for every request xellter picks the best model behind it right now.
+- **Auto rules.** Free models, plan-covered models and discounted models are preferred; new models get a small canary share until proven; image/video/speech presets are ordered by price, free first. Quality is gated by benchmarks you provide, a System One "JEV" judge and measured reliability.
+- **Routing.** Round-robin or priority across models and keys, session stickiness (keeps provider caches warm), cooldowns and a circuit breaker per key, limits tracked per kenari account.
+- **Real plan numbers.** With an optional full-access account key, plan budgets, reset times and balance come straight from kenari.
 - **RTK.** Compresses large `git diff`, `grep`, `ls` and log output in tool results before sending.
-- **Admin panel.** Dashboard, live key quotas, ranking explanations, config editor with history and
-  rollback. Login: username + password (scrypt) + TOTP, same record format as aixell.
+- **Admin panel.** Clients and their keys, preset controls ("optimise for cheapest / balanced / best quality"), usage per client, preset and model, config editor with history. Login: username + password (scrypt) + TOTP.
 
 ## Quick start
 
 ```bash
 make build                                   # -> bin/xellter (needs Go 1.27+)
-cp config.example.yaml xellter.yaml          # edit upstreams
-echo 'KENARI_KEY_BABU=kn-...' > data/secrets.env && chmod 600 data/secrets.env
-./bin/xellter admin init -credentials-out data/FIRST-LOGIN.txt
-./bin/xellter client add -name babu -out data/babu.key
-./bin/xellter serve -config xellter.yaml     # http://127.0.0.1:8480/admin/
+install -d -m 700 data
+./bin/xellter admin init -credentials-out data/FIRST-LOGIN.txt   # username, password, TOTP secret, recovery codes
+./bin/xellter client add -name babu -out data/babu.key           # the xellter key your app will use
+echo 'kn-...' | ./bin/xellter key add -client babu -name main     # a kenari key for that client
+./bin/xellter serve                          # http://127.0.0.1:8480/admin/
 ```
+Or do the same in the panel: Clients, Add client, Add key. Presets appear a few seconds after the key is checked.
 
 Point a client at it:
 
 ```bash
 curl http://127.0.0.1:8480/v1/chat/completions \
   -H "Authorization: Bearer $(cat data/babu.key)" -H 'Content-Type: application/json' \
-  -d '{"model":"balanced","messages":[{"role":"user","content":"hello"}]}'
+  -d '{"model":"text","messages":[{"role":"user","content":"hello"}]}'
 ```
 
 The response header `X-Xellter-Model` tells which real model answered.

@@ -158,7 +158,6 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listModels(w http.ResponseWriter, r *http.Request, cl *config.Client, p string) {
 	presets, real := s.rt.Models(cl)
-	cfg := s.cfg.Load()
 	type item struct {
 		ID          string `json:"id"`
 		Object      string `json:"object"`
@@ -170,7 +169,7 @@ func (s *Server) listModels(w http.ResponseWriter, r *http.Request, cl *config.C
 	}
 	var data []item
 	for _, n := range presets {
-		sh := cfg.Presets[n]
+		sh := cl.Presets[n]
 		data = append(data, item{n, "model", s.startedAt.Unix(), "xellter", sh.Modality, sh.Description, true})
 	}
 	snap := s.cat.Snapshot()
@@ -512,7 +511,7 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, cl *config.Client
 	default:
 		row.Billing = "payg"
 	}
-	row.CatalogCost = s.cost(at, plan, body, u, covered, now, snap)
+	row.CatalogCost = s.cost(cl, at, plan, body, u, covered, now, snap)
 	s.st.Log(row)
 	if row.OK {
 		at.Key.Success(at.Model.ID, now)
@@ -536,7 +535,7 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, cl *config.Client
 	}
 }
 
-func (s *Server) cost(at route.Attempt, plan *route.Plan, b *reqBody, u usage, covered bool, now time.Time, snap *catalog.Snapshot) float64 {
+func (s *Server) cost(cl *config.Client, at route.Attempt, plan *route.Plan, b *reqBody, u usage, covered bool, now time.Time, snap *catalog.Snapshot) float64 {
 	m := at.Model
 	if m.Free {
 		return 0
@@ -545,7 +544,7 @@ func (s *Server) cost(at route.Attempt, plan *route.Plan, b *reqBody, u usage, c
 		return rank.UsageCost(m, u.in, u.out, u.cached, at.Key.FreeCache(m, snap, now), now)
 	}
 	prof := config.CostProfile{}
-	if sh, ok := s.cfg.Load().Presets[plan.Preset]; ok {
+	if sh, ok := cl.Presets[plan.Preset]; ok {
 		prof = sh.Cost
 	}
 	if b.json != nil {

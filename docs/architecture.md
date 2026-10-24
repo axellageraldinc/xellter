@@ -12,16 +12,16 @@ admin panel ──▶ app.Apply(config) ──▶ hot reload of pool, router, pr
 1. Authenticate: `Authorization: Bearer` or `x-api-key` -> sha256 -> client. Unknown 401, disabled 403.
 2. Read the body (bounded), find `model` (JSON or multipart). Check the client's daily budget.
 3. `route.Plan` turns the requested name into at most `max_attempts` attempts (model × key):
-   - a preset model -> its ranking (see below); a real model name is only allowed through the client's `passthrough` globs;
+   - a name in the client's own `presets` -> that client's ranking of that preset (see below); any other real model name is only allowed through the client's `passthrough` globs;
    - order: sticky (same session -> same model/key), canary (new model, `canary_percent`), the round-robin front group rotated, the rest by score;
-   - for each model, usable keys are ordered: sticky key, then plan-covered/free, then paid; equal keys rotate.
+   - for each model, the client's usable keys are ordered: sticky key, then plan-covered/free, then paid; equal keys rotate. A client never uses another client's keys.
 4. RTK compresses tool outputs (chat only). For streamed chat completions `stream_options.include_usage` is injected.
 5. For each attempt: `Key.Reserve` (rpm, free quota) -> rewrite `model` -> send. First-byte timeout is enforced per request.
 6. Success: stream the body to the client in 16 KB chunks with a flush each (no buffering), keeping only the head and tail to read the `usage` object. Failure before the first byte: `Key.Failure` classifies the status (429/402/401/403/400/5xx/network), applies cooldown/block/breaker/allow-list learning and moves on; errors that are the client's fault (other 400s) are returned as is.
 7. Log metadata (async), update key ledgers, remember the session's model, add to the client's spend.
 
 ## Ranking (`internal/rank`)
-Per auto preset, for every catalog model of the preset's modality:
+Per client and auto preset, for every catalog model of the preset's modality that at least one of the client's keys may call (duplicates merged, a model reachable by several keys is one candidate):
 
 1. **Gates** (pass/fail): allow/deny globs, tool calling, vision, reasoning, min context, not sunsetting within `avoid_sunset_days`, subscriber-only needs a plan key, at least one enabled key may use it.
 2. **Components** (each 0..1):
@@ -36,6 +36,9 @@ Per auto preset, for every catalog model of the preset's modality:
 6. The top `max_candidates` form the main list; those within `rr_band` of the leader are the round-robin front group (`strategy: round_robin`).
 
 Rankings are recomputed every 30 s, after each catalog sync and after each config change, and cached; requests only read them. Every candidate carries its components, bonuses, flags and a reason string, and rejected models carry the reason (shown in the panel).
+
+## Presets are generated (`internal/app`)
+After every probe round `seedPresets` looks at each client whose enabled keys have all been probed. For each kind (text, image, video, tts, stt, music) not yet in the client\'s `seeded` list that has at least one callable catalog model, it creates the default preset once and records the kind. Edited presets are never overwritten and deleted ones never come back. Rankings are computed per client and preset (`rank.Key(client, preset)`), so two clients with different keys get different candidate lists for the same preset name.
 
 ## Accounts and keys (`internal/upstream`)
 kenari applies rate limits, free quotas and plan budgets **per account**, not per key (https://kenari.id/docs/rate-limits). xellter therefore groups keys by `account` and keeps this state on the account: sliding-window rpm, free-model quota counted since 00:00 UTC (tier defaults from kenari: free 5 rpm / 50 per day, topup 10 / 1000, plan 25 / unlimited), plan budget, balance flag. Error codes map to account effects: `free_quota_daily` pauses free models until 00:00 UTC, `free_quota_rpm` for `Retry-After`, `plan_limit_reached` turns plan coverage off, `rate_limit_exceeded` cools the whole account, `402` pauses paid models. Per key: cooldown when the key is rejected (401/403), block of a (key, model) pair after upstream errors with exponential backoff, circuit breaker after consecutive failures, allow list.
