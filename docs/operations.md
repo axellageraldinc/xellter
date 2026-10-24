@@ -33,6 +33,12 @@ Expose only what clients need. Because `/admin` answers only for hostnames liste
 - **A client got `503`/`429`:** the Overview banner names the key or account that is paused and why; the client page has "Re-check".
 - Backup: `data/` (SQLite is WAL: `sqlite3 data/xellter.db ".backup file"`) and `xellter.yaml`.
 
+## When a model fails
+The ranking is also the fallback order. For every request xellter builds up to `resilience.max_attempts` (4) attempts, best first, at most two keys per model, and moves to the next one **before the first byte reaches the client** when:
+- the model or key answers 5xx, 408, 402 (no balance), 429 (rate or quota limit), 401/403 (key rejected), or "model not allowed/not found";
+- the connection fails or nothing arrives within `kenari.first_byte_timeout_s` (streaming; non-streaming gets 3x).
+The failed model/key is paused with growing back-off (and a circuit breaker after repeated errors), so the next request does not try it again at once. A genuine client mistake (400 for a bad body) is returned as is: another model would fail the same way. Not covered: a stream that breaks **after** the first byte (the client has already received part of the answer), and a model that answers 200 with a poor answer. Lower `first_byte_timeout_s` if you prefer faster fallback over patience with slow reasoning models.
+
 ## Security model
 - Client keys: random 192-bit, stored as sha256, shown once; a key belongs to one client.
 - Upstream key values: only in `data/secrets.env` (0600), never in config, logs or responses.

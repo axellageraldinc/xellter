@@ -16,7 +16,7 @@ One YAML file (`xellter -config`, default `xellter.yaml`, or `$XELLTER_CONFIG`).
 | `session_hours` | `12` | admin session lifetime |
 
 ## kenari
-`base_url` (`https://kenari.id`), `account_key_env` (secret name of the optional full-access account key; it only reads plan, usage and balance), `sync_minutes` (10), `first_byte_timeout_s` (120; non-streaming requests get 3×), `music_timeout_s` (900), `user_agent`.
+`base_url` (`https://kenari.id`), `account_key_env` (secret name of the optional full-access account key; it only reads plan, usage and balance), `sync_minutes` (10), `first_byte_timeout_s` (60; non-streaming requests get 3×), `music_timeout_s` (900), `user_agent`.
 
 ## clients[]
 A client is one app that calls xellter. It has its own kenari keys and its own presets.
@@ -73,4 +73,5 @@ Sticky sessions are keyed by `X-Xellter-Session` (also `X-Session-Id`, `X-Claude
 `enabled`, `min_chars` (2000), `max_chars` (12000), `git_diff`, `grep`, `ls`, `logs`, `truncate`, `diff_context` (1). Per request: header `X-Xellter-RTK: off`.
 
 ## benchmarks{}
+Your own quality scores, 0..100, per model id. They override the leaderboard. Without one, xellter uses the Arena leaderboard (`internal/bench`, refreshed daily from the public Hugging Face dataset) and, for models it does not list, an estimate from price.
 `model-id: 0..100`. Replaces the price proxy for that model.

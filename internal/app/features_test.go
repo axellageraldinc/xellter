@@ -2,13 +2,17 @@ package app_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/axellageraldinc/xellter/internal/config"
 	"github.com/axellageraldinc/xellter/internal/proxy"
+	"github.com/axellageraldinc/xellter/internal/rank"
 )
 
 func twoEqualModels(c *config.Config) {
@@ -244,7 +248,7 @@ func TestPresetsAreGeneratedFromWhatTheKeysCanCall(t *testing.T) {
 func TestJEVStopsTheRoundWhenTheJudgeIsDown(t *testing.T) {
 	e := setup(t, func(c *config.Config) { c.JEV.Enabled = true; c.JEV.Prompts = []string{"say hi"} })
 	e.a.Judge.HC = e.f.srv.Client()
-	e.f.judge = func() (int, string) {
+	e.f.judge = func(string) (int, string) {
 		return 503, `{"error":{"code":"all_providers_failed","message":"upstream unavailable"}}`
 	}
 	n, err := e.a.Judge.RunDue(context.Background(), 5)
@@ -312,5 +316,69 @@ func TestJEVNeedsTheAccountKey(t *testing.T) {
 	}
 	if len(e.f.calls) != 0 {
 		t.Fatal("no call may be made with a client's key")
+	}
+}
+
+func TestJudgeFallsBackToTheNextSystemOneModel(t *testing.T) {
+	e := setup(t, func(c *config.Config) { c.JEV.Enabled = true; c.JEV.Prompts = []string{"say hi"} })
+	e.a.Judge.HC = e.f.srv.Client()
+	e.f.judge = func(model string) (int, string) {
+		if model == "jev-1-13:free" {
+			return 503, `{"error":{"code":"all_providers_failed","message":"upstream unavailable"}}`
+		}
+		return 200, `{"model":"` + model + `","answers":{"q":{"type":"noul","noul":0.8}},"usage":{"input_tokens":50,"output_tokens":0}}`
+	}
+	score, err := e.a.Judge.Evaluate(context.Background(), "free-a:free")
+	if err != nil || score < 0.79 || score > 0.81 {
+		t.Fatalf("clef:free should have judged when jev-1-13:free is down: score=%v err=%v", score, err)
+	}
+	var tried []string
+	for _, c := range e.f.calls {
+		if c.Path == "/v1/systemone" {
+			tried = append(tried, c.Model)
+		}
+	}
+	if len(tried) != 2 || tried[0] != "jev-1-13:free" || tried[1] != "clef:free" {
+		t.Fatalf("judges tried in order: %v", tried)
+	}
+}
+
+func TestLeaderboardScoresReplaceThePriceGuess(t *testing.T) {
+	e := setup(t, func(c *config.Config) { c.Benchmarks = map[string]float64{} })
+	hf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		row := func(name string, rating float64) map[string]any {
+			return map[string]any{"row": map[string]any{"model_name": name, "rating": rating, "rating_lower": rating - 5, "rating_upper": rating + 5, "vote_count": 500, "category": "overall", "leaderboard_publish_date": "2026-10-22"}}
+		}
+		var rows []map[string]any
+		if r.URL.Query().Get("config") == "text" && r.URL.Query().Get("offset") == "0" {
+			rows = []map[string]any{row("Pro C (High)", 1500), row("Cheap B", 1300), row("Promo D", 1200), row("Filler One", 1100), row("Filler Two", 1000)}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"rows": rows, "num_rows_total": len(rows)})
+	}))
+	defer hf.Close()
+	e.a.BenchBase = hf.URL
+	if err := e.a.SyncBench(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	scores, _ := e.a.St.Bench()
+	if len(scores) != 3 || scores["pro-c"].Value <= scores["cheap-b"].Value || scores["cheap-b"].Value <= scores["promo-d"].Value {
+		t.Fatalf("scores: %+v", scores)
+	}
+	rk := e.a.Rt.Rankings()["babu/text"]
+	found := map[string]string{}
+	for _, c := range append(append([]rank.Candidate{}, rk.Candidates...), rk.Trial...) {
+		found[c.Model] = c.BenchSource
+	}
+	if !strings.HasPrefix(found["pro-c"], "arena 2026-10-22") || !strings.HasPrefix(found["cheap-b"], "arena") {
+		t.Fatalf("the ranking must use the leaderboard score: %v", found)
+	}
+	if e.a.BenchFetched().IsZero() {
+		t.Fatal("fetch time not recorded")
+	}
+	// a restart re-maps the stored rows without a download
+	e.a.BenchBase = "http://127.0.0.1:1"
+	e.a.Cat.Refresh(context.Background())
+	if again, _ := e.a.St.Bench(); len(again) != 3 {
+		t.Fatalf("catalog refresh must re-match the stored leaderboard: %d", len(again))
 	}
 }

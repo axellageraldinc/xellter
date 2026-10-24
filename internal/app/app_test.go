@@ -28,7 +28,7 @@ type fake struct {
 	// chat decides the response for a chat call; default is 200.
 	chat func(c call, n int) (int, string)
 	// judge, when set, answers /v1/systemone instead of the default success.
-	judge func() (int, string)
+	judge func(model string) (int, string)
 	// account answers /v1/account/quota; default: 403 like a restricted key.
 	account func(auth string) (int, string)
 	srv     *httptest.Server
@@ -75,7 +75,7 @@ func newFake(t testing.TB) *fake {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("modality") == "systemone" {
-			io.WriteString(w, `{"object":"list","data":[{"id":"jev-1-13:free","owned_by":"jev","pricing":{"free":true}},{"id":"jev-1-14","owned_by":"jev","pricing":{"free":false,"input":850000000}}]}`)
+			io.WriteString(w, `{"object":"list","data":[{"id":"jev-1-13:free","owned_by":"jev","pricing":{"free":true}},{"id":"clef:free","owned_by":"clef","pricing":{"free":true}},{"id":"jev-1-14","owned_by":"jev","pricing":{"free":false,"input":850000000}}]}`)
 			return
 		}
 		io.WriteString(w, modelsJSON)
@@ -160,9 +160,9 @@ func newFake(t testing.TB) *fake {
 		io.WriteString(w, `{"object":"account.balance","balance_micro_idr":25000000000,"reserved_micro_idr":1500000,"available_micro_idr":24998500000,"currency":"IDR"}`)
 	})
 	mux.HandleFunc("/v1/systemone", func(w http.ResponseWriter, r *http.Request) {
-		rec(w, r)
+		c, _ := rec(w, r)
 		if f.judge != nil {
-			st, body := f.judge()
+			st, body := f.judge(c.Model)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(st)
 			io.WriteString(w, body)

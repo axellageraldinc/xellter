@@ -23,6 +23,7 @@ import (
 
 	"github.com/axellageraldinc/xellter/internal/app"
 	"github.com/axellageraldinc/xellter/internal/auth"
+	"github.com/axellageraldinc/xellter/internal/bench"
 	"github.com/axellageraldinc/xellter/internal/config"
 )
 
@@ -63,6 +64,8 @@ func New(a *app.App) *Handler {
 	api("requests", h.requests)
 	api("jev", h.jevInfo)
 	api("jev/run", h.jevRun)
+	api("bench", h.benchInfo)
+	api("bench/refresh", h.benchRefresh)
 	h.mux.HandleFunc("/admin/", h.static)
 	return h
 }
@@ -391,7 +394,7 @@ func (h *Handler) jevInfo(w http.ResponseWriter, r *http.Request) {
 	var judges []judgeRow
 	if snap := h.a.Cat.Snapshot(); snap != nil {
 		for _, id := range snap.IDs() {
-			if m := snap.Models[id]; m.Endpoint == "systemone" && strings.HasPrefix(id, "jev") { // clef-* are image locators, not judges
+			if m := snap.Models[id]; m.Endpoint == "systemone" { // jev-* and clef-* are System One judges
 				judges = append(judges, judgeRow{id, m.Free, m.InIDR})
 			}
 		}
@@ -422,3 +425,50 @@ func (h *Handler) jevRun(w http.ResponseWriter, r *http.Request) {
 }
 
 var _ = io.EOF
+
+// ---- quality scores from public leaderboards ----
+
+func (h *Handler) benchInfo(w http.ResponseWriter, r *http.Request) {
+	scores, _ := h.a.St.Bench()
+	snap := h.a.Cat.Snapshot()
+	type kind struct {
+		Kind      string   `json:"kind"`
+		Total     int      `json:"total"`
+		Matched   int      `json:"matched"`
+		Unmatched []string `json:"unmatched"`
+	}
+	var kinds []kind
+	latest := ""
+	for _, a := range bench.Arenas {
+		k := kind{Kind: a.Endpoint}
+		if snap != nil {
+			for _, id := range snap.IDs() {
+				if m := snap.Models[id]; m.Endpoint == a.Endpoint && !m.Free {
+					k.Total++
+					if _, ok := scores[id]; ok {
+						k.Matched++
+					} else if len(k.Unmatched) < 60 {
+						k.Unmatched = append(k.Unmatched, id)
+					}
+				}
+			}
+		}
+		kinds = append(kinds, k)
+	}
+	for _, s := range scores {
+		if s.Date > latest {
+			latest = s.Date
+		}
+	}
+	jok(w, map[string]any{"fetched": h.a.BenchFetched(), "latest": latest, "models": len(scores), "kinds": kinds, "source": "LMArena leaderboard dataset (Hugging Face), overall category"})
+}
+
+func (h *Handler) benchRefresh(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
+	defer cancel()
+	if err := h.a.SyncBench(ctx); err != nil {
+		jerr(w, 502, "leaderboard download failed: "+err.Error())
+		return
+	}
+	jok(w, map[string]any{"ok": true})
+}

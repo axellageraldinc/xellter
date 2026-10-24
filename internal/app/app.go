@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/axellageraldinc/xellter/internal/auth"
+	"github.com/axellageraldinc/xellter/internal/bench"
 	"github.com/axellageraldinc/xellter/internal/catalog"
 	"github.com/axellageraldinc/xellter/internal/config"
 	"github.com/axellageraldinc/xellter/internal/jev"
@@ -39,6 +40,8 @@ type App struct {
 	Auth    *auth.Authenticator
 	Started time.Time
 	Logf    func(string, ...any)
+	// BenchBase is where leaderboard data comes from; tests point it at a fake.
+	BenchBase string
 
 	cfg atomic.Pointer[config.Config]
 	mu  sync.Mutex // serialises Apply
@@ -74,10 +77,12 @@ func New(path string, src catalog.Source) (*App, error) {
 	a.Px = proxy.New(cfg, a.Cat, a.Pool, a.Rt, st)
 	a.Px.Logf = func(f string, v ...any) { a.Logf(f, v...) }
 	a.Judge = &jev.Judge{Cfg: a.Cfg, Cat: a.Cat, Pool: a.Pool, St: st, HC: &http.Client{}, Rankings: a.Rt.Rankings, Logf: func(f string, v ...any) { a.Logf(f, v...) }, Now: time.Now}
+	a.BenchBase = bench.DefaultBase
 	a.Cat.OnUpdate(func(s *catalog.Snapshot) {
 		for _, ac := range a.Pool.Accounts() {
 			ac.SetTopupThreshold(s.Tier.Thresh)
 		}
+		a.rematchBench(s)
 		a.Rt.MarkSeen(s)
 		a.Rt.Recompute(time.Now())
 	})
@@ -335,6 +340,53 @@ func (a *App) RefreshAccounts(ctx context.Context) {
 	a.Rt.Recompute(time.Now())
 }
 
+// benchMaxAge is how old the stored leaderboards may get before they are downloaded again.
+const benchMaxAge = 24 * time.Hour
+
+// SyncBench downloads the public leaderboards and maps them onto the catalog.
+func (a *App) SyncBench(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	rows, err := bench.Fetch(ctx, &http.Client{Timeout: 60 * time.Second}, a.BenchBase)
+	if err != nil {
+		return err
+	}
+	raw, _ := json.Marshal(rows)
+	a.St.KVSet("bench_rows", string(raw))
+	a.St.KVSet("bench_fetched", fmt.Sprint(time.Now().Unix()))
+	a.rematchBench(a.Cat.Snapshot())
+	a.Rt.Recompute(time.Now())
+	return nil
+}
+
+// rematchBench maps the stored leaderboard rows onto the current catalog (cheap; no network).
+func (a *App) rematchBench(snap *catalog.Snapshot) {
+	if snap == nil {
+		return
+	}
+	var rows []bench.Row
+	if json.Unmarshal([]byte(a.St.KVGet("bench_rows")), &rows) != nil || len(rows) == 0 {
+		return
+	}
+	out := map[string]store.BenchRow{}
+	for _, sc := range bench.Match(rows, snap.Models) {
+		out[sc.Model] = store.BenchRow{Value: sc.Value, Rating: sc.Rating, Lo: sc.Lo, Hi: sc.Hi, Arena: sc.Arena, Matched: sc.Matched, Date: sc.Date, Votes: sc.Votes}
+	}
+	if err := a.St.ReplaceBench(out); err != nil {
+		a.Logf("bench: %v", err)
+	}
+}
+
+// BenchFetched is when the leaderboards were last downloaded (zero if never).
+func (a *App) BenchFetched() time.Time {
+	var n int64
+	fmt.Sscan(a.St.KVGet("bench_fetched"), &n)
+	if n == 0 {
+		return time.Time{}
+	}
+	return time.Unix(n, 0)
+}
+
 // RefreshCatalog fetches the catalog now.
 func (a *App) RefreshCatalog(ctx context.Context) error { return a.Cat.Refresh(ctx) }
 
@@ -346,6 +398,22 @@ func (a *App) Start(ctx context.Context) {
 	}
 	cancel()
 	a.Rt.MarkSeen(a.Cat.Snapshot())
+	go func() { // leaderboards: on start when stale, then re-checked every 6 hours
+		for {
+			if time.Since(a.BenchFetched()) > benchMaxAge {
+				if err := a.SyncBench(ctx); err != nil {
+					a.Logf("bench: leaderboard sync failed (price-based estimates stay in use): %v", err)
+				} else {
+					a.Logf("bench: leaderboards updated")
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(6 * time.Hour):
+			}
+		}
+	}()
 	a.ProbeKeys(ctx)
 	go func() {
 		probe := time.NewTicker(6 * time.Hour)

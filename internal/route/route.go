@@ -130,6 +130,7 @@ func (r *Router) Recompute(now time.Time) {
 		in.Life, _ = r.st.LifetimeStats()
 		in.JEV, _ = r.st.JEVScores()
 		in.Seen, _ = r.st.Seen()
+		in.Bench, _ = r.st.Bench()
 	}
 	m := rank.All(in)
 	r.rankings.Store(&m)

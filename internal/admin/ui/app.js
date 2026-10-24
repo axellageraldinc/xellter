@@ -309,11 +309,18 @@ function keySettings(u) {
 
 // ---------- Presets ----------
 const OBJECTIVES = {
-  cheapest: { label: 'Cheapest', w: { cost: 60, benchmark: 10, jev: 10, reliability: 15, context: 5 }, q: 0.30 },
-  balanced: { label: 'Balanced', w: { cost: 30, benchmark: 25, jev: 20, reliability: 15, context: 10 }, q: 0.45 },
-  quality: { label: 'Best quality', w: { cost: 5, benchmark: 40, jev: 30, reliability: 15, context: 10 }, q: 0.60 },
+  cheapest: { label: 'Cheapest', w: { cost: 60, benchmark: 10, jev: 10, reliability: 15, context: 5 }, q: 0.35 },
+  balanced: { label: 'Balanced', w: { cost: 25, benchmark: 35, jev: 20, reliability: 15, context: 5 }, q: 0.50 },
+  quality: { label: 'Best quality', w: { cost: 2, benchmark: 55, jev: 25, reliability: 15, context: 3 }, q: 0.64 },
 };
-const objectiveOf = p => Object.entries(OBJECTIVES).find(([, o]) => Object.entries(o.w).every(([k, v]) => (p.weights || {})[k] === v))?.[0] || 'custom';
+// Image, video and audio presets have no JEV judge and no context size to weigh: three objectives on cost, quality and reliability.
+const MEDIA_OBJECTIVES = {
+  cheapest: { label: 'Cheapest', w: { cost: 70, benchmark: 10, jev: 0, reliability: 20, context: 0 }, q: 0 },
+  balanced: { label: 'Balanced', w: { cost: 40, benchmark: 40, jev: 0, reliability: 20, context: 0 }, q: 0 },
+  quality: { label: 'Best quality', w: { cost: 10, benchmark: 70, jev: 0, reliability: 20, context: 0 }, q: 0 },
+};
+const objectivesFor = p => p.modality === 'chat' ? OBJECTIVES : MEDIA_OBJECTIVES;
+const objectiveOf = p => Object.entries(objectivesFor(p)).find(([, o]) => Object.entries(o.w).every(([k, v]) => (p.weights || {})[k] === v))?.[0] || 'custom';
 const MODALITIES = { chat: 'Text', images: 'Image', videos: 'Video', audio_speech: 'Text to speech', audio_transcription: 'Speech to text', music: 'Music' };
 
 function presetCard(client, name, p, r) {
@@ -324,9 +331,9 @@ function presetCard(client, name, p, r) {
     h('div', { class: 'mb-3' }, h('div', { class: 'subheader' }, 'Serving now'),
       r?.candidates?.length ? r.candidates.slice(0, 3).map((c, i) => h('div', { class: 'model-line' }, h('span', { class: 'mono' + (i ? ' text-secondary' : ' fw-bold') }, c.model), flags(c.flags))) : h('span', { class: 'text-danger' }, 'Nothing available right now'),
       r?.trial?.length ? h('div', { class: 'text-secondary small mt-1' }, `${r.trial.length} new model${r.trial.length === 1 ? '' : 's'} on trial`) : null),
-    isChat ? h('div', { class: 'mb-3' }, h('div', { class: 'subheader' }, 'Optimise for'),
-      h('div', { class: 'btn-group w-100' }, Object.entries(OBJECTIVES).map(([k, o]) => h('button', { class: 'btn btn-sm ' + (obj === k ? 'btn-primary' : 'btn-outline-primary'), onclick: () => { p.weights = { ...o.w }; p.min_quality = o.q; markDirty(); render(); } }, o.label)), obj === 'custom' && h('button', { class: 'btn btn-sm btn-primary', disabled: true }, 'Custom')),
-      obj === 'custom' && h('div', { class: 'form-hint' }, 'Tuned by hand under Advanced. Pick an option to reset it.')) : h('div', { class: 'text-secondary small mb-3' }, 'Cheapest working model first; free models come before paid ones.'),
+    h('div', { class: 'mb-3' }, h('div', { class: 'subheader' }, 'Optimise for'),
+      h('div', { class: 'btn-group w-100' }, Object.entries(objectivesFor(p)).map(([k, o]) => h('button', { class: 'btn btn-sm ' + (obj === k ? 'btn-primary' : 'btn-outline-primary'), onclick: () => { p.weights = { ...o.w }; p.min_quality = o.q; markDirty(); render(); } }, o.label)), obj === 'custom' && h('button', { class: 'btn btn-sm btn-primary', disabled: true }, 'Custom')),
+      h('div', { class: 'form-hint' }, obj === 'custom' ? 'Tuned by hand under Advanced. Pick an option to reset it.' : isChat ? 'Cheapest: lowest price among models that are good enough. Balanced: best quality for the price. Best quality: the strongest model, price matters little.' : 'Quality comes from the Arena leaderboard when the model is listed there, otherwise it is estimated from price.')),
     modelPicker(p, r),
     h('div', { class: 'mb-3' }, h('div', { class: 'subheader' }, 'When several models are equally good'),
       h('select', { class: 'form-select form-select-sm', onchange: e => { p.strategy = e.target.value; markDirty(); } }, h('option', { value: 'priority', selected: p.strategy === 'priority' }, 'Always use the best one'), h('option', { value: 'round_robin', selected: p.strategy === 'round_robin' }, 'Take turns between them'))),
@@ -373,7 +380,7 @@ function addPreset(cl) {
 }
 function newDefault(kind) {
   const media = { cost: 70, benchmark: 10, jev: 0, reliability: 20, context: 0 };
-  if (kind === 'chat') return { description: '', modality: 'chat', mode: 'auto', require: { tool_call: true, min_context: 32000 }, min_quality: 0.45, max_candidates: 4, strategy: 'round_robin', rr_band: 0.04, weights: { ...OBJECTIVES.balanced.w }, cost_profile: { input_tokens: 4000, output_tokens: 600, cached_ratio: 0.7 } };
+  if (kind === 'chat') return { description: '', modality: 'chat', mode: 'auto', require: { tool_call: true, min_context: 32000 }, min_quality: 0.50, max_candidates: 4, strategy: 'round_robin', rr_band: 0.04, weights: { ...OBJECTIVES.balanced.w }, cost_profile: { input_tokens: 4000, output_tokens: 600, cached_ratio: 0.7 } };
   return { description: '', modality: kind, mode: 'auto', require: {}, min_quality: 0, max_candidates: 3, strategy: 'priority', rr_band: 0.03, weights: media, cost_profile: { images: 1, seconds: kind === 'audio_transcription' ? 60 : 5, chars: 1000, variant: kind === 'videos' ? '720p' : '' } };
 }
 
@@ -423,7 +430,7 @@ views.usage = async function (_, q) {
 // ---------- Settings ----------
 views.settings = async function () {
   await ensureCfg();
-  const c = S.cfg, j = await api('jev'), R = c.rules, cat = await api('catalog?modality=chat');
+  const c = S.cfg, j = await api('jev'), R = c.rules, cat = await api('catalog'), bn = await api('bench');
   const bench = Object.entries(c.benchmarks);
   const L = { free_bonus: 'Preference for free models', plan_bonus: 'Preference for plan-covered models', plan_cost_factor: 'Cost of plan-covered models (0-1)', promo_bonus_max: 'Preference for discounted models',
     promo_min_remaining_hours: 'Ignore discounts ending within (h)', upcoming_lookahead_hours: 'Look ahead for price changes (h)', new_model_days: 'A model is "new" for (days)', canary_min_requests: 'Requests to trust a new model', canary_min_success: 'Success rate to trust it (0-1)', stats_window_hours: 'Health window (h)' };
@@ -450,10 +457,16 @@ views.settings = async function () {
       btn('Judge pending models now', 'btn-outline-primary btn-sm mb-3', () => api('jev/run', { method: 'POST', body: {} }).then(() => { toast('Started in the background'); setTimeout(render, 8000); }, fail)),
       Object.keys(j.scores || {}).length ? h('div', { class: 'table-responsive' }, h('table', { class: 'table table-sm' }, h('thead', {}, h('tr', {}, ['Model', 'Score', 'Judged'].map(x => h('th', {}, x)))), h('tbody', {}, Object.entries(j.scores).sort((a, b) => b[1].Score - a[1].Score).map(([m, s]) => h('tr', {}, h('td', { class: 'mono' }, m), h('td', {}, s.Score.toFixed(2)), h('td', { class: 'text-secondary' }, ago(s.TS) + ' ago')))))) : h('div', { class: 'text-secondary small' }, 'No scores yet.'),
       advanced(cols(field(c.jev, 'pass_threshold', { type: 'num', step: '0.01', label: 'Minimum score to be used (0-1)' }), field(c.jev, 'every_hours', { type: 'num', label: 'Re-judge every (hours)' })), field(c.jev, 'prompts', { type: 'lines', label: 'Test questions (one per line)' }))), { class: 'h-100' })),
-    h('div', { class: 'col-lg-6' }, card('Known quality scores', h('div', {}, h('p', { class: 'text-secondary' }, 'Without a score from you, quality is estimated from price. If you trust a benchmark for a model, enter it here (0-100).'),
+    h('div', { class: 'col-lg-6' }, card('Quality scores', h('div', {},
+      h('p', { class: 'text-secondary' }, 'How good each model is. xellter downloads the public Arena leaderboard (human votes on text, image and video models) every day and matches it to your models. A score is the chance the model wins a vote against a typical model. Models the leaderboard does not list are estimated from price until you set a score or JEV judges them.'),
+      h('div', { class: 'mb-2' }, bn.models ? [badge(`${bn.models} models scored`, 'green'), badge(`leaderboard of ${bn.latest || '?'}`), badge(`downloaded ${zero(bn.fetched) ? 'never' : ago(bn.fetched) + ' ago'}`)] : badge('no leaderboard downloaded yet', 'orange')),
+      (bn.kinds || []).map(k => h('div', { class: 'd-flex justify-content-between small' }, h('span', {}, { chat: 'Text', images: 'Image', videos: 'Video' }[k.kind] || k.kind), h('span', { class: 'text-secondary' }, `${k.matched} of ${k.total} paid models matched`))),
+      btn('Update now', 'btn-outline-primary btn-sm my-3', () => api('bench/refresh', { method: 'POST', body: {} }).then(() => { toast('Leaderboards updated'); render(); }, fail), 'refresh'),
+      h('div', { class: 'subheader mt-2' }, 'Your own scores (override the leaderboard)'),
       h('datalist', { id: 'models' }, cat.map(m => h('option', { value: m.id }))),
-      bench.length ? h('table', { class: 'table table-sm' }, h('tbody', {}, bench.map(([m, v]) => h('tr', {}, h('td', { class: 'mono' }, m), h('td', { style: 'width:110px' }, h('input', { class: 'form-control form-control-sm', type: 'number', min: 0, max: 100, value: v, onchange: e => { c.benchmarks[m] = Number(e.target.value); markDirty(); } })), h('td', { class: 'text-end' }, btn('Remove', 'btn-sm btn-ghost-danger', () => { delete c.benchmarks[m]; markDirty(); render(); })))))) : h('div', { class: 'text-secondary small mb-2' }, 'None set: using the price-based estimate.'),
-      btn('Add a score', 'btn-outline-primary btn-sm', () => { const m = prompt('Model id (e.g. deepseek-v4-1-flash):'); if (m) { c.benchmarks[m.trim()] = 70; markDirty(); render(); } }, 'plus')), { class: 'h-100' })),
+      bench.length ? h('table', { class: 'table table-sm' }, h('tbody', {}, bench.map(([m, v]) => h('tr', {}, h('td', { class: 'mono' }, m), h('td', { style: 'width:110px' }, h('input', { class: 'form-control form-control-sm', type: 'number', min: 0, max: 100, value: v, onchange: e => { c.benchmarks[m] = Number(e.target.value); markDirty(); } })), h('td', { class: 'text-end' }, btn('Remove', 'btn-sm btn-ghost-danger', () => { delete c.benchmarks[m]; markDirty(); render(); })))))) : h('div', { class: 'text-secondary small mb-2' }, 'None set.'),
+      btn('Add a score', 'btn-outline-primary btn-sm', () => { const m = prompt('Model id (e.g. deepseek-v4-1-flash):'); if (m) { c.benchmarks[m.trim()] = 70; markDirty(); render(); } }, 'plus'),
+      advanced(h('div', { class: 'small text-secondary' }, 'Source: ' + bn.source + '. Not matched yet: ', (bn.kinds || []).flatMap(k => k.unmatched || []).slice(0, 40).join(', ') || 'none'))), { class: 'h-100' })),
     h('div', { class: 'col-12' }, card('Reliability and access', h('div', {}, advanced(cols(
       ['max_attempts', 'cooldown_base_s', 'cooldown_max_s', 'breaker_failures', 'breaker_open_s'].map(k => field(c.resilience, k, { type: 'num', label: RL[k] })),
       field(c.server, 'admin_hosts', { type: 'list', label: 'Addresses allowed to open this panel' }), field(c.server, 'session_hours', { type: 'num', label: 'Stay signed in for (hours)' }), field(c.server, 'log_retention_days', { type: 'num', label: 'Keep the request log (days)' }), field(c.kenari, 'sync_minutes', { type: 'num', label: 'Refresh prices every (minutes)' }))),

@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS jev(model TEXT PRIMARY KEY, score REAL, n INTEGER, ts
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, exp INTEGER NOT NULL, ip TEXT, ua TEXT, created INTEGER);
 CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, upstream TEXT NOT NULL, ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS bench(model TEXT PRIMARY KEY, value REAL, rating REAL, lo REAL, hi REAL, arena TEXT, matched TEXT, date TEXT, votes REAL);
 `
 
 // Open creates or opens the database in dir.
@@ -492,4 +493,58 @@ func (s *Store) KVGet(k string) string {
 // KVSet writes a value.
 func (s *Store) KVSet(k, v string) {
 	_, _ = s.db.Exec(`INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v`, k, v)
+}
+
+// ---- benchmark scores (mapped from public leaderboards, see package bench) ----
+
+// BenchRow is the leaderboard score of one catalog model.
+type BenchRow struct {
+	Value   float64 `json:"value"` // 0..1
+	Rating  float64 `json:"rating"`
+	Lo      float64 `json:"lo"`
+	Hi      float64 `json:"hi"`
+	Arena   string  `json:"arena"`
+	Matched string  `json:"matched"`
+	Date    string  `json:"date"`
+	Votes   float64 `json:"votes"`
+}
+
+// ReplaceBench swaps the whole score table.
+func (s *Store) ReplaceBench(rows map[string]BenchRow) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM bench`); err != nil {
+		tx.Rollback()
+		return err
+	}
+	for m, r := range rows {
+		if _, err := tx.Exec(`INSERT INTO bench(model,value,rating,lo,hi,arena,matched,date,votes) VALUES(?,?,?,?,?,?,?,?,?)`, m, r.Value, r.Rating, r.Lo, r.Hi, r.Arena, r.Matched, r.Date, r.Votes); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// Bench returns the stored leaderboard scores.
+func (s *Store) Bench() (map[string]BenchRow, error) {
+	rows, err := s.db.Query(`SELECT model,value,rating,lo,hi,arena,matched,date,votes FROM bench`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]BenchRow{}
+	for rows.Next() {
+		var m string
+		var r BenchRow
+		var matched, date, arena sql.NullString
+		if err := rows.Scan(&m, &r.Value, &r.Rating, &r.Lo, &r.Hi, &arena, &matched, &date, &r.Votes); err != nil {
+			return nil, err
+		}
+		r.Arena, r.Matched, r.Date = arena.String, matched.String, date.String
+		out[m] = r
+	}
+	return out, rows.Err()
 }

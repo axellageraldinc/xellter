@@ -143,6 +143,11 @@ func explain(args []string) error {
 		return fmt.Errorf("catalog: %w", err)
 	}
 	a.Rt.MarkSeen(a.Cat.Snapshot())
+	if time.Since(a.BenchFetched()) > 24*time.Hour {
+		if err := a.SyncBench(ctx); err != nil {
+			fmt.Fprintln(os.Stderr, "leaderboard sync failed:", err)
+		}
+	}
 	a.ProbeKeys(ctx)
 	names := make([]string, 0)
 	for n, r := range a.Rt.Rankings() {
@@ -155,7 +160,7 @@ func explain(args []string) error {
 		r := a.Rt.Rankings()[n]
 		fmt.Printf("\n== %s / %s (%s, %s)  models callable: %d  round-robin group: %d\n", r.Client, r.Preset, r.Modality, r.Mode, r.Callable, r.Front)
 		for i, c := range r.Candidates {
-			fmt.Printf("%2d. %-34s %s\n", i+1, c.Model, c.Reason)
+			fmt.Printf("%2d. %-34s list Rp%-9.2f quality %.2f (%s)  %s\n", i+1, c.Model, c.ListCost, c.Components["benchmark"], c.BenchSource, c.Reason)
 		}
 		for _, c := range r.Trial {
 			fmt.Printf(" T  %-34s %s\n", c.Model, c.Reason)

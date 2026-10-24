@@ -25,6 +25,7 @@ type Inputs struct {
 	Life  map[string]store.ModelStat // all time
 	JEV   map[string]store.JEVScore
 	Seen  map[string]time.Time
+	Bench map[string]store.BenchRow // leaderboard scores mapped onto catalog ids
 	Now   time.Time
 }
 
@@ -239,10 +240,10 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 
 	w := sh.Weights
 	// Free / plan / promo bonuses express "money matters". They scale with how much this preset cares about cost
-	// (balanced = 1x, cheapest = 2x, best quality = a third), so they cannot outvote quality when quality is the goal.
+	// (balanced = 1x, cheapest = 2x, best quality = about a tenth), so they cannot outvote quality when quality is the goal.
 	bonusScale := 1.0
 	if tot := w.Cost + w.Benchmark + w.JEV + w.Reliability + w.Context; tot > 0 {
-		bonusScale = math.Max(0.25, math.Min(2, (w.Cost/tot)/0.30))
+		bonusScale = math.Max(0.1, math.Min(2, (w.Cost/tot)/0.30))
 	}
 	minCtx := float64(sh.Require.MinContext)
 	if minCtx <= 0 {
@@ -281,16 +282,15 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 		if den > 0 {
 			score = num / den
 		}
-		var qn, qd float64
-		for _, k := range []string{"benchmark", "jev", "context"} {
-			if wts[k] > 0 {
-				qn += wts[k] * comp[k]
-				qd += wts[k]
-			}
-		}
+		// Quality, for the min_quality gate: the benchmark score, blended with the JEV score only when the model has
+		// really been judged. Neutral placeholders and the context size must not dilute it, otherwise a weak model
+		// passes any gate (context is a hard requirement of its own).
 		quality := 1.0
-		if qd > 0 {
-			quality = qn / qd
+		if wb := wts["benchmark"]; wb > 0 {
+			quality = comp["benchmark"]
+			if j, judged := in.JEV[m.ID]; judged && w.JEV > 0 {
+				quality = (wb*comp["benchmark"] + w.JEV*j.Score) / (wb + w.JEV)
+			}
 		}
 
 		bon := map[string]float64{}
@@ -308,6 +308,16 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 		}
 		if m.Upcoming != nil && m.Upcoming.EffectiveAt.Sub(in.Now) < look {
 			flags = append(flags, "price change soon")
+		}
+		// plan and promo bonuses may stack, but never past what a free model gets: a paid model must not outrank a
+		// free one of equal or better quality just because it is both discounted and covered
+		if other, ceiling := bon["plan"]+bon["promo"], rules.FreeBonus*bonusScale; other > ceiling && other > 0 {
+			f := ceiling / other
+			for _, k := range []string{"plan", "promo"} {
+				if v, ok := bon[k]; ok {
+					bon[k] = v * f
+				}
+			}
 		}
 		for _, b := range bon {
 			score += b
@@ -395,6 +405,15 @@ func combo(in Inputs, r *Ranking, sh config.Preset) *Ranking {
 	return r
 }
 
+// leaderboard returns the published score of a model; a ":free" twin shares the score of its paid sibling.
+func leaderboard(b map[string]store.BenchRow, id string) (store.BenchRow, bool) {
+	if r, ok := b[id]; ok {
+		return r, true
+	}
+	r, ok := b[strings.TrimSuffix(id, ":free")]
+	return r, ok
+}
+
 func assignBench(in Inputs, pool []*scored, sh config.Preset) {
 	// price percentile as a proxy when no configured benchmark exists
 	type pr struct {
@@ -436,6 +455,8 @@ func assignBench(in Inputs, pool []*scored, sh config.Preset) {
 			s.bench, s.benchSrc = v/100, "configured"
 		} else if v, ok := in.Cfg.Benchmarks[strings.TrimSuffix(id, ":free")]; ok {
 			s.bench, s.benchSrc = v/100, "configured"
+		} else if b, ok := leaderboard(in.Bench, id); ok {
+			s.bench, s.benchSrc = b.Value, "arena "+b.Date
 		} else if p, ok := pct[s]; ok {
 			s.bench, s.benchSrc = 0.25+0.6*p, "price-proxy"
 		} else {

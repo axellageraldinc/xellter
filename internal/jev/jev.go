@@ -209,8 +209,8 @@ func (j *Judge) Evaluate(ctx context.Context, model string) (float64, error) {
 	if err != nil {
 		return 0, err
 	}
-	judge := snap.Models[cfg.JEV.Model]
-	if judge == nil {
+	chain := j.judgeChain(cfg, snap)
+	if len(chain) == 0 {
 		return 0, fmt.Errorf("judge model %q not in catalog", cfg.JEV.Model)
 	}
 	var sum float64
@@ -225,17 +225,16 @@ func (j *Judge) Evaluate(ctx context.Context, model string) (float64, error) {
 			return 0, err
 		}
 		j.charge(rank.UsageCost(m, in, out, 0, false, j.Now()))
-		score, jin, err := j.judge(ctx, cfg, key, prompt, answer)
+		score, used, jin, err := j.judgeWithFallback(ctx, cfg, key, chain, prompt, answer)
 		if err != nil {
-			if strings.Contains(err.Error(), "HTTP 5") { // 503 all_providers_failed and friends
+			if errors.Is(err, errJudgeDown) {
 				j.mu.Lock()
 				j.down = j.Now().Add(10 * time.Minute)
 				j.mu.Unlock()
-				return 0, fmt.Errorf("%w (%s): %v", errJudgeDown, cfg.JEV.Model, err)
 			}
 			return 0, err
 		}
-		j.charge(float64(jin) * judge.InIDR / 1e6)
+		j.charge(float64(jin) * used.InIDR / 1e6)
 		sum += score
 		n++
 	}
@@ -321,7 +320,7 @@ func (j *Judge) chat(ctx context.Context, cfg *config.Config, key *upstream.Key,
 	return out.Choices[0].Message.Content, out.Usage.In, out.Usage.Out, nil
 }
 
-func (j *Judge) judge(ctx context.Context, cfg *config.Config, key *upstream.Key, prompt, answer string) (float64, int, error) {
+func (j *Judge) judge(ctx context.Context, cfg *config.Config, key *upstream.Key, model, prompt, answer string) (float64, int, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	var out struct {
@@ -333,7 +332,7 @@ func (j *Judge) judge(ctx context.Context, cfg *config.Config, key *upstream.Key
 		} `json:"usage"`
 	}
 	err := j.post(ctx, cfg, key, "/v1/systemone", map[string]any{
-		"model": cfg.JEV.Model,
+		"model": model,
 		"state": "TASK:\n" + prompt + "\n\nANSWER:\n" + answer,
 		"questions": map[string]any{"q": map[string]any{
 			"type":         "noul",
@@ -352,4 +351,43 @@ func (j *Judge) judge(ctx context.Context, cfg *config.Config, key *upstream.Key
 		return 0, out.Usage.In, errors.New("no answer from judge")
 	}
 	return a.Noul, out.Usage.In, nil
+}
+
+// judgeChain is the configured judge followed by the other free System One models (jev first, then clef), the same
+// idea as aixell's classifier chain: when one judge is down at kenari the next one answers.
+func (j *Judge) judgeChain(cfg *config.Config, snap *catalog.Snapshot) []*catalog.Model {
+	var chain []*catalog.Model
+	if m := snap.Models[cfg.JEV.Model]; m != nil && m.Endpoint == "systemone" {
+		chain = append(chain, m)
+	}
+	var rest []*catalog.Model
+	for _, id := range snap.IDs() {
+		if m := snap.Models[id]; m.Endpoint == "systemone" && m.Free && id != cfg.JEV.Model {
+			rest = append(rest, m)
+		}
+	}
+	sort.SliceStable(rest, func(a, b int) bool {
+		ja, jb := strings.HasPrefix(rest[a].ID, "jev"), strings.HasPrefix(rest[b].ID, "jev")
+		if ja != jb {
+			return ja
+		}
+		return rest[a].ID < rest[b].ID
+	})
+	return append(chain, rest...)
+}
+
+// judgeWithFallback asks the judges in order and moves on when one is unavailable (5xx) or too slow.
+func (j *Judge) judgeWithFallback(ctx context.Context, cfg *config.Config, key *upstream.Key, chain []*catalog.Model, prompt, answer string) (float64, *catalog.Model, int, error) {
+	var last error
+	for _, m := range chain {
+		score, in, err := j.judge(ctx, cfg, key, m.ID, prompt, answer)
+		if err == nil {
+			return score, m, in, nil
+		}
+		last = err
+		if !strings.Contains(err.Error(), "HTTP 5") && !errors.Is(err, context.DeadlineExceeded) && !strings.Contains(err.Error(), "deadline") {
+			return 0, nil, 0, err // a real answer error (400, no answer): another judge would not help
+		}
+	}
+	return 0, nil, 0, fmt.Errorf("%w (%d judges tried): %v", errJudgeDown, len(chain), last)
 }

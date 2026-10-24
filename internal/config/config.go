@@ -197,7 +197,7 @@ func Default() *Config {
 			LogRequests: true, TrustedProxy: true, SessionHours: 12,
 			AdminHosts: []string{"localhost", "127.0.0.1"},
 		},
-		Kenari: Kenari{BaseURL: "https://kenari.id", SyncMinutes: 10, UserAgent: "xellter/1.0", FirstByteSecs: 120, MusicTimeoutSec: 900, AccountKeyEnv: "KENARI_ACCOUNT_KEY"},
+		Kenari: Kenari{BaseURL: "https://kenari.id", SyncMinutes: 10, UserAgent: "xellter/1.0", FirstByteSecs: 60, MusicTimeoutSec: 900, AccountKeyEnv: "KENARI_ACCOUNT_KEY"},
 		Rules: Rules{
 			FreeBonus: 0.10, PlanBonus: 0.08, PlanCostFactor: 0.3, PromoBonusMax: 0.05, PromoMinRemainingHrs: 12, UpcomingLookaheadHrs: 24,
 			NewModelDays: 14, CanaryPercent: 5, CanaryMinRequests: 20, CanaryMinSuccess: 0.9, AvoidSunsetDays: 3,
@@ -232,7 +232,7 @@ func DefaultPreset(modality string) Preset {
 	switch modality {
 	case "chat":
 		return Preset{Description: "Text and chat. Picks the best model that is cheap enough.", Modality: "chat", Mode: "auto", Require: Require{ToolCall: true, MinContext: 32000},
-			MinQuality: 0.45, MaxCandidates: 4, Strategy: "round_robin", RRBand: 0.04, Weights: Weights{Cost: 30, Benchmark: 25, JEV: 20, Reliability: 15, Context: 10},
+			MinQuality: 0.50, MaxCandidates: 4, Strategy: "round_robin", RRBand: 0.04, Weights: Weights{Cost: 25, Benchmark: 35, JEV: 20, Reliability: 15, Context: 5},
 			Cost: CostProfile{InputTokens: 4000, OutputTokens: 600, CachedRatio: 0.7}}
 	case "images":
 		return Preset{Description: "Image generation, free and cheap models first.", Modality: "images", Mode: "auto", MaxCandidates: 4, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Images: 1}}

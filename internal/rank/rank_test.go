@@ -77,6 +77,9 @@ func TestPromoMakesModelCheaperAndDoesNotLowerItsQuality(t *testing.T) {
 	promo := chat("promo", 63, 250) // listed price already includes a 90% discount
 	promo.Promo = &catalog.Promo{PercentOff: 90, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(7 * 24 * time.Hour)}
 	f := fixture(promo, chat("rival", 630, 2500), chat("other", 100, 300), chat("pricey", 9000, 30000))
+	pr := f.cl.Presets["text"]
+	pr.MinQuality = 0 // this test is about the price proxy, not the gate
+	f.cl.Presets["text"] = pr
 	r := f.rank("text", nil)
 	var pc *Candidate
 	for i := range r.Candidates {
@@ -323,5 +326,24 @@ func TestObjectivesBehaveAsNamed(t *testing.T) {
 	}
 	if top["balanced"] == "small" || top["balanced"] == "big" && false {
 		t.Fatalf("Balanced should not pick the weakest model: %s", top["balanced"])
+	}
+}
+
+func TestStackedPlanAndPromoNeverBeatAFreeModelOfEqualQuality(t *testing.T) {
+	free := freeChat("free-ok:free")
+	free.FreeSibling = "x"
+	promo := chat("promo-plan", 100, 400)
+	promo.Promo = &catalog.Promo{PercentOff: 90, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(72 * time.Hour)}
+	f := fixture(free, promo)
+	f.snap.Plans = []catalog.Plan{{Name: "P", Scope: []string{"promo-plan"}}}
+	f.cfg.Clients[0].Keys[0].Tier, f.cfg.Clients[0].Keys[0].Plan = "plan", "P"
+	f.pool.Reload(f.cfg, map[string]string{"K": "s"}, nil)
+	f.cfg.Benchmarks = map[string]float64{"free-ok:free": 70, "promo-plan": 70}
+	p := f.cl.Presets["text"]
+	p.Weights, p.MinQuality = config.Weights{Cost: 60, Benchmark: 10, JEV: 10, Reliability: 15, Context: 5}, 0.3
+	f.cl.Presets["text"] = p
+	r := f.rank("text", nil)
+	if len(r.Candidates) != 2 || r.Candidates[0].Model != "free-ok:free" {
+		t.Fatalf("the free model must lead: %+v", order(r))
 	}
 }
