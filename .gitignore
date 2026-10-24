@@ -1,0 +1,18 @@
+# secrets and runtime state: never commit
+.env*
+!.env.example
+*.env
+secrets.env
+*.db
+*.db-wal
+*.db-shm
+data/
+/xellter.yaml
+/xellter
+/bin/
+FIRST-LOGIN*.txt
+*.key
+# tooling
+node_modules/
+__pycache__/
+.worktrees/

@@ -1,0 +1,25 @@
+# CI for every PR (see ~/AGENTS.md, "CI", and ~/infra/docs/adr/0001-github-hosted-ci.md).
+# Security rules: read-only token, `pull_request` only (never `pull_request_target`),
+# no secrets, third-party actions pinned to a full commit SHA.
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: ./scripts/ci.sh
