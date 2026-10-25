@@ -47,6 +47,20 @@ kenari applies rate limits, free quotas and plan budgets **per account**, not pe
 
 kenari rejects unknown or disallowed models with `400 … Allowed models: …`, which is free. xellter sends one such probe per key at startup, after config changes and every 6 h, so restricted keys are only used for the models they may call.
 
+## Usage and account endpoints for clients (`internal/proxy/usage.go`)
+The proxy answers three read-only endpoints in kenari's shape, so a client that reads kenari's
+usage can point at xellter and change nothing:
+
+- `GET /v1/usage?range=24h|30d` — the client's own traffic, one row per real model and billing
+  kind (free, plan, payg), with the token counts, `cost_micro_idr` (what was paid) and
+  `catalog_micro_idr` (the list price of the same traffic), plus the totals. The rows come from
+  xellter's own request log, so they name the model xellter routed to, not the preset the client
+  asked for. A failed attempt is not counted: it never reached the model.
+- `GET /v1/account/balance` and `GET /v1/account/quota` — the account state xellter already keeps
+  from its five-minutely read of kenari, so no call leaves the server.
+
+See ADR 0015.
+
 ## State
 | What | Where |
 |---|---|

@@ -311,6 +311,40 @@ func (s *Store) Usage(group string, since time.Time, client string) ([]UsageRow,
 	return out, rows.Err()
 }
 
+// ModelUsageRow is one model's traffic over a window, split by billing kind.
+type ModelUsageRow struct {
+	Model    string
+	Billing  string
+	Requests int
+	InTok    int64
+	OutTok   int64
+	Cached   int64
+	Cost     float64 // IDR at catalog prices
+}
+
+// ModelUsage aggregates a client's traffic per model and billing kind over the
+// window. Only successful requests count: a failed attempt never reached the
+// model, so it was never billed.
+func (s *Store) ModelUsage(since time.Time, client string) ([]ModelUsageRow, error) {
+	rows, err := s.db.Query(`SELECT model, billing, COUNT(*), COALESCE(SUM(in_tok),0), COALESCE(SUM(out_tok),0), COALESCE(SUM(cached_tok),0), COALESCE(SUM(cost),0)
+		FROM requests WHERE ts>=? AND ok=1 AND model!='' AND (?='' OR client=?) GROUP BY model, billing`, since.UnixMilli(), client, client)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ModelUsageRow{}
+	for rows.Next() {
+		var r ModelUsageRow
+		var m, b sql.NullString
+		if err := rows.Scan(&m, &b, &r.Requests, &r.InTok, &r.OutTok, &r.Cached, &r.Cost); err != nil {
+			return nil, err
+		}
+		r.Model, r.Billing = m.String, b.String
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // RecentRow is a request for the log view.
 type RecentRow struct {
 	TS        int64   `json:"ts"`

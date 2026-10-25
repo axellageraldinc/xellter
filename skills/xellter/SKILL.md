@@ -207,7 +207,15 @@ The default has three questions, one of them in Indonesian.
 **"Try more models before failing."** `resilience.max_attempts` (config, default 4), with
 `cooldown_base_s`, `cooldown_max_s`, `breaker_failures` and `breaker_open_s` next to it.
 
-**"Let the panel sign me out everywhere."** Sidebar -> "Sign out everywhere".
+**"Let the panel sign me out everywhere."** Sidebar -> "Sign me out everywhere".
+
+**"Show me what models the clients really used."** `GET /v1/usage?range=24h` (or `30d`) with a
+client's xellter key answers in kenari's shape: one row per real model and billing kind, with the
+requests, the tokens, what was paid (`cost_micro_idr`) and the list price (`catalog_micro_idr`),
+plus the totals. The rows come from xellter's own request log, so they name the model xellter
+routed to, not the preset the client asked for. `GET /v1/account/balance` and
+`GET /v1/account/quota` answer the account state xellter already keeps. A client that reads
+kenari's usage can point at xellter and change nothing (ADR 0015).
 
 ## Gotchas
 

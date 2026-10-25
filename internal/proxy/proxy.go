@@ -147,6 +147,12 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && (p == "/v1/models" || strings.HasPrefix(p, "/v1/models/")):
 		s.listModels(w, r, cl, p)
+	case r.Method == http.MethodGet && p == "/v1/usage":
+		s.usage(w, r, cl)
+	case r.Method == http.MethodGet && p == "/v1/account/balance":
+		s.balance(w, r)
+	case r.Method == http.MethodGet && p == "/v1/account/quota":
+		s.quota(w, r)
 	case r.Method == http.MethodGet && strings.HasPrefix(p, "/v1/videos/"):
 		s.job(w, r, cl, p)
 	case r.Method == http.MethodPost:
