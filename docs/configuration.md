@@ -52,7 +52,7 @@ Key = the name the app sends as `model`.
 | `models` | combo list |
 | `require` | `tool_call`, `vision`, `reasoning` |
 | `min_quality` | 0..1 quality gate |
-| `max_candidates` | size of the main list |
+| `max_candidates` | size of the main list (5 by default) |
 | `strategy` / `rr_band` | `round_robin` rotates within `rr_band` of the top score; `priority` always starts with the best |
 | `weights` | relative weights of `cost`, `benchmark`, `jev`, `reliability`, `context` |
 | `cost_profile` | reference request: `input_tokens`, `output_tokens`, `cached_ratio` (chat); `images`; `seconds`, `variant` (video/STT); `chars` (TTS) |
@@ -62,7 +62,7 @@ A preset has no model allow or deny list and no context-size gate: the models th
 In the panel, a preset card offers the objective buttons ("Optimise for"): Cheapest (60/10/10/15/5, .35), Balanced (25/35/20/15/5, .50), Best quality (2/55/25/15/3, .64), the tie-break strategy, and the tool-calling and image-input requirements. Everything else keeps the backend default.
 
 ## rules
-`free_bonus` .10, `plan_bonus` .08, `plan_cost_factor` .3 (a plan-covered request counts for this share of its list price, because plan budget is finite), `promo_bonus_max` .05, `promo_min_remaining_hours` 12, `upcoming_lookahead_hours` 24, `new_model_days` 14, `canary_percent` 5, `canary_min_requests` 20, `canary_min_success` .9, `avoid_sunset_days` 3, `sticky_minutes` 30, `stats_window_hours` 24.
+`free_bonus` .10, `plan_bonus` .08, `plan_cost_factor` .3 (a plan-covered request counts for this share of its list price, because plan budget is finite), `promo_bonus_max` .05, `promo_min_remaining_hours` 12, `upcoming_lookahead_hours` 24, `avoid_sunset_days` 3, `sticky_minutes` 30, `stats_window_hours` 24.
 
 Sticky sessions are keyed by `X-Xellter-Session` (also `X-Session-Id`, `X-Claude-Code-Session-Id`), `prompt_cache_key`, `user`, or a hash of the first messages. Identical first messages therefore stay on one model.
 

@@ -1,6 +1,6 @@
 # 0003 — Rank models with gates, weighted components and a JEV judge
 
-- Status: Accepted
+- Status: Accepted (the trial rule is superseded by ADR 0013)
 - Date: 2026-10-24
 - Deciders: owner (Axell)
 
@@ -17,6 +17,8 @@ JEV is kenari's System One decision model: candidates answer golden prompts, JEV
 Benchmarks have no public API. A configured score (0-100) wins; otherwise the quality proxy is the price percentile of the model's **undiscounted** list price (a promo must not make a model look weaker; a `:free` twin borrows its paid sibling). The proxy is a placeholder to be replaced by curated benchmark numbers.
 
 New models (first seen within 14 days) are "on trial": they receive a canary share of traffic (default 5%) and join the main list after enough successful requests; a trial model may not cost more than 3× the leader.
+
+> Superseded by ADR 0013: there is no trial pool any more. A model is never held back because it is new; the score decides, and the top `max_candidates` (5) models serve.
 
 ## Alternatives considered
 - Static combos only (9router style): simple but needs manual upkeep when prices, promos and free tiers change weekly.

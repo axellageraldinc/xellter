@@ -65,16 +65,14 @@ is therefore the normal way to change these — do not add a panel control for t
 | Cheapest / Balanced / Best quality | panel button on the preset | Balanced (25/35/20/15/5, min_quality .50) |
 | Quality floor of a preset | `presets.<name>.min_quality` | .50 chat, 0 media |
 | Always the best model vs. take turns | `presets.<name>.strategy` | round_robin (chat), priority (media) |
-| How many models to keep | `presets.<name>.max_candidates` | 4 chat, 3 media |
+| How many models to keep | `presets.<name>.max_candidates` | 5 |
 | How close counts as equal | `presets.<name>.rr_band` | .04 chat, .03 media |
 | How much each factor counts | `presets.<name>.weights` | per objective above |
 | The reference request that turns prices into one number | `presets.<name>.cost_profile` | 4000 in / 600 out tokens, 70% cached |
 | A model must be able to call tools | `presets.<name>.require.tool_call` | true for chat |
 | A model must take images | `presets.<name>.require.vision` | false |
 | Preference for free / plan / discounted models | `rules.free_bonus`, `plan_bonus`, `promo_bonus_max` | .10, .08, .05 |
-| Share of traffic a new model may try | `rules.canary_percent` | 5 |
 | How long a session stays on one model | `rules.sticky_minutes` | 30 |
-| Days a model counts as new | `rules.new_model_days` | 14 |
 | Models to try per request | `resilience.max_attempts` | 4 |
 | Quality judge | `jev.enabled`, `jev.judges` | off, `[jev-1-13:free]` |
 | Judge budget per day | `jev.daily_budget_idr` | 1000 |
@@ -112,9 +110,9 @@ API; kenari is faked with `httptest`.
 are not good enough, raise `min_quality` in the config file instead of the "Best quality" button
 (the button also drops the benchmark weight, which is not what you want).
 
-**A model is never used.** Check "Why this order?": it is either rejected (reason given) or on
-trial (unproven, gets a canary share only). A model with no quality evidence and no price is
-"unverified" and stays on trial until JEV judges it or traffic proves it.
+**A model is never used.** Check "Why this order?": it is rejected, with the reason given (a
+missing capability, a sunset, a quality floor, or "outside top 5"). A model with no quality
+evidence is marked "unverified": it still serves, but its quality is a guess.
 
 **A client gets no answers.** "Nothing available right now" means no model of that kind is
 callable with the client's keys: the key has no value, is on cooldown, or the catalog has no model

@@ -34,7 +34,6 @@ type Request struct {
 	Billing     string  // free | plan | payg
 	Stream      bool
 	Attempt     int
-	Canary      bool
 	RTKSaved    int
 	Err         string
 }
@@ -67,12 +66,11 @@ const schema = `
 CREATE TABLE IF NOT EXISTS requests(
  id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, client TEXT, preset TEXT, requested TEXT, model TEXT, upstream TEXT, path TEXT,
  status INTEGER, ok INTEGER, latency_ms INTEGER, ttft_ms INTEGER, in_tok INTEGER, out_tok INTEGER, cached_tok INTEGER,
- cost REAL, billing TEXT, stream INTEGER, attempt INTEGER, canary INTEGER, rtk_saved INTEGER, err TEXT);
+ cost REAL, billing TEXT, stream INTEGER, attempt INTEGER, rtk_saved INTEGER, err TEXT);
 CREATE INDEX IF NOT EXISTS req_ts ON requests(ts);
 CREATE INDEX IF NOT EXISTS req_model_ts ON requests(model, ts);
 CREATE INDEX IF NOT EXISTS req_up_ts ON requests(upstream, ts);
 CREATE INDEX IF NOT EXISTS req_client_ts ON requests(client, ts);
-CREATE TABLE IF NOT EXISTS seen(model TEXT PRIMARY KEY, ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS jev(model TEXT PRIMARY KEY, score REAL, n INTEGER, ts INTEGER);
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, exp INTEGER NOT NULL, ip TEXT, ua TEXT, created INTEGER);
 CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, upstream TEXT NOT NULL, ts INTEGER NOT NULL);
@@ -100,6 +98,15 @@ func Open(dir string) (*Store, error) {
 		if _, err := db.Exec(`ALTER TABLE requests RENAME COLUMN shadow TO preset`); err != nil {
 			return nil, err
 		}
+	}
+	// the trial mechanism is gone: the canary flag and the first-seen dates are no longer used
+	if db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('requests') WHERE name='canary'`).Scan(&n) == nil && n > 0 {
+		if _, err := db.Exec(`ALTER TABLE requests DROP COLUMN canary`); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := db.Exec(`DROP TABLE IF EXISTS seen`); err != nil {
+		return nil, err
 	}
 	s := &Store{db: db, logC: make(chan Request, 1024), stop: make(chan struct{})}
 	s.wg.Add(1)
@@ -136,10 +143,10 @@ func (s *Store) writer() {
 			batch = batch[:0]
 			return
 		}
-		st, err := tx.Prepare(`INSERT INTO requests(ts,client,preset,requested,model,upstream,path,status,ok,latency_ms,ttft_ms,in_tok,out_tok,cached_tok,cost,billing,stream,attempt,canary,rtk_saved,err) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		st, err := tx.Prepare(`INSERT INTO requests(ts,client,preset,requested,model,upstream,path,status,ok,latency_ms,ttft_ms,in_tok,out_tok,cached_tok,cost,billing,stream,attempt,rtk_saved,err) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 		if err == nil {
 			for _, r := range batch {
-				_, _ = st.Exec(r.TS, r.Client, r.Preset, r.Requested, r.Model, r.Upstream, r.Path, r.Status, b2i(r.OK), r.LatencyMS, r.TTFTMS, r.InTok, r.OutTok, r.CachedTok, r.CatalogCost, r.Billing, b2i(r.Stream), r.Attempt, b2i(r.Canary), r.RTKSaved, r.Err)
+				_, _ = st.Exec(r.TS, r.Client, r.Preset, r.Requested, r.Model, r.Upstream, r.Path, r.Status, b2i(r.OK), r.LatencyMS, r.TTFTMS, r.InTok, r.OutTok, r.CachedTok, r.CatalogCost, r.Billing, b2i(r.Stream), r.Attempt, r.RTKSaved, r.Err)
 			}
 			st.Close()
 		}
@@ -202,27 +209,6 @@ func (s *Store) Stats(since time.Time) (map[string]ModelStat, error) {
 		}
 		st.OK = int(ok.Int64)
 		st.AvgLat, st.AvgTTFT = lat.Float64, ttft.Float64
-		out[m] = st
-	}
-	return out, rows.Err()
-}
-
-// LifetimeStats counts all-time requests per model (for canary promotion).
-func (s *Store) LifetimeStats() (map[string]ModelStat, error) {
-	rows, err := s.db.Query(`SELECT model, COUNT(*), SUM(ok) FROM requests WHERE model!='' GROUP BY model`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := map[string]ModelStat{}
-	for rows.Next() {
-		var m string
-		var st ModelStat
-		var ok sql.NullInt64
-		if err := rows.Scan(&m, &st.N, &ok); err != nil {
-			return nil, err
-		}
-		st.OK = int(ok.Int64)
 		out[m] = st
 	}
 	return out, rows.Err()
@@ -342,14 +328,13 @@ type RecentRow struct {
 	Cost      float64 `json:"cost_idr"`
 	Billing   string  `json:"billing"`
 	Attempt   int     `json:"attempt"`
-	Canary    bool    `json:"canary"`
 	RTKSaved  int     `json:"rtk_saved"`
 	Err       string  `json:"err"`
 }
 
 // Recent returns the newest rows first.
 func (s *Store) Recent(limit int, client string) ([]RecentRow, error) {
-	rows, err := s.db.Query(`SELECT ts,client,preset,requested,model,upstream,status,ok,latency_ms,ttft_ms,in_tok,out_tok,cost,billing,attempt,canary,rtk_saved,err FROM requests WHERE (?='' OR client=?) ORDER BY id DESC LIMIT ?`, client, client, limit)
+	rows, err := s.db.Query(`SELECT ts,client,preset,requested,model,upstream,status,ok,latency_ms,ttft_ms,in_tok,out_tok,cost,billing,attempt,rtk_saved,err FROM requests WHERE (?='' OR client=?) ORDER BY id DESC LIMIT ?`, client, client, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -357,13 +342,13 @@ func (s *Store) Recent(limit int, client string) ([]RecentRow, error) {
 	out := []RecentRow{}
 	for rows.Next() {
 		var r RecentRow
-		var ok, canary int
+		var ok int
 		var cl, sh, rq, mo, up, bi, er sql.NullString
-		if err := rows.Scan(&r.TS, &cl, &sh, &rq, &mo, &up, &r.Status, &ok, &r.LatencyMS, &r.TTFTMS, &r.InTok, &r.OutTok, &r.Cost, &bi, &r.Attempt, &canary, &r.RTKSaved, &er); err != nil {
+		if err := rows.Scan(&r.TS, &cl, &sh, &rq, &mo, &up, &r.Status, &ok, &r.LatencyMS, &r.TTFTMS, &r.InTok, &r.OutTok, &r.Cost, &bi, &r.Attempt, &r.RTKSaved, &er); err != nil {
 			return nil, err
 		}
 		r.Client, r.Preset, r.Requested, r.Model, r.Upstream, r.Billing, r.Err = cl.String, sh.String, rq.String, mo.String, up.String, bi.String, er.String
-		r.OK, r.Canary = ok == 1, canary == 1
+		r.OK = ok == 1
 		out = append(out, r)
 	}
 	return out, rows.Err()
@@ -375,39 +360,6 @@ func (s *Store) Purge(retentionDays int) {
 	_, _ = s.db.Exec(`DELETE FROM requests WHERE ts<?`, cut)
 	_, _ = s.db.Exec(`DELETE FROM sessions WHERE exp<?`, time.Now().Unix())
 	_, _ = s.db.Exec(`DELETE FROM jobs WHERE ts<?`, time.Now().AddDate(0, 0, -3).Unix())
-}
-
-// ---- first seen ----
-
-// Seen returns first-seen timestamps by model.
-func (s *Store) Seen() (map[string]time.Time, error) {
-	rows, err := s.db.Query(`SELECT model, ts FROM seen`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := map[string]time.Time{}
-	for rows.Next() {
-		var m string
-		var t int64
-		if err := rows.Scan(&m, &t); err != nil {
-			return nil, err
-		}
-		out[m] = time.Unix(t, 0)
-	}
-	return out, rows.Err()
-}
-
-// MarkSeen records models first seen at ts (0 = baseline, treated as "old").
-func (s *Store) MarkSeen(models []string, ts int64) {
-	for _, m := range models {
-		_, _ = s.db.Exec(`INSERT OR IGNORE INTO seen(model, ts) VALUES(?,?)`, m, ts)
-	}
-}
-
-// SetSeen overrides a model's first-seen time (tests, admin tooling).
-func (s *Store) SetSeen(model string, ts int64) {
-	_, _ = s.db.Exec(`INSERT OR REPLACE INTO seen(model, ts) VALUES(?,?)`, model, ts)
 }
 
 // ---- JEV ----

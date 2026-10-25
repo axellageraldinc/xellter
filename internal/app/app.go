@@ -83,7 +83,6 @@ func New(path string, src catalog.Source) (*App, error) {
 			ac.SetTopupThreshold(s.Tier.Thresh)
 		}
 		a.rematchBench(s)
-		a.Rt.MarkSeen(s)
 		a.Rt.Recompute(time.Now())
 	})
 	if rec, err := auth.ReadRecord(cfg.Server.AuthRecord); err == nil {
@@ -397,7 +396,6 @@ func (a *App) Start(ctx context.Context) {
 		a.Logf("initial catalog fetch failed (using cache if present): %v", err)
 	}
 	cancel()
-	a.Rt.MarkSeen(a.Cat.Snapshot())
 	go func() { // leaderboards: on start when stale, then re-checked every 6 hours
 		for {
 			if time.Since(a.BenchFetched()) > benchMaxAge {

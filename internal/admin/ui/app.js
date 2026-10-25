@@ -532,15 +532,14 @@ function presetCard(client, name, p, r) {
   p.require ||= {}; p.weights ||= {}; p.cost_profile ||= {};
   const isChat = p.modality === 'chat', obj = objectiveOf(p), [kind, ic] = KIND[p.modality] || ['', 'message'];
   // "Serving now" lists every model this preset can use right now: the main
-  // list, plus the ones on trial. The ones left out are counted, and the
-  // "Why this order?" button explains each of them.
-  const main = r?.candidates || [], trial = r?.trial || [];
+  // list. The ones left out are counted, and the "Why this order?" button
+  // explains each of them.
+  const main = r?.candidates || [];
   const out = (r?.rejected?.length || 0) + (r?.unavailable?.length || 0);
   const body = h('div', {},
     p.description && h('div', { class: 'text-secondary mb-3' }, p.description),
     h('div', { class: 'mb-3' }, h('div', { class: 'subheader' }, 'Serving now'),
       main.length ? main.map((c, i) => h('div', { class: 'model-line' }, h('span', { class: 'model-rank' }, i + 1), h('span', { class: 'mono ' + (i ? 'text-secondary' : 'fw-bold') }, c.model), flags(c.flags), c.score != null && h('span', { class: 'text-secondary small ms-auto' }, 'score ' + c.score.toFixed(2)))) : h('span', { class: 'text-danger' }, 'Nothing available right now'),
-      trial.length ? h('div', { class: 'model-line' }, h('span', { class: 'model-rank trial' }, 'T'), h('span', { class: 'mono text-secondary' }, trial.map(c => c.model).join(', ')), h('span', { class: 'text-secondary small ms-auto' }, 'on trial')) : null,
       out ? h('div', { class: 'form-hint' }, `${out} more model${out === 1 ? '' : 's'} left out; "Why this order?" says why.`) : null),
     h('div', { class: 'mb-3' }, h('div', { class: 'subheader' }, 'Optimise for'),
       h('div', { class: 'btn-group w-100' }, Object.entries(objectivesFor(p)).map(([k, o]) => h('button', { class: 'btn btn-sm ' + (obj === k ? 'btn-primary' : 'btn-outline-primary'), onclick: () => { p.weights = { ...o.w }; p.min_quality = o.q; markDirty(); render(); } }, o.label)), obj === 'custom' && h('button', { class: 'btn btn-sm btn-primary', disabled: true }, 'Custom')),
@@ -568,12 +567,12 @@ function addPreset(cl) {
 }
 function newDefault(kind) {
   const media = { cost: 70, benchmark: 10, jev: 0, reliability: 20, context: 0 };
-  if (kind === 'chat') return { description: '', modality: 'chat', mode: 'auto', require: { tool_call: true }, min_quality: 0.50, max_candidates: 4, strategy: 'round_robin', rr_band: 0.04, weights: { ...OBJECTIVES.balanced.w }, cost_profile: { input_tokens: 4000, output_tokens: 600, cached_ratio: 0.7 } };
-  return { description: '', modality: kind, mode: 'auto', require: {}, min_quality: 0, max_candidates: 3, strategy: 'priority', rr_band: 0.03, weights: media, cost_profile: { images: 1, seconds: kind === 'audio_transcription' ? 60 : 5, chars: 1000, variant: kind === 'videos' ? '720p' : '' } };
+  if (kind === 'chat') return { description: '', modality: 'chat', mode: 'auto', require: { tool_call: true }, min_quality: 0.50, max_candidates: 5, strategy: 'round_robin', rr_band: 0.04, weights: { ...OBJECTIVES.balanced.w }, cost_profile: { input_tokens: 4000, output_tokens: 600, cached_ratio: 0.7 } };
+  return { description: '', modality: kind, mode: 'auto', require: {}, min_quality: 0, max_candidates: 5, strategy: 'priority', rr_band: 0.03, weights: media, cost_profile: { images: 1, seconds: kind === 'audio_transcription' ? 60 : 5, chars: 1000, variant: kind === 'videos' ? '720p' : '' } };
 }
 
-// showRanking explains the order of a preset: the main list with its scores,
-// the models on trial, and every model that was left out with the reason.
+// showRanking explains the order of a preset: the main list with its scores
+// and every model that was left out with the reason.
 async function showRanking(client, name) {
   try {
     const r = await api(`ranking?client=${encodeURIComponent(client)}&preset=${encodeURIComponent(name)}`);
@@ -596,7 +595,6 @@ async function showRanking(client, name) {
     const section = (title, note, body) => h('div', { class: 'mb-4' }, h('h4', { class: 'rank-h' }, title), note && h('p', { class: 'text-secondary small' }, note), body);
     dialog(h('h3', {}, `${client} / ${name}`), h('p', { class: 'text-secondary' }, 'How the order is decided. The higher the score, the better the model; models close to the top take turns when the preset is set to do so.'),
       section('Main list', 'The models this preset uses, best first.', table(r.candidates, 'No model qualifies right now.')),
-      r.trial?.length ? section(`On trial (${r.trial.length})`, 'New or unproven models. They get a small share of traffic until they have proven themselves.', h('div', { class: 'rank-reason-models mono' }, r.trial.map(c => c.model).join(', '))) : null,
       r.rejected?.length ? section(`Left out (${r.rejected.length})`, 'Models of this kind that do not serve this preset, grouped by the reason.', rejected) : null,
       r.unavailable?.length ? h('p', { class: 'text-secondary small' }, `${r.unavailable.length} more models exist but this client's keys may not call them.`) : null,
       dialogButtons(), { __opts: { wide: true } });
@@ -631,7 +629,7 @@ views.usage = async function (_, q) {
       shown.length ? h('div', { class: 'table-responsive' }, h('table', { class: 'table table-sm table-vcenter' }, h('thead', {}, h('tr', {}, ['When', 'Client', 'Asked for', 'Served by', 'Key', 'Result', 'Time', 'Tokens in / out', 'Notes'].map(x => h('th', {}, x)))),
         h('tbody', {}, shown.slice(0, 100).map(r => h('tr', {}, h('td', { class: 'nowrap text-secondary' }, ago(r.ts) + ' ago'), h('td', {}, r.client), h('td', { class: 'mono' }, r.requested || r.preset), h('td', { class: 'mono' }, r.model), h('td', {}, keyLabel(r.upstream)),
           h('td', {}, badge(r.ok ? 'ok' : (r.status || 'error'), r.ok ? 'green' : 'red')), h('td', { class: 'nowrap' }, r.latency_ms + ' ms'), h('td', { class: 'nowrap' }, `${r.in_tok} / ${r.out_tok}`),
-          h('td', {}, r.attempt > 1 && badge('retry ' + r.attempt, 'orange'), r.canary && badge('trial', 'azure'), r.rtk_saved > 0 && badge('saved ' + r.rtk_saved, 'green'), r.err && h('span', { class: 'text-danger small' }, r.err))))))) : empty('Nothing to show.'))));
+          h('td', {}, r.attempt > 1 && badge('retry ' + r.attempt, 'orange'), r.rtk_saved > 0 && badge('saved ' + r.rtk_saved, 'green'), r.err && h('span', { class: 'text-danger small' }, r.err))))))) : empty('Nothing to show.'))));
 };
 
 // savedOrderDiffers is true while the edited list differs from the chain in effect.
@@ -671,15 +669,14 @@ views.settings = async function () {
   const c = S.cfg, j = await api('jev'), R = c.rules, cat = await api('catalog'), bn = await api('bench');
   const bench = Object.entries(c.benchmarks);
   const L = { free_bonus: 'Preference for free models', plan_bonus: 'Preference for plan-covered models', plan_cost_factor: 'Cost of plan-covered models (0-1)', promo_bonus_max: 'Preference for discounted models',
-    promo_min_remaining_hours: 'Ignore discounts ending within (h)', upcoming_lookahead_hours: 'Look ahead for price changes (h)', new_model_days: 'A model is "new" for (days)', canary_min_requests: 'Requests to trust a new model', canary_min_success: 'Success rate to trust it (0-1)', stats_window_hours: 'Health window (h)' };
+    promo_min_remaining_hours: 'Ignore discounts ending within (h)', upcoming_lookahead_hours: 'Look ahead for price changes (h)', stats_window_hours: 'Health window (h)' };
   const RL = { max_attempts: 'Models to try per request', cooldown_base_s: 'First pause after an error (s)', cooldown_max_s: 'Longest pause (s)', breaker_failures: 'Errors in a row before a key is paused', breaker_open_s: 'How long a paused key rests (s)' };
   setHead({ title: 'Settings', sub: 'Sensible defaults are already set. Most of this you never need to touch.' });
   return h('div', { class: 'row row-cards' },
     h('div', { class: 'col-lg-6' }, card('Smart routing', h('div', {},
-      field(R, 'canary_percent', { type: 'num', label: 'Try new models on this share of traffic (%)', help: 'new models are tried in small doses before they are trusted' }),
       field(R, 'sticky_minutes', { type: 'num', label: 'Keep one conversation on one model (minutes)', help: 'keeps the provider cache warm and answers consistent' }),
       field(R, 'avoid_sunset_days', { type: 'num', label: 'Stop using models that end within (days)' }),
-      advanced(cols(['free_bonus', 'plan_bonus', 'plan_cost_factor', 'promo_bonus_max'].map(k => field(R, k, { type: 'num', step: '0.01', label: L[k] })), ['promo_min_remaining_hours', 'upcoming_lookahead_hours', 'new_model_days', 'canary_min_requests', 'canary_min_success', 'stats_window_hours'].map(k => field(R, k, { type: 'num', label: L[k] }))))), { class: 'h-100' })),
+      advanced(cols(['free_bonus', 'plan_bonus', 'plan_cost_factor', 'promo_bonus_max'].map(k => field(R, k, { type: 'num', step: '0.01', label: L[k] })), ['promo_min_remaining_hours', 'upcoming_lookahead_hours', 'stats_window_hours'].map(k => field(R, k, { type: 'num', label: L[k] }))))), { class: 'h-100' })),
     h('div', { class: 'col-lg-6' }, card('Token saver (RTK)', h('div', {}, h('p', { class: 'text-secondary' }, 'Shrinks big tool output (git diff, grep, ls, logs) before it is sent and paid for. Your own messages are never touched.'),
       field(c.rtk, 'enabled', { type: 'switch', label: 'Token saver on' }),
       h('div', { class: 'row' }, [['git_diff', 'git diff'], ['grep', 'grep results'], ['ls', 'directory listings'], ['logs', 'logs'], ['truncate', 'any very long output']].map(([k, l]) => h('div', { class: 'col-6' }, field(c.rtk, k, { type: 'switch', label: l })))),

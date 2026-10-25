@@ -34,9 +34,6 @@ func TestFetchParsesPricesPromosPlansAndTiers(t *testing.T) {
 	mux.HandleFunc("/api/plans", func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `[{"name":"Indie","price_idr":49000,"budget_5h_micro_idr":0,"budget_week_micro_idr":75000000000,"budget_month_micro_idr":300000000000,"scope_models":["m"],"free_cache_models":["m"]}]`)
 	})
-	mux.HandleFunc("/v1/models/changes", func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"data":[{"kind":"added","model":"m","detected_at":1792774454}]}`)
-	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	k := &Kenari{BaseURL: srv.URL, UA: "xellter-test", HTTP: srv.Client()}
@@ -79,9 +76,6 @@ func TestFetchParsesPricesPromosPlansAndTiers(t *testing.T) {
 	p := s.Plan("indie")
 	if p == nil || p.BudgetWeek != 75000 || p.BudgetMon != 300000 || p.Budget5h != 0 || p.Scope[0] != "m" {
 		t.Fatalf("plan: %+v", p)
-	}
-	if len(s.Changes) != 1 || s.Changes[0].Kind != "added" {
-		t.Fatal("changes")
 	}
 }
 

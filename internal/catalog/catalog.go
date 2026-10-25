@@ -88,19 +88,11 @@ type FreeTier struct {
 	Thresh float64   `json:"threshold_idr"`
 }
 
-// Change is an entry of /v1/models/changes.
-type Change struct {
-	Kind  string    `json:"kind"`
-	Model string    `json:"model"`
-	At    time.Time `json:"at"`
-}
-
 // Snapshot is one immutable view of the catalog.
 type Snapshot struct {
 	Models   map[string]*Model `json:"models"`
 	Plans    []Plan            `json:"plans"`
 	Tier     FreeTier          `json:"free_tier"`
-	Changes  []Change          `json:"changes"`
 	USDIDR   float64           `json:"usd_idr"`
 	Fetched  time.Time         `json:"fetched"`
 	Degraded bool              `json:"-"`
@@ -410,18 +402,6 @@ func (k *Kenari) Fetch(ctx context.Context) (*Snapshot, error) {
 		}
 	}
 
-	var ch struct {
-		Data []struct {
-			Kind     string `json:"kind"`
-			Model    string `json:"model"`
-			Detected int64  `json:"detected_at"`
-		} `json:"data"`
-	}
-	if err := k.get(ctx, "/v1/models/changes", &ch); err == nil {
-		for _, c := range ch.Data {
-			s.Changes = append(s.Changes, Change{Kind: c.Kind, Model: c.Model, At: time.Unix(c.Detected, 0)})
-		}
-	}
 	return s, nil
 }
 

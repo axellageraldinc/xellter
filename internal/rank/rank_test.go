@@ -36,7 +36,7 @@ func fixture(models ...*catalog.Model) *fx {
 }
 
 func (f *fx) rank(preset string, mod func(*Inputs)) *Ranking {
-	in := Inputs{Cfg: f.cfg, Snap: f.snap, Pool: f.pool, Now: now, Seen: map[string]time.Time{}, JEV: map[string]store.JEVScore{}, Stats: map[string]store.ModelStat{}, Life: map[string]store.ModelStat{}}
+	in := Inputs{Cfg: f.cfg, Snap: f.snap, Pool: f.pool, Now: now, JEV: map[string]store.JEVScore{}, Stats: map[string]store.ModelStat{}}
 	if mod != nil {
 		mod(&in)
 	}
@@ -49,6 +49,16 @@ func order(r *Ranking) []string {
 		o = append(o, c.Model)
 	}
 	return o
+}
+
+// containsStr reports whether the list holds the value.
+func containsStr(l []string, v string) bool {
+	for _, x := range l {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 func TestFreeModelWinsWhenQualityIsAcceptable(t *testing.T) {
@@ -114,31 +124,43 @@ func TestEndingPromoGetsNoBonusAndExpiredPromoRevertsPrice(t *testing.T) {
 	}
 }
 
-func TestNewModelsGoToTrialUntilProven(t *testing.T) {
-	f := fixture(chat("old", 500, 1500), chat("shiny", 400, 1200))
-	f.cfg.Benchmarks = map[string]float64{"old": 70, "shiny": 70}
-	seen := map[string]time.Time{"old": time.Unix(0, 0), "shiny": now.Add(-2 * 24 * time.Hour)}
-	r := f.rank("text", func(in *Inputs) { in.Seen = seen })
-	if len(r.Trial) != 1 || r.Trial[0].Model != "shiny" || len(r.Candidates) != 1 {
-		t.Fatalf("trial=%v main=%v", r.Trial, order(r))
+// The main list is capped at max_candidates; the best models win the places.
+func TestMainListKeepsTheTopCandidates(t *testing.T) {
+	models := []*catalog.Model{chat("a", 100, 300), chat("b", 110, 330), chat("c", 120, 360), chat("d", 130, 390), chat("e", 140, 420), chat("f", 150, 450)}
+	f := fixture(models...)
+	f.cfg.Benchmarks = map[string]float64{"a": 90, "b": 85, "c": 80, "d": 75, "e": 70, "f": 65}
+	r := f.rank("text", nil)
+	if len(r.Candidates) != 5 {
+		t.Fatalf("the main list must hold 5 models: %v", order(r))
 	}
-	r = f.rank("text", func(in *Inputs) {
-		in.Seen = seen
-		in.Life = map[string]store.ModelStat{"shiny": {N: 40, OK: 39}}
-	})
-	if len(r.Trial) != 0 || len(r.Candidates) != 2 {
-		t.Fatalf("proven model should join the main list: trial=%v main=%v", r.Trial, order(r))
+	for i, want := range []string{"a", "b", "c", "d", "e"} {
+		if r.Candidates[i].Model != want {
+			t.Fatalf("position %d must be %s: %v", i+1, want, order(r))
+		}
+	}
+	// the one that did not make it is rejected with the reason
+	var why string
+	for _, x := range r.Rejected {
+		if x.Model == "f" {
+			why = x.Why
+		}
+	}
+	if why != "outside top 5" {
+		t.Fatalf("the sixth model must be left out with a reason: %q", why)
 	}
 }
 
-func TestTrialCostGuard(t *testing.T) {
-	f := fixture(chat("old", 100, 300), chat("lavish", 20000, 60000))
-	f.cfg.Benchmarks = map[string]float64{"old": 70, "lavish": 70}
-	r := f.rank("text", func(in *Inputs) {
-		in.Seen = map[string]time.Time{"old": time.Unix(0, 0), "lavish": now.Add(-time.Hour)}
-	})
-	if len(r.Trial) != 0 {
-		t.Fatal("a new model costing far more than the leader must not get canary traffic")
+// A preset may ask for a different number of models.
+func TestMainListSizeFollowsThePreset(t *testing.T) {
+	models := []*catalog.Model{chat("a", 100, 300), chat("b", 110, 330), chat("c", 120, 360), chat("d", 130, 390), chat("e", 140, 420), chat("f", 150, 450)}
+	f := fixture(models...)
+	f.cfg.Benchmarks = map[string]float64{"a": 90, "b": 85, "c": 80, "d": 75, "e": 70, "f": 65}
+	sh := f.cl.Presets["text"]
+	sh.MaxCandidates = 2
+	f.cl.Presets["text"] = sh
+	r := f.rank("text", nil)
+	if o := order(r); len(o) != 2 || o[0] != "a" || o[1] != "b" {
+		t.Fatalf("a preset of 2 models: %v", o)
 	}
 }
 
@@ -263,26 +285,34 @@ func freeChat(id string) *catalog.Model {
 	return m
 }
 
-func TestUnverifiedFreeModelsStayOnTrialUntilJudged(t *testing.T) {
+// A model with no quality evidence is flagged, not locked out: the score
+// decides whether it serves, and the panel says its quality is a guess.
+func TestUnverifiedModelIsFlaggedButStillRanks(t *testing.T) {
 	f := fixture(freeChat("mystery:free"), chat("known", 500, 1500))
 	f.cfg.Benchmarks = map[string]float64{"known": 70}
 	r := f.rank("text", nil)
-	if o := order(r); len(o) != 1 || o[0] != "known" {
-		t.Fatalf("an unverified free model must not lead: %v", o)
+	if o := order(r); len(o) != 2 {
+		t.Fatalf("both models must be in the list: %v", o)
 	}
-	if len(r.Trial) != 1 || r.Trial[0].Model != "mystery:free" || !containsStr(r.Trial[0].Flags, "unverified, on trial") {
-		t.Fatalf("it should be on trial: %+v", r.Trial)
+	var mystery *Candidate
+	for i := range r.Candidates {
+		if r.Candidates[i].Model == "mystery:free" {
+			mystery = &r.Candidates[i]
+		}
 	}
-	// once JEV has judged it well, it competes normally
+	if mystery == nil {
+		t.Fatal("the unverified model must be a candidate")
+	}
+	if !containsStr(mystery.Flags, "unverified") {
+		t.Fatalf("it must be marked as unverified: %+v", mystery.Flags)
+	}
+	// once JEV has judged it well, the flag is gone
 	f.cfg.JEV.Enabled = true
 	r = f.rank("text", func(in *Inputs) { in.JEV = map[string]store.JEVScore{"mystery:free": {Score: 0.9}} })
-	if len(r.Trial) != 0 || len(r.Candidates) != 2 || r.Candidates[0].Model != "mystery:free" {
-		t.Fatalf("judged and free: %v trial=%v", order(r), r.Trial)
-	}
-	// ...and so does a model that proved itself in live traffic
-	r = f.rank("text", func(in *Inputs) { in.Life = map[string]store.ModelStat{"mystery:free": {N: 30, OK: 30}} })
-	if len(r.Trial) != 0 {
-		t.Fatal("a model proven by traffic leaves the trial")
+	for _, c := range r.Candidates {
+		if c.Model == "mystery:free" && containsStr(c.Flags, "unverified") {
+			t.Fatalf("a judged model is no longer unverified: %+v", c.Flags)
+		}
 	}
 }
 

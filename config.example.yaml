@@ -42,8 +42,6 @@ rules:
   free_bonus: 0.10
   plan_bonus: 0.08
   promo_bonus_max: 0.05
-  new_model_days: 14
-  canary_percent: 5
   sticky_minutes: 30
 
 # Benchmark scores (0-100) override the price-based proxy. Use numbers from a

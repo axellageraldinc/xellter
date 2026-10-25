@@ -12,7 +12,6 @@ import (
 
 	"github.com/axellageraldinc/xellter/internal/config"
 	"github.com/axellageraldinc/xellter/internal/proxy"
-	"github.com/axellageraldinc/xellter/internal/rank"
 )
 
 func twoEqualModels(c *config.Config) {
@@ -45,21 +44,16 @@ func TestRoundRobinRotatesAndSessionsStick(t *testing.T) {
 	}
 }
 
-func TestCanarySendsTrafficToNewModelAndFallsBack(t *testing.T) {
-	e := setup(t, func(c *config.Config) { c.Rules.CanaryPercent = 100 })
-	// mark one model as brand new after the baseline
-	e.a.St.SetSeen("promo-d", time.Now().Unix())
-	e.a.Rt.Recompute(time.Now())
+// A model that fails falls back to the next one in the list.
+func TestAFailingModelFallsBackToTheNext(t *testing.T) {
+	e := setup(t, nil)
 	rk := e.a.Rt.Rankings()["babu/budget"]
-	if len(rk.Trial) != 1 || rk.Trial[0].Model != "promo-d" {
-		t.Fatalf("trial pool: %+v rejected: %+v", rk.Trial, rk.Rejected)
+	if len(rk.Candidates) < 2 {
+		t.Fatalf("the preset needs more than one candidate: %+v", rk)
 	}
-	r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "budget"))
-	if r.Header.Get("X-Xellter-Model") != "promo-d" {
-		t.Fatalf("canary should serve first, got %s", r.Header.Get("X-Xellter-Model"))
-	}
+	first := rk.Candidates[0].Model
 	e.f.chat = func(c call, n int) (int, string) {
-		if c.Model == "promo-d" {
+		if c.Model == first {
 			return 503, `{"error":{"message":"boom"}}`
 		}
 		return 0, ""
@@ -67,8 +61,8 @@ func TestCanarySendsTrafficToNewModelAndFallsBack(t *testing.T) {
 	e.a.Pool.Keys()[0].ResetState()
 	e.a.Pool.Keys()[1].ResetState()
 	r, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "budget"))
-	if r.StatusCode != 200 || r.Header.Get("X-Xellter-Model") == "promo-d" {
-		t.Fatalf("a failing canary must fall back to a proven model: %d %s %s", r.StatusCode, r.Header.Get("X-Xellter-Model"), body)
+	if r.StatusCode != 200 || r.Header.Get("X-Xellter-Model") == first {
+		t.Fatalf("a failing model must fall back: %d %s %s", r.StatusCode, r.Header.Get("X-Xellter-Model"), body)
 	}
 }
 
@@ -393,7 +387,7 @@ func TestLeaderboardScoresReplaceThePriceGuess(t *testing.T) {
 	}
 	rk := e.a.Rt.Rankings()["babu/text"]
 	found := map[string]string{}
-	for _, c := range append(append([]rank.Candidate{}, rk.Candidates...), rk.Trial...) {
+	for _, c := range rk.Candidates {
 		found[c.Model] = c.BenchSource
 	}
 	if !strings.HasPrefix(found["pro-c"], "arena 2026-10-22") || !strings.HasPrefix(found["cheap-b"], "arena") {

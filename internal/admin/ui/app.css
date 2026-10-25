@@ -65,7 +65,6 @@ details.adv > summary::before { content: "▸ "; } details.adv[open] > summary::
 .model-line { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; padding: .1rem 0; }
 /* the position of a model in the list, as a small fixed-width number */
 .model-rank { display: inline-flex; align-items: center; justify-content: center; width: 1.35rem; height: 1.35rem; border-radius: 5px; background: var(--tblr-secondary-lt); color: var(--tblr-secondary); font-size: .72rem; font-weight: 600; flex: none; }
-.model-rank.trial { background: var(--tblr-warning-lt); color: var(--tblr-warning); font-style: italic; }
 /* the "Why this order?" dialog */
 .rank-h { font-size: .95rem; font-weight: 650; margin-bottom: .1rem; }
 .rank-table { font-size: .82rem; }

@@ -142,7 +142,6 @@ func explain(args []string) error {
 	if err := a.Cat.Refresh(ctx); err != nil {
 		return fmt.Errorf("catalog: %w", err)
 	}
-	a.Rt.MarkSeen(a.Cat.Snapshot())
 	if time.Since(a.BenchFetched()) > 24*time.Hour {
 		if err := a.SyncBench(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "leaderboard sync failed:", err)
@@ -162,10 +161,7 @@ func explain(args []string) error {
 		for i, c := range r.Candidates {
 			fmt.Printf("%2d. %-34s list Rp%-9.2f quality %.2f (%s)  %s\n", i+1, c.Model, c.ListCost, c.Components["benchmark"], c.BenchSource, c.Reason)
 		}
-		for _, c := range r.Trial {
-			fmt.Printf(" T  %-34s %s\n", c.Model, c.Reason)
-		}
-		if len(r.Candidates)+len(r.Trial) == 0 {
+		if len(r.Candidates) == 0 {
 			fmt.Println("    (no eligible model)")
 		}
 		for _, x := range r.Rejected {

@@ -32,7 +32,6 @@ type presetRow struct {
 	Now         string   `json:"now"`
 	Flags       []string `json:"flags"`
 	Next        []string `json:"next"`
-	Trial       int      `json:"trial"`
 	Models      int      `json:"models"` // distinct models this client's keys can call for the preset
 }
 
@@ -114,7 +113,7 @@ func (h *Handler) presetRows(cl *config.Client) []presetRow {
 		p := cl.Presets[n]
 		r := presetRow{Name: n, Description: p.Description, Modality: p.Modality}
 		if x := rk[rank.Key(cl.Name, n)]; x != nil {
-			r.Trial, r.Models = len(x.Trial), x.Callable
+			r.Models = x.Callable
 			for i, c := range x.Candidates {
 				switch {
 				case i == 0:

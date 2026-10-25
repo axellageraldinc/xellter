@@ -145,7 +145,7 @@ func (j *Judge) Run(ctx context.Context) {
 	}
 }
 
-// RunDue evaluates up to max models that have no recent score; trial models go first.
+// RunDue evaluates up to max models that have no recent score.
 func (j *Judge) RunDue(ctx context.Context, max int) (int, error) {
 	j.mu.Lock()
 	if j.running {
@@ -167,24 +167,18 @@ func (j *Judge) RunDue(ctx context.Context, max int) (int, error) {
 		names = append(names, n)
 	}
 	sort.Strings(names)
-	for _, pass := range []string{"trial", "main"} {
-		for _, n := range names {
-			rk := rks[n]
-			if rk.Modality != "chat" {
+	for _, n := range names {
+		rk := rks[n]
+		if rk.Modality != "chat" {
+			continue
+		}
+		for _, c := range rk.Candidates {
+			if s, ok := scores[c.Model]; ok && j.Now().Sub(s.TS) < every {
 				continue
 			}
-			list := rk.Candidates
-			if pass == "trial" {
-				list = rk.Trial
-			}
-			for _, c := range list {
-				if s, ok := scores[c.Model]; ok && j.Now().Sub(s.TS) < every {
-					continue
-				}
-				if !seen[c.Model] {
-					seen[c.Model] = true
-					todo = append(todo, c.Model)
-				}
+			if !seen[c.Model] {
+				seen[c.Model] = true
+				todo = append(todo, c.Model)
 			}
 		}
 	}

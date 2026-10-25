@@ -138,10 +138,6 @@ type Rules struct {
 	PromoBonusMax        float64 `yaml:"promo_bonus_max" json:"promo_bonus_max"`
 	PromoMinRemainingHrs float64 `yaml:"promo_min_remaining_hours" json:"promo_min_remaining_hours"`
 	UpcomingLookaheadHrs float64 `yaml:"upcoming_lookahead_hours" json:"upcoming_lookahead_hours"`
-	NewModelDays         int     `yaml:"new_model_days" json:"new_model_days"`
-	CanaryPercent        float64 `yaml:"canary_percent" json:"canary_percent"`
-	CanaryMinRequests    int     `yaml:"canary_min_requests" json:"canary_min_requests"`
-	CanaryMinSuccess     float64 `yaml:"canary_min_success" json:"canary_min_success"`
 	AvoidSunsetDays      int     `yaml:"avoid_sunset_days" json:"avoid_sunset_days"`
 	StickyMinutes        int     `yaml:"sticky_minutes" json:"sticky_minutes"`
 	StatsWindowHours     int     `yaml:"stats_window_hours" json:"stats_window_hours"`
@@ -202,8 +198,7 @@ func Default() *Config {
 		Kenari: Kenari{BaseURL: "https://kenari.id", SyncMinutes: 10, UserAgent: "xellter/1.0", FirstByteSecs: 60, MusicTimeoutSec: 900, AccountKeyEnv: "KENARI_ACCOUNT_KEY"},
 		Rules: Rules{
 			FreeBonus: 0.10, PlanBonus: 0.08, PlanCostFactor: 0.3, PromoBonusMax: 0.05, PromoMinRemainingHrs: 12, UpcomingLookaheadHrs: 24,
-			NewModelDays: 14, CanaryPercent: 5, CanaryMinRequests: 20, CanaryMinSuccess: 0.9, AvoidSunsetDays: 3,
-			StickyMinutes: 30, StatsWindowHours: 24,
+			AvoidSunsetDays: 3, StickyMinutes: 30, StatsWindowHours: 24,
 		},
 		Resilience: Resilience{MaxAttempts: 4, CooldownBaseSec: 30, CooldownMaxSec: 900, BreakerFailures: 5, BreakerOpenSec: 120},
 		JEV: JEV{
@@ -256,18 +251,18 @@ func DefaultPreset(modality string) Preset {
 	switch modality {
 	case "chat":
 		return Preset{Description: "Text and chat. Picks the best model that is cheap enough.", Modality: "chat", Mode: "auto", Require: Require{ToolCall: true},
-			MinQuality: 0.50, MaxCandidates: 4, Strategy: "round_robin", RRBand: 0.04, Weights: Weights{Cost: 25, Benchmark: 35, JEV: 20, Reliability: 15, Context: 5},
+			MinQuality: 0.50, MaxCandidates: 5, Strategy: "round_robin", RRBand: 0.04, Weights: Weights{Cost: 25, Benchmark: 35, JEV: 20, Reliability: 15, Context: 5},
 			Cost: CostProfile{InputTokens: 4000, OutputTokens: 600, CachedRatio: 0.7}}
 	case "images":
-		return Preset{Description: "Image generation, free and cheap models first.", Modality: "images", Mode: "auto", MaxCandidates: 4, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Images: 1}}
+		return Preset{Description: "Image generation, free and cheap models first.", Modality: "images", Mode: "auto", MaxCandidates: 5, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Images: 1}}
 	case "videos":
-		return Preset{Description: "Video generation, cheapest first.", Modality: "videos", Mode: "auto", MaxCandidates: 3, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Seconds: 5, Variant: "720p"}}
+		return Preset{Description: "Video generation, cheapest first.", Modality: "videos", Mode: "auto", MaxCandidates: 5, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Seconds: 5, Variant: "720p"}}
 	case "audio_speech":
-		return Preset{Description: "Text to speech, cheapest first.", Modality: "audio_speech", Mode: "auto", MaxCandidates: 3, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Chars: 1000}}
+		return Preset{Description: "Text to speech, cheapest first.", Modality: "audio_speech", Mode: "auto", MaxCandidates: 5, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Chars: 1000}}
 	case "audio_transcription":
-		return Preset{Description: "Speech to text, cheapest first.", Modality: "audio_transcription", Mode: "auto", MaxCandidates: 3, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Seconds: 60}}
+		return Preset{Description: "Speech to text, cheapest first.", Modality: "audio_transcription", Mode: "auto", MaxCandidates: 5, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Seconds: 60}}
 	}
-	return Preset{Description: "Music generation, cheapest first.", Modality: "music", Mode: "auto", MaxCandidates: 2, Strategy: "priority", RRBand: 0.03, Weights: media}
+	return Preset{Description: "Music generation, cheapest first.", Modality: "music", Mode: "auto", MaxCandidates: 5, Strategy: "priority", RRBand: 0.03, Weights: media}
 }
 
 // DefaultPresets returns every generated preset keyed by name (used by tests and as a template).
@@ -401,7 +396,7 @@ func (c *Config) fillDefaults() {
 				s.Strategy = "round_robin"
 			}
 			if s.MaxCandidates <= 0 {
-				s.MaxCandidates = 4
+				s.MaxCandidates = 5
 			}
 			if s.RRBand < 0 {
 				s.RRBand = 0
@@ -485,9 +480,6 @@ func (c *Config) Validate() error {
 	}
 	if c.Kenari.AccountKeyEnv != "" && !envRe.MatchString(c.Kenari.AccountKeyEnv) {
 		bad("kenari.account_key_env must look like KENARI_ACCOUNT_KEY")
-	}
-	if c.Rules.CanaryPercent < 0 || c.Rules.CanaryPercent > 100 {
-		bad("rules.canary_percent must be 0..100")
 	}
 	for _, m := range c.JEV.Judges {
 		if strings.TrimSpace(m) == "" {

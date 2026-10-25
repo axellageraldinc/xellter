@@ -321,7 +321,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 		}
 		res := s.send(r, at, payload, body.ctype, isStream, cfg)
 		row := store.Request{TS: start.UnixMilli(), Client: cl.Name, Preset: plan.Preset, Requested: plan.Requested, Model: at.Model.ID, Upstream: at.Key.Name,
-			Path: r.URL.Path, Stream: isStream, Attempt: i + 1, Canary: at.Canary, RTKSaved: rtkSaved}
+			Path: r.URL.Path, Stream: isStream, Attempt: i + 1, RTKSaved: rtkSaved}
 		if res.err == nil && res.resp.StatusCode < 300 {
 			s.relay(w, r, cl, plan, at, res, row, body, isStream, start, snap)
 			return

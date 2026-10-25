@@ -22,9 +22,7 @@ type Inputs struct {
 	Snap  *catalog.Snapshot
 	Pool  *upstream.Pool
 	Stats map[string]store.ModelStat // recent window
-	Life  map[string]store.ModelStat // all time
 	JEV   map[string]store.JEVScore
-	Seen  map[string]time.Time
 	Bench map[string]store.BenchRow // leaderboard scores mapped onto catalog ids
 	Now   time.Time
 }
@@ -57,7 +55,6 @@ type Ranking struct {
 	Mode        string      `json:"mode"`
 	Candidates  []Candidate `json:"candidates"` // ordered main list
 	Front       int         `json:"front"`      // first Front candidates are tied (round-robin group)
-	Trial       []Candidate `json:"trial"`      // canary pool (new, unproven)
 	Rejected    []Rejected  `json:"rejected"`
 	Unavailable []string    `json:"unavailable"` // right modality, but no enabled key may call them
 	Models      []string    `json:"models"`      // every model of this kind the client's keys can call, before the preset's own filters
@@ -82,7 +79,6 @@ func All(in Inputs) map[string]*Ranking {
 }
 
 type scored struct {
-	trial     bool // new or unverified and not yet proven: only receives canary traffic
 	m         *catalog.Model
 	cost      float64
 	costKnown bool
@@ -179,32 +175,26 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 	}
 	assignBench(in, pool, sh)
 
-	// Trial = models we have no evidence for yet. A model is on trial when it is new, or (text only) when it has
-	// neither a configured benchmark, nor a price to estimate from, nor a JEV score: for such a model a "free"
-	// label says nothing about quality, so it must not lead any preset until it is judged or has proven itself.
-	for _, s := range pool {
-		m := s.m
-		isNew := false
-		if t, ok := in.Seen[m.ID]; ok && t.Unix() > 0 && in.Now.Sub(t) < time.Duration(rules.NewModelDays)*24*time.Hour {
-			isNew = true
-		}
-		life := in.Life[m.ID]
-		proven := life.N >= rules.CanaryMinRequests && float64(life.OK)/math.Max(float64(life.N), 1) >= rules.CanaryMinSuccess
-		_, judged := in.JEV[m.ID]
-		unverified := sh.Modality == "chat" && s.benchSrc == "unknown" && !judged
-		s.trial = (isNew || unverified) && !proven
-		if unverified {
-			s.flags = append(s.flags, "unverified")
+	// A text model with no quality evidence at all (no configured benchmark, no
+	// leaderboard score, no price to estimate from, no JEV score) gets the
+	// "unverified" flag. It no longer keeps the model out of the list: the
+	// score decides, and the flag only says that the quality behind it is a
+	// guess.
+	if sh.Modality == "chat" {
+		for _, s := range pool {
+			if _, judged := in.JEV[s.m.ID]; !judged && s.benchSrc == "unknown" {
+				s.flags = append(s.flags, "unverified")
+			}
 		}
 	}
 
 	// cost score: free = 1; a paid model scores 1/(1+ln(cost/reference)) where the reference is the cheapest paid
-	// model that is not on trial: equal price 1.0, 13% dearer 0.89, twice 0.59, ten times 0.30. Smooth, so small
+	// model in the pool: equal price 1.0, 13% dearer 0.89, twice 0.59, ten times 0.30. Smooth, so small
 	// price differences count (a log scale over the whole catalog made them invisible) and a very expensive model
 	// does not collapse to exactly 0.
 	cheapest := math.Inf(1)
 	for _, s := range pool {
-		if !s.trial && s.costKnown && s.cost > 0 {
+		if s.costKnown && s.cost > 0 {
 			cheapest = math.Min(cheapest, s.cost)
 		}
 	}
@@ -241,7 +231,7 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 	// The context size is a soft preference only (there is no context gate): a
 	// bigger context scores a little higher, measured against a fixed baseline.
 	const minCtx = 8000.0
-	var main, trial []Candidate
+	var main []Candidate
 	for _, s := range pool {
 		m := s.m
 		comp := map[string]float64{"cost": costScore(s), "benchmark": s.bench}
@@ -321,14 +311,6 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 		switch {
 		case hasJEV && jev.Score < in.Cfg.JEV.PassThreshold && in.Cfg.JEV.Enabled:
 			reject(m.ID, fmt.Sprintf("JEV score %.2f below threshold %.2f", jev.Score, in.Cfg.JEV.PassThreshold))
-		case s.trial:
-			label, note := "new, on trial", "trial candidate: receives canary traffic until proven"
-			if containsStr(flags, "unverified") {
-				label, note = "unverified, on trial", "no quality evidence yet: judged by JEV or proven by traffic before it can lead"
-			}
-			c.Flags = append(c.Flags, label)
-			c.Reason = describe(c, note)
-			trial = append(trial, c)
 		case quality < sh.MinQuality:
 			reject(m.ID, fmt.Sprintf("quality %.2f below minimum %.2f", quality, sh.MinQuality))
 		default:
@@ -357,20 +339,6 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 	}
 	if len(main) == 0 {
 		r.Front = 0
-	}
-	// canary guard: a trial model may not cost more than 3x what the leader would cost at list price
-	// (the floor of Rp0.7 per reference request keeps canaries possible when the leader is free)
-	if len(main) > 0 {
-		ref := math.Max(main[0].ListCost, 0.7)
-		for _, c := range trial {
-			if c.CostIDR == 0 || c.CostIDR <= ref*3 {
-				r.Trial = append(r.Trial, c)
-			} else {
-				reject(c.Model, "trial costs more than 3x the leader")
-			}
-		}
-	} else {
-		r.Trial = trial
 	}
 	sort.Slice(r.Rejected, func(i, j int) bool { return r.Rejected[i].Model < r.Rejected[j].Model })
 	return r
@@ -472,15 +440,6 @@ func describe(c Candidate, extra string) string {
 		s += " " + extra
 	}
 	return s
-}
-
-func containsStr(l []string, v string) bool {
-	for _, x := range l {
-		if x == v {
-			return true
-		}
-	}
-	return false
 }
 
 func clamp(v float64) float64  { return math.Max(0, math.Min(1, v)) }

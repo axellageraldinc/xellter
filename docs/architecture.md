@@ -13,7 +13,7 @@ admin panel ──▶ app.Apply(config) ──▶ hot reload of pool, router, pr
 2. Read the body (bounded), find `model` (JSON or multipart). Check the client's daily budget.
 3. `route.Plan` turns the requested name into at most `max_attempts` attempts (model × key):
    - a name in the client's own `presets` -> that client's ranking of that preset (see below); any other real model name is only allowed through the client's `passthrough` globs;
-   - order: sticky (same session -> same model/key), canary (new model, `canary_percent`), the round-robin front group rotated, the rest by score;
+   - order: sticky (same session -> same model/key), the round-robin front group rotated, the rest by score;
    - for each model, the client's usable keys are ordered: sticky key, then plan-covered/free, then paid; equal keys rotate. A client never uses another client's keys.
 4. RTK compresses tool outputs (chat only). For streamed chat completions `stream_options.include_usage` is injected.
 5. For each attempt: `Key.Reserve` (rpm, free quota) -> rewrite `model` -> send. First-byte timeout is enforced per request.
@@ -25,15 +25,15 @@ Per client and auto preset, for every catalog model of the preset's modality tha
 
 1. **Gates** (pass/fail): tool calling, vision, reasoning, not sunsetting within `avoid_sunset_days`, subscriber-only needs a plan, at least one of the client's keys may use it.
 2. **Components** (each 0..1):
-   - `cost`: price of a reference request (`cost_profile`; for text 4000 input tokens, 70% of them cache hits, 600 output tokens) from the live catalog: running promo and scheduled price changes included, cache discount applied, zero if the model is free, `plan_cost_factor` × list price if a plan that still has budget covers it. Score: free = 1, otherwise `1 / (1 + ln(cost / cheapest))` where the reference is the cheapest paid candidate that is not on trial (equal price 1.0, 13% dearer 0.89, twice 0.59, ten times 0.30).
+   - `cost`: price of a reference request (`cost_profile`; for text 4000 input tokens, 70% of them cache hits, 600 output tokens) from the live catalog: running promo and scheduled price changes included, cache discount applied, zero if the model is free, `plan_cost_factor` × list price if a plan that still has budget covers it. Score: free = 1, otherwise `1 / (1 + ln(cost / cheapest))` where the reference is the cheapest paid candidate (equal price 1.0, 13% dearer 0.89, twice 0.59, ten times 0.30).
    - `benchmark`: your configured score, else the Arena leaderboard score (a win probability against the arena's median model, taken from the lower end of the 95% interval so thinly measured models must prove themselves; see `internal/bench`), else a price-percentile estimate, else 0.5. Previously: configured score/100, else a price-percentile proxy computed from *undiscounted* prices (a promo never makes a model look weaker; a `:free` twin uses its paid sibling), else 0.5.
    - `jev`: stored System One score; unscored models get 0.4 while JEV is enabled.
    - `reliability`: success rate and latency vs the median over `stats_window_hours` (0.6 until 5 samples).
    - `context`: log scale between a fixed baseline of 8000 tokens and 16× that (a soft preference; there is no context gate).
 3. **Score** = weighted average of the components with weight > 0 (per-preset `weights`), plus bonuses: free, plan-covered, promo (scaled by percent off, only when ≥ `promo_min_remaining_hours` remain). The bonuses are multiplied by how much the preset cares about cost (its cost weight share ÷ 0.30, between 0.25 and 2): Cheapest doubles them, Balanced keeps them, Best quality cuts them to a third, so "free" cannot outvote quality when quality is the goal.
 4. **Quality gate**: weighted average of benchmark, jev and context must reach `min_quality`; a JEV score below `jev.pass_threshold` rejects the model.
-5. **Trial**: a text model with no evidence of quality (no configured benchmark, no price to estimate from, no JEV score) or first seen within `new_model_days`, and that has not yet proven itself (`canary_min_requests` at `canary_min_success`), is excluded from the main list and only receives canary traffic; it may not cost more than 3× the leader's list price (floor Rp0.7).
-6. The top `max_candidates` form the main list; those within `rr_band` of the leader are the round-robin front group (`strategy: round_robin`).
+5. **Unverified models are flagged, not held back.** A text model with no evidence of quality (no configured benchmark, no price to estimate from, no JEV score) gets the "unverified" flag, so the panel says its quality is a guess. It still competes on its score (ADR 0013).
+6. The top `max_candidates` (5 by default) form the main list; those within `rr_band` of the leader are the round-robin front group (`strategy: round_robin`).
 
 Rankings are recomputed every 30 s, after each catalog sync and after each config change, and cached; requests only read them. Every candidate carries its components, bonuses, flags and a reason string, and rejected models carry the reason (shown in the panel).
 
@@ -52,7 +52,7 @@ kenari rejects unknown or disallowed models with `400 … Allowed models: …`, 
 |---|---|
 | config (clients, presets, rules, benchmarks) | `xellter.yaml` (0600), history in `data/config-history/` |
 | upstream key values | `data/secrets.env` (0600) |
-| request log, JEV scores, first-seen dates, sessions, video job -> key | `data/xellter.db` (SQLite, WAL) |
+| request log, JEV scores, sessions, video job -> key | `data/xellter.db` (SQLite, WAL) |
 | last good catalog | `data/catalog.json` (used when kenari is unreachable) |
 | admin login | `data/auth-record.json` (0600), `login-state.json`, `recovery-used.json` |
 

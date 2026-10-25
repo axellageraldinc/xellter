@@ -21,6 +21,6 @@ The three objectives were hand-picked weights over a quality estimate that, for 
 - Validation harness: `xellter explain` lists list price, quality and score per model; we check on the real catalog that each objective's leaders are not dominated (cheaper and better elsewhere) and that Best quality follows the leaderboard.
 
 ## Consequences
-- About 49 of ~76 text, 10 of 20 image and 3 of 8 video models are matched today; the rest use the price estimate and, for text, start on trial until judged.
+- About 49 of ~76 text, 10 of 20 image and 3 of 8 video models are matched today; the rest use the price estimate. (Since ADR 0013 they all compete on their score; a text model with no evidence at all is flagged "unverified".)
 - If the leaderboard cannot be downloaded the stored copy stays in use; with no copy the price estimate applies.
 - Lower-bound scoring means a brand-new model with few votes scores low until it is measured.

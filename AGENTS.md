@@ -18,8 +18,8 @@ internal/config    YAML schema, defaults, validation, history, secrets file
 internal/catalog   kenari catalog/price/promo/plan sync -> immutable Snapshot
 internal/store     SQLite (modernc, no CGO): request log, stats, sessions, JEV scores
 internal/upstream  per-key limiter: rpm, free quota, plan ledger, cooldown, breaker, allow list
-internal/rank      PURE ranking engine: gates -> components -> score -> trial/main lists
-internal/route     attempts = model x key, round-robin, stickiness, canary
+internal/rank      PURE ranking engine: gates -> components -> score -> main list
+internal/route     attempts = model x key, round-robin, stickiness
 internal/proxy     data plane: auth, body rewrite, streaming relay, usage accounting
 internal/rtk       tool-output compression filters
 internal/jev       System One quality judge (budget-capped)

@@ -18,7 +18,7 @@
 
 ## Addendum: scoring accuracy with unrestricted keys
 Once the owner lifted the model limits of the kenari keys, a client could call 70+ text models and three flaws showed up: unverified free models led every objective, including Best quality (free/plan bonuses were constant, and unknown quality scored a generous 0.5); the ratio cost score was too steep (expensive plan models fell to 0.00); and a log scale would have been too flat. Decisions:
-- Text models without any quality evidence (no configured benchmark, no estimable price, no JEV score) start **on trial** (canary traffic, judged by JEV) and cannot lead until judged or proven by traffic.
-- Cost score `1/(1+ln(cost/cheapest non-trial paid candidate))`.
+- Text models without any quality evidence (no configured benchmark, no estimable price, no JEV score) start **on trial** (canary traffic, judged by JEV) and cannot lead until judged or proven by traffic. *Superseded by ADR 0013: the trial pool is gone; such a model is flagged "unverified" and competes on its score.*
+- Cost score `1/(1+ln(cost/cheapest non-trial paid candidate))`. *Since ADR 0013 the reference is the cheapest paid candidate.*
 - Free, plan and promo bonuses scale with the preset's cost emphasis (0.25x to 2x).
 - Best quality weights became cost 5 / benchmark 40 / JEV 30 / reliability 15 / context 10.

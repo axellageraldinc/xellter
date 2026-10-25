@@ -44,7 +44,6 @@ func TestValidationCatchesMistakes(t *testing.T) {
 		"bad modality":             "clients:\n  - name: x\n    presets:\n      p: {modality: telepathy, mode: auto, strategy: priority, weights: {cost: 1}}\n",
 		"negative weight":          "clients:\n  - name: x\n    presets:\n      p: {modality: chat, mode: auto, strategy: priority, weights: {cost: -1}}\n",
 		"bad preset name":          "clients:\n  - name: x\n    presets:\n      'a b': {modality: chat, mode: auto, strategy: priority, weights: {cost: 1}}\n",
-		"canary over 100":          "rules: {canary_percent: 150}\n",
 		"bad account key env":      "kenari: {account_key_env: not-an-env}\n",
 	}
 	for name, y := range cases {
@@ -99,7 +98,7 @@ func TestSaveKeepsHistoryAndNeverStoresSecrets(t *testing.T) {
 	c.Server.DataDir = filepath.Join(dir, "data")
 	c.Clients = []Client{{Name: "babu", Enabled: true, Keys: []Upstream{{Name: "main", KeyEnv: "KENARI_KEY_BABU_MAIN"}}, Presets: DefaultPresets()}}
 	for i := 0; i < 3; i++ {
-		c.Rules.CanaryPercent = float64(i)
+		c.Rules.StickyMinutes = i
 		if err := Save(file, c); err != nil {
 			t.Fatal(err)
 		}

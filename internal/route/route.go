@@ -1,11 +1,10 @@
 // Package route turns a request (client + model name) into an ordered list of
 // attempts (model x upstream key), applying preset rankings, round-robin
-// rotation, session stickiness and canary traffic.
+// rotation and session stickiness.
 package route
 
 import (
 	"fmt"
-	"math/rand"
 	"sort"
 	"strings"
 	"sync"
@@ -21,9 +20,8 @@ import (
 
 // Attempt is one try: a concrete model on a concrete key.
 type Attempt struct {
-	Model  *catalog.Model
-	Key    *upstream.Key
-	Canary bool
+	Model *catalog.Model
+	Key   *upstream.Key
 }
 
 // Error is a routing failure with the HTTP status to return.
@@ -52,7 +50,6 @@ type Router struct {
 	pool     *upstream.Pool
 	st       *store.Store
 	rankings atomic.Pointer[map[string]*rank.Ranking]
-	rnd      func() float64
 
 	smu    sync.Mutex
 	sticky map[string]stickyEntry
@@ -68,7 +65,7 @@ type stickyEntry struct {
 
 // New builds a router.
 func New(cfg *config.Config, cat *catalog.Catalog, pool *upstream.Pool, st *store.Store) *Router {
-	r := &Router{cat: cat, pool: pool, st: st, rnd: rand.Float64, sticky: map[string]stickyEntry{}, rr: map[string]uint64{}}
+	r := &Router{cat: cat, pool: pool, st: st, sticky: map[string]stickyEntry{}, rr: map[string]uint64{}}
 	r.cfg.Store(cfg)
 	return r
 }
@@ -77,44 +74,6 @@ func New(cfg *config.Config, cat *catalog.Catalog, pool *upstream.Pool, st *stor
 func (r *Router) SetConfig(c *config.Config) {
 	r.cfg.Store(c)
 	r.Recompute(time.Now())
-}
-
-// SetRand overrides the random source (tests).
-func (r *Router) SetRand(f func() float64) { r.rnd = f }
-
-// MarkSeen records first-seen dates for newly appeared catalog models.
-func (r *Router) MarkSeen(snap *catalog.Snapshot) {
-	if r.st == nil {
-		return
-	}
-	seen, err := r.st.Seen()
-	if err != nil {
-		return
-	}
-	first := len(seen) == 0
-	added := map[string]time.Time{}
-	for _, c := range snap.Changes {
-		if c.Kind == "added" {
-			added[c.Model] = c.At
-		}
-	}
-	var fresh, base []string
-	for _, id := range snap.IDs() {
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		if t, ok := added[id]; ok && first {
-			r.st.MarkSeen([]string{id}, t.Unix())
-			continue
-		}
-		if first {
-			base = append(base, id)
-		} else {
-			fresh = append(fresh, id)
-		}
-	}
-	r.st.MarkSeen(base, 0)
-	r.st.MarkSeen(fresh, time.Now().Unix())
 }
 
 // Recompute rebuilds every preset ranking from current state.
@@ -127,9 +86,7 @@ func (r *Router) Recompute(now time.Time) {
 	in := rank.Inputs{Cfg: cfg, Snap: snap, Pool: r.pool, Now: now}
 	if r.st != nil {
 		in.Stats, _ = r.st.Stats(now.Add(-time.Duration(cfg.Rules.StatsWindowHours) * time.Hour))
-		in.Life, _ = r.st.LifetimeStats()
 		in.JEV, _ = r.st.JEVScores()
-		in.Seen, _ = r.st.Seen()
 		in.Bench, _ = r.st.Bench()
 	}
 	m := rank.All(in)
@@ -180,7 +137,7 @@ func (r *Router) Plan(cl *config.Client, requested, session, path string, now ti
 		}
 		p.Preset, p.Modality = requested, sh.Modality
 		rk := r.Rankings()[rank.Key(cl.Name, requested)]
-		if rk == nil || len(rk.Candidates)+len(rk.Trial) == 0 {
+		if rk == nil || len(rk.Candidates) == 0 {
 			return nil, &Error{503, "no_candidates", fmt.Sprintf("no eligible model for %q right now", requested), 30 * time.Second}
 		}
 		order = r.order(cfg, cl, rk, sh, session, now)
@@ -208,7 +165,7 @@ func (r *Router) Plan(cl *config.Client, requested, session, path string, now ti
 			if len(p.Attempts) >= max || perModel >= 2 {
 				break
 			}
-			p.Attempts = append(p.Attempts, Attempt{Model: m, Key: k, Canary: it.canary})
+			p.Attempts = append(p.Attempts, Attempt{Model: m, Key: k})
 			perModel++
 		}
 		if len(p.Attempts) >= max {
@@ -222,19 +179,18 @@ func (r *Router) Plan(cl *config.Client, requested, session, path string, now ti
 }
 
 type orderItem struct {
-	model  *catalog.Model
-	canary bool
-	key    string // preferred key (sticky)
+	model *catalog.Model
+	key   string // preferred key (sticky)
 }
 
 func (r *Router) order(cfg *config.Config, cl *config.Client, rk *rank.Ranking, sh config.Preset, session string, now time.Time) []orderItem {
 	snap := r.cat.Snapshot()
 	var out []orderItem
 	seen := map[string]bool{}
-	add := func(id string, canary bool, key string) {
+	add := func(id, key string) {
 		if m := snap.Models[id]; m != nil && !seen[id] {
 			seen[id] = true
-			out = append(out, orderItem{model: m, canary: canary, key: key})
+			out = append(out, orderItem{model: m, key: key})
 		}
 	}
 	// stickiness keeps one session on one model/key so provider caches stay warm
@@ -242,14 +198,10 @@ func (r *Router) order(cfg *config.Config, cl *config.Client, rk *rank.Ranking, 
 		if e, ok := r.stickyGet(cl.Name+"|"+rk.Preset+"|"+session, now); ok {
 			for _, c := range rk.Candidates {
 				if c.Model == e.model {
-					add(e.model, false, e.key)
+					add(e.model, e.key)
 				}
 			}
 		}
-	}
-	if len(rk.Trial) > 0 && cfg.Rules.CanaryPercent > 0 && r.rnd()*100 < cfg.Rules.CanaryPercent {
-		t := rk.Trial[int(r.rotation(rk.Client+"/"+rk.Preset+"/trial"))%len(rk.Trial)]
-		add(t.Model, true, "")
 	}
 	front := rk.Front
 	if front > len(rk.Candidates) {
@@ -258,16 +210,11 @@ func (r *Router) order(cfg *config.Config, cl *config.Client, rk *rank.Ranking, 
 	if front > 1 {
 		off := int(r.rotation(rk.Client+"/"+rk.Preset) % uint64(front))
 		for i := 0; i < front; i++ {
-			add(rk.Candidates[(i+off)%front].Model, false, "")
+			add(rk.Candidates[(i+off)%front].Model, "")
 		}
 	}
 	for _, c := range rk.Candidates {
-		add(c.Model, false, "")
-	}
-	if len(rk.Candidates) == 0 { // only trial models exist: use them
-		for _, c := range rk.Trial {
-			add(c.Model, false, "")
-		}
+		add(c.Model, "")
 	}
 	return out
 }

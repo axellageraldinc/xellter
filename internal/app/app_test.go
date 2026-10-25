@@ -199,7 +199,6 @@ func setup(t testing.TB, mutate func(*config.Config)) *env {
 	cfg.Server.SecretsFile = filepath.Join(cfg.Server.DataDir, "secrets.env")
 	cfg.Server.AuthRecord = filepath.Join(cfg.Server.DataDir, "auth.json")
 	cfg.Kenari.BaseURL = f.srv.URL
-	cfg.Rules.CanaryPercent = 0
 	babuKeys := []config.Upstream{
 		{Name: "plan", KeyEnv: "KEY_PLAN"},
 		{Name: "topup", KeyEnv: "KEY_TOPUP"},
@@ -245,7 +244,6 @@ func setup(t testing.TB, mutate func(*config.Config)) *env {
 	if err := a.Cat.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	a.Rt.MarkSeen(a.Cat.Snapshot())
 	a.Rt.Recompute(time.Now())
 	px := httptest.NewServer(a.Px)
 	t.Cleanup(func() { px.Close(); a.Close() })
