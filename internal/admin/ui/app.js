@@ -114,31 +114,18 @@ function setHead({ crumbs, title, sub, actions }) {
 
 // ---------- forms: they edit S.cfg in place and mark it dirty ----------
 function markDirty() { S.dirty = true; $('#savebar').hidden = false; }
+// field renders one setting. Only the two kinds the panel needs are left:
+// a switch and a number. Everything else is a config-file edit (ADR 0012).
 function field(obj, key, o = {}) {
-  const type = o.type || 'text', label = o.label || key, set = v => { obj[key] = v; markDirty(); };
+  const type = o.type || 'num', label = o.label || key, set = v => { obj[key] = v; markDirty(); };
   let input;
   if (type === 'switch') {
     input = h('input', { class: 'form-check-input', type: 'checkbox', onchange: e => set(e.target.checked) }); input.checked = !!obj[key];
     return h('label', { class: 'form-check form-switch mb-2' }, input, h('span', { class: 'form-check-label' }, label), o.help && h('div', { class: 'form-hint' }, o.help));
   }
-  if (type === 'select') {
-    input = h('select', { class: 'form-select', onchange: e => set(o.cast ? o.cast(e.target.value) : e.target.value) }, o.opts.map(x => h('option', { value: Array.isArray(x) ? x[0] : x }, Array.isArray(x) ? x[1] : x)));
-    const cur = String(obj[key] ?? (Array.isArray(o.opts[0]) ? o.opts[0][0] : o.opts[0]));
-    if (![...input.options].some(x => x.value === cur)) input.append(h('option', { value: cur }, o.custom ? o.custom(cur) : cur));
-    input.value = cur;
-  } else if (type === 'num') {
-    input = h('input', { class: 'form-control', type: 'number', step: o.step || 'any', onchange: e => set(e.target.value === '' ? 0 : Number(e.target.value)), value: obj[key] ?? 0 });
-  } else if (type === 'list') {
-    input = h('input', { class: 'form-control', placeholder: o.ph || 'comma separated', onchange: e => set(e.target.value.split(',').map(s => s.trim()).filter(Boolean)), value: (obj[key] || []).join(', ') });
-  } else if (type === 'lines') {
-    input = h('textarea', { class: 'form-control', rows: 4, onchange: e => set(e.target.value.split('\n').map(s => s.trim()).filter(Boolean)) }); input.value = (obj[key] || []).join('\n');
-  } else {
-    input = h('input', { class: 'form-control', onchange: e => set(e.target.value), value: obj[key] ?? '', placeholder: o.ph, readonly: o.readonly });
-  }
+  input = h('input', { class: 'form-control', type: 'number', step: o.step || 'any', onchange: e => set(e.target.value === '' ? 0 : Number(e.target.value)), value: obj[key] ?? 0 });
   return h('div', { class: 'mb-3' }, h('label', { class: 'form-label' }, label), input, o.help && h('div', { class: 'form-hint' }, o.help));
 }
-const cols = (...kids) => h('div', { class: 'row g-3' }, kids.flat(Infinity).filter(Boolean).map(k => h('div', { class: 'col-md-6' }, k)));
-const advanced = (...kids) => h('details', { class: 'adv mt-2' }, h('summary', {}, 'Advanced'), h('div', { class: 'pt-2' }, kids));
 
 async function loadCfg() {
   const j = await api('config');
@@ -666,21 +653,15 @@ function judgeOrder(jev, j) {
 // ---------- Settings ----------
 views.settings = async function () {
   await ensureCfg();
-  const c = S.cfg, j = await api('jev'), R = c.rules, cat = await api('catalog'), bn = await api('bench');
-  const bench = Object.entries(c.benchmarks);
-  const L = { free_bonus: 'Preference for free models', plan_bonus: 'Preference for plan-covered models', plan_cost_factor: 'Cost of plan-covered models (0-1)', promo_bonus_max: 'Preference for discounted models',
-    promo_min_remaining_hours: 'Ignore discounts ending within (h)', upcoming_lookahead_hours: 'Look ahead for price changes (h)', stats_window_hours: 'Health window (h)' };
-  const RL = { max_attempts: 'Models to try per request', cooldown_base_s: 'First pause after an error (s)', cooldown_max_s: 'Longest pause (s)', breaker_failures: 'Errors in a row before a key is paused', breaker_open_s: 'How long a paused key rests (s)' };
+  const c = S.cfg, j = await api('jev'), R = c.rules;
   setHead({ title: 'Settings', sub: 'Sensible defaults are already set. Most of this you never need to touch.' });
   return h('div', { class: 'row row-cards' },
     h('div', { class: 'col-lg-6' }, card('Smart routing', h('div', {},
       field(R, 'sticky_minutes', { type: 'num', label: 'Keep one conversation on one model (minutes)', help: 'keeps the provider cache warm and answers consistent' }),
-      field(R, 'avoid_sunset_days', { type: 'num', label: 'Stop using models that end within (days)' }),
-      advanced(cols(['free_bonus', 'plan_bonus', 'plan_cost_factor', 'promo_bonus_max'].map(k => field(R, k, { type: 'num', step: '0.01', label: L[k] })), ['promo_min_remaining_hours', 'upcoming_lookahead_hours', 'stats_window_hours'].map(k => field(R, k, { type: 'num', label: L[k] }))))), { class: 'h-100' })),
+      field(R, 'avoid_sunset_days', { type: 'num', label: 'Stop using models that end within (days)' })), { class: 'h-100' })),
     h('div', { class: 'col-lg-6' }, card('Token saver (RTK)', h('div', {}, h('p', { class: 'text-secondary' }, 'Shrinks big tool output (git diff, grep, ls, logs) before it is sent and paid for. Your own messages are never touched.'),
       field(c.rtk, 'enabled', { type: 'switch', label: 'Token saver on' }),
-      h('div', { class: 'row' }, [['git_diff', 'git diff'], ['grep', 'grep results'], ['ls', 'directory listings'], ['logs', 'logs'], ['truncate', 'any very long output']].map(([k, l]) => h('div', { class: 'col-6' }, field(c.rtk, k, { type: 'switch', label: l })))),
-      advanced(cols(field(c.rtk, 'min_chars', { type: 'num', label: 'Only outputs longer than (characters)' }), field(c.rtk, 'max_chars', { type: 'num', label: 'Hard cap (characters)' }), field(c.rtk, 'diff_context', { type: 'num', label: 'Context lines kept around diff changes' })))), { class: 'h-100' })),
+      h('div', { class: 'row' }, [['git_diff', 'git diff'], ['grep', 'grep results'], ['ls', 'directory listings'], ['logs', 'logs'], ['truncate', 'any very long output']].map(([k, l]) => h('div', { class: 'col-6' }, field(c.rtk, k, { type: 'switch', label: l }))))), { class: 'h-100' })),
     h('div', { class: 'col-lg-6' }, card('Quality judge (JEV)', h('div', {}, h('p', { class: 'text-secondary' }, 'Candidate models answer a few test questions and kenari\'s System One model scores each answer. The score decides which models are good enough for a preset. Judging costs a little, so a daily limit applies.'),
       h('div', { class: 'mb-2' }, badge(j.enabled ? 'on' : 'off', j.enabled ? 'green' : 'secondary'), badge(`today Rp ${idr(j.spent_idr)} of Rp ${idr(j.budget_idr)}`)),
       field(c.jev, 'enabled', { type: 'switch', label: 'Judge models automatically' }),
@@ -691,22 +672,7 @@ views.settings = async function () {
       field(c.jev, 'daily_budget_idr', { type: 'num', label: 'Daily limit (Rp)' }),
       j.last && j.last.at && !String(j.last.at).startsWith('0001') ? h('div', { class: 'small mb-2 ' + (j.last.error ? 'text-danger' : 'text-secondary') }, `Last round ${ago(j.last.at)} ago: judged ${j.last.judged} model${j.last.judged === 1 ? '' : 's'}${j.last.error ? ' · ' + j.last.error : ''}`) : h('div', { class: 'small text-secondary mb-2' }, 'No round yet. The first one starts about a minute after you switch it on and save.'),
       btn('Judge pending models now', 'btn-outline-primary btn-sm mb-3', () => api('jev/run', { method: 'POST', body: {} }).then(() => { toast('Started in the background'); setTimeout(render, 8000); }, fail)),
-      Object.keys(j.scores || {}).length ? h('div', { class: 'table-responsive' }, h('table', { class: 'table table-sm' }, h('thead', {}, h('tr', {}, ['Model', 'Score', 'Judged'].map(x => h('th', {}, x)))), h('tbody', {}, Object.entries(j.scores).sort((a, b) => b[1].Score - a[1].Score).map(([m, s]) => h('tr', {}, h('td', { class: 'mono' }, m), h('td', {}, s.Score.toFixed(2)), h('td', { class: 'text-secondary' }, ago(s.TS) + ' ago')))))) : h('div', { class: 'text-secondary small' }, 'No scores yet.'),
-      advanced(cols(field(c.jev, 'pass_threshold', { type: 'num', step: '0.01', label: 'Minimum score to be used (0-1)' }), field(c.jev, 'every_hours', { type: 'num', label: 'Re-judge every (hours)' })), field(c.jev, 'prompts', { type: 'lines', label: 'Test questions (one per line)' }))), { class: 'h-100' })),
-    h('div', { class: 'col-lg-6' }, card('Quality scores', h('div', {},
-      h('p', { class: 'text-secondary' }, 'How good each model is. xellter downloads the public Arena leaderboard (human votes on text, image and video models) every day and matches it to your models. A score is the chance the model wins a vote against a typical model. Models the leaderboard does not list are estimated from price until you set a score or JEV judges them.'),
-      h('div', { class: 'mb-2' }, bn.models ? [badge(`${bn.models} models scored`, 'green'), badge(`leaderboard of ${bn.latest || '?'}`), badge(`downloaded ${zero(bn.fetched) ? 'never' : ago(bn.fetched) + ' ago'}`)] : badge('no leaderboard downloaded yet', 'orange')),
-      (bn.kinds || []).map(k => h('div', { class: 'd-flex justify-content-between small' }, h('span', {}, { chat: 'Text', images: 'Image', videos: 'Video' }[k.kind] || k.kind), h('span', { class: 'text-secondary' }, `${k.matched} of ${k.total} paid models matched`))),
-      btn('Update now', 'btn-outline-primary btn-sm my-3', () => api('bench/refresh', { method: 'POST', body: {} }).then(() => { toast('Leaderboards updated'); render(); }, fail), 'refresh'),
-      h('div', { class: 'subheader mt-2' }, 'Your own scores (override the leaderboard)'),
-      h('datalist', { id: 'models' }, cat.map(m => h('option', { value: m.id }))),
-      bench.length ? h('table', { class: 'table table-sm' }, h('tbody', {}, bench.map(([m, v]) => h('tr', {}, h('td', { class: 'mono' }, m), h('td', { style: 'width:110px' }, h('input', { class: 'form-control form-control-sm', type: 'number', min: 0, max: 100, value: v, onchange: e => { c.benchmarks[m] = Number(e.target.value); markDirty(); } })), h('td', { class: 'text-end' }, btn('Remove', 'btn-sm btn-ghost-danger', () => { delete c.benchmarks[m]; markDirty(); render(); })))))) : h('div', { class: 'text-secondary small mb-2' }, 'None set.'),
-      btn('Add a score', 'btn-outline-primary btn-sm', () => { const m = prompt('Model id (e.g. deepseek-v4-1-flash):'); if (m) { c.benchmarks[m.trim()] = 70; markDirty(); render(); } }, 'plus'),
-      advanced(h('div', { class: 'small text-secondary' }, 'Source: ' + bn.source + '. Not matched yet: ', (bn.kinds || []).flatMap(k => k.unmatched || []).slice(0, 40).join(', ') || 'none'))), { class: 'h-100' })),
-    h('div', { class: 'col-12' }, card('Reliability and access', h('div', {}, advanced(cols(
-      ['max_attempts', 'cooldown_base_s', 'cooldown_max_s', 'breaker_failures', 'breaker_open_s'].map(k => field(c.resilience, k, { type: 'num', label: RL[k] })),
-      field(c.server, 'admin_hosts', { type: 'list', label: 'Addresses allowed to open this panel' }), field(c.server, 'session_hours', { type: 'num', label: 'Stay signed in for (hours)' }), field(c.server, 'log_retention_days', { type: 'num', label: 'Keep the request log (days)' }), field(c.kenari, 'sync_minutes', { type: 'num', label: 'Refresh prices every (minutes)' }))),
-      btn('Sign out everywhere', 'btn-outline-secondary btn-sm mt-3', () => api('logout-all', { method: 'POST' }).then(() => location.reload(), fail), 'logout')))));
+      Object.keys(j.scores || {}).length ? h('div', { class: 'table-responsive' }, h('table', { class: 'table table-sm' }, h('thead', {}, h('tr', {}, ['Model', 'Score', 'Judged'].map(x => h('th', {}, x)))), h('tbody', {}, Object.entries(j.scores).sort((a, b) => b[1].Score - a[1].Score).map(([m, s]) => h('tr', {}, h('td', { class: 'mono' }, m), h('td', {}, s.Score.toFixed(2)), h('td', { class: 'text-secondary' }, ago(s.TS) + ' ago')))))) : h('div', { class: 'text-secondary small' }, 'No scores yet.')), { class: 'h-100' })));
 };
 
 // ---------- Config file ----------
@@ -748,6 +714,7 @@ $('#burger').onclick = () => $('#menu').classList.toggle('show');
 $('#save').onclick = async () => { S.saving = true; await saveCfg(); S.saving = false; };
 $('#discard').onclick = async () => { await loadCfg(); render(); };
 $('#logout').onclick = () => api('logout', { method: 'POST' }).then(showLogin, fail);
+$('#logoutall').onclick = () => { if (confirm('End every signed-in session?')) api('logout-all', { method: 'POST' }).then(() => location.reload(), fail); };
 $('#theme').onclick = () => { const t = document.documentElement.getAttribute('data-bs-theme') === 'dark' ? 'light' : 'dark'; document.documentElement.setAttribute('data-bs-theme', t); try { localStorage.setItem('xl-theme', t); } catch (e) { /* storage may be blocked */ } };
 $('#loginform').addEventListener('submit', async e => {
   e.preventDefault(); const f = new FormData(e.target); $('#loginerr').textContent = '';

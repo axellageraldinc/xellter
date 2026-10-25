@@ -137,3 +137,37 @@ func TestMatchAny(t *testing.T) {
 		t.Fatal("glob matching broken")
 	}
 }
+
+// The panel shows only a few knobs; the rest keep the backend default
+// (ADR 0014). A config that names only the visible knobs must still carry
+// the default for every hidden one, and a config that names a hidden knob
+// must keep that value.
+func TestHiddenKnobsKeepTheBackendDefault(t *testing.T) {
+	c, err := Parse([]byte("rules:\n  sticky_minutes: 5\nrtk:\n  enabled: false\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := Default()
+	if c.Rules.StickyMinutes != 5 {
+		t.Fatalf("the visible knob was not read: %d", c.Rules.StickyMinutes)
+	}
+	if c.Rules.FreeBonus != d.Rules.FreeBonus || c.Rules.PlanBonus != d.Rules.PlanBonus ||
+		c.Rules.PromoBonusMax != d.Rules.PromoBonusMax || c.Rules.PromoMinRemainingHrs != d.Rules.PromoMinRemainingHrs ||
+		c.Rules.UpcomingLookaheadHrs != d.Rules.UpcomingLookaheadHrs || c.Rules.PlanCostFactor != d.Rules.PlanCostFactor {
+		t.Fatalf("hidden rules did not keep the default: %+v", c.Rules)
+	}
+	if c.RTK.MinChars != d.RTK.MinChars || c.RTK.MaxChars != d.RTK.MaxChars || c.RTK.DiffContext != d.RTK.DiffContext {
+		t.Fatalf("hidden rtk knobs did not keep the default: %+v", c.RTK)
+	}
+	if c.JEV.PassThreshold != d.JEV.PassThreshold || c.JEV.EveryHours != d.JEV.EveryHours || len(c.JEV.Prompts) != len(d.JEV.Prompts) {
+		t.Fatalf("hidden jev knobs did not keep the default: %+v", c.JEV)
+	}
+	// an explicit hidden value still wins
+	c, err = Parse([]byte("rules:\n  free_bonus: 0.25\nrtk:\n  min_chars: 500\njev:\n  pass_threshold: 0.8\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Rules.FreeBonus != 0.25 || c.RTK.MinChars != 500 || c.JEV.PassThreshold != 0.8 {
+		t.Fatalf("an explicit hidden value was overwritten: %+v %+v %+v", c.Rules, c.RTK, c.JEV)
+	}
+}

@@ -64,19 +64,25 @@ In the panel, a preset card offers the objective buttons ("Optimise for"): Cheap
 ## rules
 `free_bonus` .10, `plan_bonus` .08, `plan_cost_factor` .3 (a plan-covered request counts for this share of its list price, because plan budget is finite), `promo_bonus_max` .05, `promo_min_remaining_hours` 12, `upcoming_lookahead_hours` 24, `avoid_sunset_days` 3, `sticky_minutes` 30, `stats_window_hours` 24.
 
+The panel shows only `sticky_minutes` and `avoid_sunset_days`; the other rules keep the backend default (ADR 0014).
+
 Sticky sessions are keyed by `X-Xellter-Session` (also `X-Session-Id`, `X-Claude-Code-Session-Id`), `prompt_cache_key`, `user`, or a hash of the first messages. Identical first messages therefore stay on one model.
 
 ## resilience
-`max_attempts` 4, `cooldown_base_s` 30, `cooldown_max_s` 900, `breaker_failures` 5, `breaker_open_s` 120.
+`max_attempts` 4, `cooldown_base_s` 30, `cooldown_max_s` 900, `breaker_failures` 5, `breaker_open_s` 120. Not in the panel (ADR 0014).
 
 ## jev
 `enabled` (false), `judges` (`[jev-1-13:free]`; an ordered list of System One models, reorder it in the panel), `daily_budget_idr` (1000), `every_hours` (24), `pass_threshold` (.6), `prompts` (golden prompts). Judging uses the dashboard's account key, never a client's key. Candidates answer the prompts, the judge answers one `noul` question per answer ("is this correct, complete, on-topic, right language?"); the average is stored per model.
+
+The panel shows `enabled`, `judges` and `daily_budget_idr`; `every_hours`, `pass_threshold` and `prompts` keep the backend default (ADR 0014).
 
 The first judge in `judges` scores every answer. When kenari cannot serve it (5xx or a timeout) the next one in the list takes over, and after the configured ones any other free System One judge is appended automatically, so a single outage never stops a round. The old single-judge key `model` is still read and moved to the front of `judges` on load; it is never written back.
 
 ## rtk
 `enabled`, `min_chars` (2000), `max_chars` (12000), `git_diff`, `grep`, `ls`, `logs`, `truncate`, `diff_context` (1). Per request: header `X-Xellter-RTK: off`.
 
+The panel shows `enabled` and the five filters; `min_chars`, `max_chars` and `diff_context` keep the backend default (ADR 0014).
+
 ## benchmarks{}
 Your own quality scores, 0..100, per model id. They override the leaderboard. Without one, xellter uses the Arena leaderboard (`internal/bench`, refreshed daily from the public Hugging Face dataset) and, for models it does not list, an estimate from price.
-`model-id: 0..100`. Replaces the price proxy for that model.
+`model-id: 0..100`. Replaces the price proxy for that model. Not in the panel (ADR 0014).

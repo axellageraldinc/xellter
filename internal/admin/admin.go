@@ -211,6 +211,11 @@ func (h *Handler) config(w http.ResponseWriter, r *http.Request) {
 		}
 		var next *config.Config
 		switch {
+		case in.YAML != nil && in.Config != nil:
+			// A GET /config response carries both. Sending it back unchanged would
+			// apply the old yaml and silently drop the patched config, so refuse.
+			jerr(w, 400, "send {config} or {yaml}, not both")
+			return
 		case in.YAML != nil:
 			c, err := config.Parse([]byte(*in.YAML))
 			if err != nil {
