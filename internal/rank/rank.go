@@ -1,6 +1,7 @@
-// Package rank turns the catalog, key state, health stats and JEV scores into
-// an ordered candidate list per preset model, with an explanation for every
-// decision. It is pure: no I/O, so it is cheap to test with fixtures.
+// Package rank turns the catalog, key state, health stats and leaderboard
+// scores into an ordered candidate list per preset model, with an explanation
+// for every decision. It is pure: no I/O and no model calls, so the score is a
+// deterministic function of the inputs and cheap to test with fixtures.
 package rank
 
 import (
@@ -22,8 +23,7 @@ type Inputs struct {
 	Snap  *catalog.Snapshot
 	Pool  *upstream.Pool
 	Stats map[string]store.ModelStat // recent window
-	JEV   map[string]store.JEVScore
-	Bench map[string]store.BenchRow // leaderboard scores mapped onto catalog ids
+	Bench map[string]store.BenchRow  // leaderboard scores mapped onto catalog ids
 	Now   time.Time
 }
 
@@ -176,13 +176,12 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 	assignBench(in, pool, sh)
 
 	// A text model with no quality evidence at all (no configured benchmark, no
-	// leaderboard score, no price to estimate from, no JEV score) gets the
-	// "unverified" flag. It no longer keeps the model out of the list: the
-	// score decides, and the flag only says that the quality behind it is a
-	// guess.
+	// leaderboard score, no price to estimate from) gets the "unverified" flag.
+	// It does not keep the model out of the list: the score decides, and the
+	// flag only says that the quality behind it is a guess.
 	if sh.Modality == "chat" {
 		for _, s := range pool {
-			if _, judged := in.JEV[s.m.ID]; !judged && s.benchSrc == "unknown" {
+			if s.benchSrc == "unknown" {
 				s.flags = append(s.flags, "unverified")
 			}
 		}
@@ -225,7 +224,7 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 	// Free / plan / promo bonuses express "money matters". They scale with how much this preset cares about cost
 	// (balanced = 1x, cheapest = 2x, best quality = about a tenth), so they cannot outvote quality when quality is the goal.
 	bonusScale := 1.0
-	if tot := w.Cost + w.Benchmark + w.JEV + w.Reliability + w.Context; tot > 0 {
+	if tot := w.Cost + w.Benchmark + w.Reliability + w.Context; tot > 0 {
 		bonusScale = math.Max(0.1, math.Min(2, (w.Cost/tot)/0.30))
 	}
 	// The context size is a soft preference only (there is no context gate): a
@@ -237,11 +236,6 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 		comp := map[string]float64{"cost": costScore(s), "benchmark": s.bench}
 		wts := map[string]float64{"cost": w.Cost, "benchmark": w.Benchmark, "reliability": w.Reliability, "context": w.Context}
 		comp["context"] = clamp(math.Log(float64(max(m.Context, 1))/minCtx) / math.Log(16))
-		if j, ok := in.JEV[m.ID]; ok {
-			comp["jev"], wts["jev"] = j.Score, w.JEV
-		} else if in.Cfg.JEV.Enabled {
-			comp["jev"], wts["jev"] = 0.4, w.JEV
-		}
 		st, hasStat := in.Stats[m.ID]
 		rel := 0.6
 		if hasStat && st.N >= 5 {
@@ -264,15 +258,12 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 		if den > 0 {
 			score = num / den
 		}
-		// Quality, for the min_quality gate: the benchmark score, blended with the JEV score only when the model has
-		// really been judged. Neutral placeholders and the context size must not dilute it, otherwise a weak model
-		// passes any gate (context is a hard requirement of its own).
+		// Quality, for the min_quality gate: the benchmark score only. Neutral
+		// placeholders and the context size must not dilute it, otherwise a weak
+		// model passes any gate (context is a hard requirement of its own).
 		quality := 1.0
 		if wb := wts["benchmark"]; wb > 0 {
 			quality = comp["benchmark"]
-			if j, judged := in.JEV[m.ID]; judged && w.JEV > 0 {
-				quality = (wb*comp["benchmark"] + w.JEV*j.Score) / (wb + w.JEV)
-			}
 		}
 
 		bon := map[string]float64{}
@@ -307,13 +298,9 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 		c := Candidate{Model: m.ID, Score: round(score), Quality: round(quality), CostIDR: round4(s.cost), ListCost: round4(s.listCost),
 			Components: roundMap(comp), Bonuses: roundMap(bon), Flags: flags, BenchSource: s.benchSrc}
 
-		jev, hasJEV := in.JEV[m.ID]
-		switch {
-		case hasJEV && jev.Score < in.Cfg.JEV.PassThreshold && in.Cfg.JEV.Enabled:
-			reject(m.ID, fmt.Sprintf("JEV score %.2f below threshold %.2f", jev.Score, in.Cfg.JEV.PassThreshold))
-		case quality < sh.MinQuality:
+		if quality < sh.MinQuality {
 			reject(m.ID, fmt.Sprintf("quality %.2f below minimum %.2f", quality, sh.MinQuality))
-		default:
+		} else {
 			c.Reason = describe(c, "")
 			main = append(main, c)
 		}
@@ -427,7 +414,7 @@ func assignBench(in Inputs, pool []*scored, sh config.Preset) {
 
 func describe(c Candidate, extra string) string {
 	var parts []string
-	for _, k := range []string{"cost", "benchmark", "jev", "reliability", "context"} {
+	for _, k := range []string{"cost", "benchmark", "reliability", "context"} {
 		if v, ok := c.Components[k]; ok {
 			parts = append(parts, fmt.Sprintf("%s %.2f", k, v))
 		}

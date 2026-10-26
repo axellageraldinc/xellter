@@ -36,7 +36,7 @@ clients:
     #     strategy: priority
     #     require: {tool_call: true}
     #     min_quality: 0.55
-    #     weights: {cost: 20, benchmark: 35, jev: 20, reliability: 15, context: 10}
+    #     weights: {cost: 20, benchmark: 35, reliability: 15, context: 10}
 
 rules:
   free_bonus: 0.10
@@ -44,14 +44,10 @@ rules:
   promo_bonus_max: 0.05
   sticky_minutes: 30
 
-# Benchmark scores (0-100) override the price-based proxy. Use numbers from a
-# benchmark that matches your workload; leave empty to rely on JEV and the proxy.
+# Benchmark scores (0-100) override the leaderboard. Use numbers from a benchmark
+# that matches your workload; leave empty to rely on the Arena leaderboard and the
+# price-based estimate.
 benchmarks: {}
-
-jev:
-  enabled: false                  # System One quality judge; costs a little, capped by daily_budget_idr
-  judges: [jev-1-13:free]         # tried top to bottom; other free judges follow automatically
-  daily_budget_idr: 1000
 
 rtk:
   enabled: true

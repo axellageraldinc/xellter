@@ -30,8 +30,8 @@ func TestOpenRenamesLegacyShadowColumn(t *testing.T) {
 	}
 }
 
-// The canary flag and the first-seen dates are gone: an old database is cleaned
-// up on open, and a new row is written without them.
+// The canary flag, the first-seen dates and the judge scores are gone: an old
+// database is cleaned up on open, and a new row is written without them.
 func TestOpenDropsTheCanaryColumnAndTheSeenTable(t *testing.T) {
 	dir := t.TempDir()
 	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "xellter.db"))
@@ -42,6 +42,9 @@ func TestOpenDropsTheCanaryColumnAndTheSeenTable(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`CREATE TABLE seen(model TEXT PRIMARY KEY, ts INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE jev(model TEXT PRIMARY KEY, score REAL, n INTEGER, ts INTEGER)`); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
@@ -56,6 +59,9 @@ func TestOpenDropsTheCanaryColumnAndTheSeenTable(t *testing.T) {
 	}
 	if st.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='seen'`).Scan(&n) != nil || n != 0 {
 		t.Fatal("the seen table must be gone")
+	}
+	if st.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='jev'`).Scan(&n) != nil || n != 0 {
+		t.Fatal("the jev table must be gone")
 	}
 	// a request is still logged after the cleanup
 	st.Log(Request{TS: time.Now().UnixMilli(), Client: "c", Preset: "text", Model: "m", OK: true})

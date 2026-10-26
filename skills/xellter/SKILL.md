@@ -1,6 +1,6 @@
 ---
 name: xellter
-description: "Use when changing xellter's configuration: clients, kenari keys, presets, ranking, rules, JEV, RTK, or the admin panel. Also use when the owner asks to change a value the panel does not show."
+description: "Use when changing xellter's configuration: clients, kenari keys, presets, ranking, rules, RTK, or the admin panel. Also use when the owner asks to change a value the panel does not show."
 version: 1.1.0
 author: Hermes Agent
 license: MIT
@@ -37,8 +37,8 @@ If a value is not in the panel, it is either detected by xellter (account, plan,
 models a key may call) or it keeps the backend default. Do not add a control to the panel to make a
 value changeable; change the value in the config file instead.
 
-The Settings page has **no "Advanced" block**: Smart routing, Token saver (RTK) and Quality judge
-(JEV) each show a few real switches, and everything else is a config-file edit (ADR 0014). The
+The Settings page has **no "Advanced" block**: Smart routing and Token saver (RTK) each show a few
+real switches, and everything else is a config-file edit (ADR 0014). The
 values that the panel hides still work; they just keep their default until the config names them.
 
 ## What the panel can change
@@ -52,7 +52,6 @@ values that the panel hides still work; they just keep their default until the c
 | Clients -> a client | Add / delete a preset | Names are fixed: text, image, video, tts, stt, music |
 | Settings -> Smart routing | `rules.sticky_minutes`, `rules.avoid_sunset_days` | Global |
 | Settings -> Token saver (RTK) | `rtk.enabled` and the five filters (git diff, grep, ls, logs, truncate) | Global |
-| Settings -> Quality judge (JEV) | `jev.enabled`, `jev.judges` (the ordered chain), `jev.daily_budget_idr` | Global |
 | Overview | Kenari account key (add / replace / remove) | It only reads plan, usage and balance |
 | Config file | The whole YAML, with history and rollback | The escape hatch |
 
@@ -64,7 +63,7 @@ that is not in the table above keeps the backend default or is a config-file edi
 `clients[].daily_budget_idr`, `clients[].rtk`, `clients[].passthrough`, `clients[].enabled`,
 `clients[].note`, `presets[].mode` / `models` / `min_quality` / `max_candidates` / `rr_band` /
 `weights` / `cost_profile` / `description`, `resilience.*`, `server.*`, `kenari.*`,
-`benchmarks.*`, and the hidden parts of `rules`, `rtk` and `jev`:
+`benchmarks.*`, and the hidden parts of `rules` and `rtk`:
 
 | Hidden knob | Config key | Default |
 |---|---|---|
@@ -76,9 +75,6 @@ that is not in the table above keeps the backend default or is a config-file edi
 | Compress only outputs longer than (chars) | `rtk.min_chars` | 2000 |
 | Hard cap (chars) | `rtk.max_chars` | 12000 |
 | Context lines kept around a diff change | `rtk.diff_context` | 1 |
-| Minimum score to be used (0-1) | `jev.pass_threshold` | .6 |
-| Re-judge every (hours) | `jev.every_hours` | 24 |
-| The judge's test questions | `jev.prompts` | three default questions (one of them Indonesian) |
 | Models to try per request | `resilience.max_attempts` | 4 |
 | Your own quality scores | `benchmarks.<model>` | from the Arena leaderboard |
 
@@ -101,13 +97,11 @@ is therefore the normal way to change these — do not add a panel control for t
 | Keep one conversation on one model | `rules.sticky_minutes` (panel) | 30 |
 | Stop using models that end within (days) | `rules.avoid_sunset_days` (panel) | 3 |
 | Shrink big tool output | `rtk.enabled` and the filters (panel) | on, all five filters on |
-| Quality judge on / off, and which judge answers first | `jev.enabled`, `jev.judges` (panel) | off, `[jev-1-13:free]` |
-| Judge budget per day | `jev.daily_budget_idr` (panel) | 1000 |
 | Preference for free / plan / discounted models | `rules.free_bonus`, `plan_bonus`, `promo_bonus_max` | .10, .08, .05 |
 | Models to try per request | `resilience.max_attempts` | 4 |
 | Your own quality scores | `benchmarks.<model>` | from the Arena leaderboard |
 
-Weights are **relative**, not percentages: `cost 25, benchmark 35, jev 20, reliability 15, context 5`
+Weights are **relative**, not percentages: `cost 25, benchmark 35, reliability 15, context 5`
 means "benchmark counts 35/25 = 1.4x as much as cost". The context weight is a soft preference
 only; there is no context-size gate any more (ADR 0012).
 
@@ -196,13 +190,15 @@ gets compressed, `rtk.max_chars` (config, default 12000) the hard cap, `rtk.diff
 (config, default 1) how many context lines survive around a diff change. The on/off switch and
 the five filters are in the panel.
 
-**"Judge more often / only accept good models."** `jev.every_hours` (config, default 24) and
-`jev.pass_threshold` (config, default .6) are hidden; `jev.enabled`, the judge order and
-`jev.daily_budget_idr` are in the panel. A judge that is not free costs money from the daily
-limit, so keep free judges first in the chain.
+**"Only accept better models."** Raise `presets.<name>.min_quality` (config; .50 for chat by
+default). Quality is the `benchmark` component: your `benchmarks.<model>` score when set, otherwise
+the Arena leaderboard score, otherwise an estimate from price. There is no LLM judge any more
+(ADR 0016): the score is a deterministic function of the catalog, the request log and the
+leaderboard snapshot.
 
-**"Change the questions the judge asks."** `jev.prompts` (config; a list, one question per line).
-The default has three questions, one of them in Indonesian.
+**"A model's quality looks wrong."** Set `benchmarks.<model>` (0-100) in the config file; it wins
+over the leaderboard for that model. `GET /admin/api/bench` shows which models the leaderboard
+matched and which it did not.
 
 **"Try more models before failing."** `resilience.max_attempts` (config, default 4), with
 `cooldown_base_s`, `cooldown_max_s`, `breaker_failures` and `breaker_open_s` next to it.
@@ -226,5 +222,5 @@ kenari's usage can point at xellter and change nothing (ADR 0015).
 - A deleted preset is not recreated (the `seeded` list remembers), but it can be added back.
 - Keys of one kenari account share its limits, and there is only one account.
 - The request log stores metadata only: never prompts, never responses.
-- Anything that needs an LLM but belongs to no client (the JEV judge) uses the account key, never
-  a client's key; it is logged as client `_system`.
+- xellter never calls a model to score another model. Ranking uses catalog prices, account state,
+  the request log and the public Arena leaderboard only.

@@ -27,8 +27,6 @@ type fake struct {
 	calls []call
 	// chat decides the response for a chat call; default is 200.
 	chat func(c call, n int) (int, string)
-	// judge, when set, answers /v1/systemone instead of the default success.
-	judge func(model string) (int, string)
 	// account answers /v1/account/quota; default: 403 like a restricted key.
 	account func(auth string) (int, string)
 	srv     *httptest.Server
@@ -74,10 +72,6 @@ func newFake(t testing.TB) *fake {
 	end := time.Now().Add(7 * 24 * time.Hour).Unix()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("modality") == "systemone" {
-			io.WriteString(w, `{"object":"list","data":[{"id":"jev-1-13:free","owned_by":"jev","pricing":{"free":true}},{"id":"clef:free","owned_by":"clef","pricing":{"free":true}},{"id":"jev-1-14","owned_by":"jev","pricing":{"free":false,"input":850000000}}]}`)
-			return
-		}
 		io.WriteString(w, modelsJSON)
 	})
 	mux.HandleFunc("/api/public/pricing", func(w http.ResponseWriter, r *http.Request) {
@@ -159,17 +153,6 @@ func newFake(t testing.TB) *fake {
 		}
 		io.WriteString(w, `{"object":"account.balance","balance_micro_idr":25000000000,"reserved_micro_idr":1500000,"available_micro_idr":24998500000,"currency":"IDR"}`)
 	})
-	mux.HandleFunc("/v1/systemone", func(w http.ResponseWriter, r *http.Request) {
-		c, _ := rec(w, r)
-		if f.judge != nil {
-			st, body := f.judge(c.Model)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(st)
-			io.WriteString(w, body)
-			return
-		}
-		io.WriteString(w, `{"model":"jev-1.13.0","answers":{"q":{"type":"noul","noul":0.9}},"usage":{"input_tokens":120,"output_tokens":4}}`)
-	})
 	mux.HandleFunc("/v1/images/generations", func(w http.ResponseWriter, r *http.Request) {
 		rec(w, r)
 		io.WriteString(w, `{"data":[{"b64_json":"AAAA"}]}`)
@@ -205,7 +188,7 @@ func setup(t testing.TB, mutate func(*config.Config)) *env {
 	}
 	budget := config.DefaultPreset("chat")
 	budget.Description, budget.MinQuality = "cheap", 0.30
-	budget.Weights = config.Weights{Cost: 50, Benchmark: 15, JEV: 10, Reliability: 20, Context: 5}
+	budget.Weights = config.Weights{Cost: 50, Benchmark: 15, Reliability: 20, Context: 5}
 	babuPresets := config.DefaultPresets()
 	babuPresets["budget"] = budget
 	key := "xl-testkey"

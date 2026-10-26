@@ -500,15 +500,15 @@ function renameKey(client, name) {
 
 // ---------- Presets ----------
 const OBJECTIVES = {
-  cheapest: { label: 'Cheapest', w: { cost: 60, benchmark: 10, jev: 10, reliability: 15, context: 5 }, q: 0.35 },
-  balanced: { label: 'Balanced', w: { cost: 25, benchmark: 35, jev: 20, reliability: 15, context: 5 }, q: 0.50 },
-  quality: { label: 'Best quality', w: { cost: 2, benchmark: 55, jev: 25, reliability: 15, context: 3 }, q: 0.64 },
+  cheapest: { label: 'Cheapest', w: { cost: 60, benchmark: 10, reliability: 15, context: 5 }, q: 0.35 },
+  balanced: { label: 'Balanced', w: { cost: 25, benchmark: 35, reliability: 15, context: 5 }, q: 0.50 },
+  quality: { label: 'Best quality', w: { cost: 2, benchmark: 55, reliability: 15, context: 3 }, q: 0.64 },
 };
-// Image, video and audio presets have no JEV judge and no context size to weigh: three objectives on cost, quality and reliability.
+// Image, video and audio presets have no context size to weigh: three objectives on cost, quality and reliability.
 const MEDIA_OBJECTIVES = {
-  cheapest: { label: 'Cheapest', w: { cost: 70, benchmark: 10, jev: 0, reliability: 20, context: 0 }, q: 0 },
-  balanced: { label: 'Balanced', w: { cost: 40, benchmark: 40, jev: 0, reliability: 20, context: 0 }, q: 0 },
-  quality: { label: 'Best quality', w: { cost: 10, benchmark: 70, jev: 0, reliability: 20, context: 0 }, q: 0 },
+  cheapest: { label: 'Cheapest', w: { cost: 70, benchmark: 10, reliability: 20, context: 0 }, q: 0 },
+  balanced: { label: 'Balanced', w: { cost: 40, benchmark: 40, reliability: 20, context: 0 }, q: 0 },
+  quality: { label: 'Best quality', w: { cost: 10, benchmark: 70, reliability: 20, context: 0 }, q: 0 },
 };
 const objectivesFor = p => p.modality === 'chat' ? OBJECTIVES : MEDIA_OBJECTIVES;
 const objectiveOf = p => Object.entries(objectivesFor(p)).find(([, o]) => Object.entries(o.w).every(([k, v]) => (p.weights || {})[k] === v))?.[0] || 'custom';
@@ -553,7 +553,7 @@ function addPreset(cl) {
     })));
 }
 function newDefault(kind) {
-  const media = { cost: 70, benchmark: 10, jev: 0, reliability: 20, context: 0 };
+  const media = { cost: 70, benchmark: 10, reliability: 20, context: 0 };
   if (kind === 'chat') return { description: '', modality: 'chat', mode: 'auto', require: { tool_call: true }, min_quality: 0.50, max_candidates: 5, strategy: 'round_robin', rr_band: 0.04, weights: { ...OBJECTIVES.balanced.w }, cost_profile: { input_tokens: 4000, output_tokens: 600, cached_ratio: 0.7 } };
   return { description: '', modality: kind, mode: 'auto', require: {}, min_quality: 0, max_candidates: 5, strategy: 'priority', rr_band: 0.03, weights: media, cost_profile: { images: 1, seconds: kind === 'audio_transcription' ? 60 : 5, chars: 1000, variant: kind === 'videos' ? '720p' : '' } };
 }
@@ -619,41 +619,10 @@ views.usage = async function (_, q) {
           h('td', {}, r.attempt > 1 && badge('retry ' + r.attempt, 'orange'), r.rtk_saved > 0 && badge('saved ' + r.rtk_saved, 'green'), r.err && h('span', { class: 'text-danger small' }, r.err))))))) : empty('Nothing to show.'))));
 };
 
-// savedOrderDiffers is true while the edited list differs from the chain in effect.
-function savedOrderDiffers(jev, j) {
-  const live = (j.chain || []).filter(x => x.configured).map(x => x.id);
-  const now = jev.judges || [];
-  return live.length !== now.length || live.some((id, i) => id !== now[i]);
-}
-
-// judgeOrder edits jev.judges: the judges are tried from top to bottom, so the
-// owner orders them instead of picking one.
-function judgeOrder(jev, j) {
-  jev.judges ||= [];
-  const meta = id => (j.judges || []).find(x => x.id === id);
-  const label = id => { const m = meta(id); return !m ? id : m.free ? `${id} (free)` : `${id} (Rp ${idr(m.in_idr)} per 1M input tokens)`; };
-  const move = (i, by) => { const a = jev.judges, k = i + by; if (k < 0 || k >= a.length) return; [a[i], a[k]] = [a[k], a[i]]; markDirty(); render(); };
-  const known = new Set(jev.judges);
-  const addable = (j.judges || []).filter(x => !known.has(x.id));
-  const picker = h('select', { class: 'form-select form-select-sm', style: 'max-width:22rem' },
-    addable.length ? addable.map(x => h('option', { value: x.id }, label(x.id))) : h('option', { value: '' }, 'No other judge in the catalog'));
-  return h('div', { class: 'mb-3' },
-    h('label', { class: 'form-label' }, 'Judges, in order'),
-    jev.judges.length ? h('ol', { class: 'list-unstyled mb-2' }, jev.judges.map((id, i) => h('li', { class: 'd-flex align-items-center gap-1 py-1' },
-      h('span', { class: 'text-secondary mono me-1' }, i + 1 + '.'),
-      h('span', { class: 'mono me-auto' + (meta(id) ? '' : ' text-warning') }, label(id), !meta(id) && h('span', { class: 'small' }, ' · not in the catalog right now')),
-      i === 0 && badge('tried first', 'blue'),
-      iconBtn('Move up', 'arrow-up', () => move(i, -1), { sm: true, off: i === 0 }),
-      iconBtn('Move down', 'arrow-down', () => move(i, 1), { sm: true, off: i === jev.judges.length - 1 }),
-      iconBtn('Remove', 'trash', () => { jev.judges.splice(i, 1); markDirty(); render(); }, { sm: true, cls: 'btn-ghost-danger' })))) : empty('No judge chosen yet.'),
-    h('div', { class: 'd-flex gap-2' }, picker, btn('Add', 'btn-outline-primary btn-sm', () => { if (picker.value) { jev.judges.push(picker.value); markDirty(); render(); } }, 'plus')),
-    h('div', { class: 'form-hint' }, 'The judge at the top scores every answer. If kenari cannot serve it (down or too slow), the next one in this list takes over, and after that any other free System One judge. A judge that is not free costs money from the daily limit, so keep free ones first.'));
-}
-
 // ---------- Settings ----------
 views.settings = async function () {
   await ensureCfg();
-  const c = S.cfg, j = await api('jev'), R = c.rules;
+  const c = S.cfg, R = c.rules;
   setHead({ title: 'Settings', sub: 'Sensible defaults are already set. Most of this you never need to touch.' });
   return h('div', { class: 'row row-cards' },
     h('div', { class: 'col-lg-6' }, card('Smart routing', h('div', {},
@@ -661,18 +630,7 @@ views.settings = async function () {
       field(R, 'avoid_sunset_days', { type: 'num', label: 'Stop using models that end within (days)' })), { class: 'h-100' })),
     h('div', { class: 'col-lg-6' }, card('Token saver (RTK)', h('div', {}, h('p', { class: 'text-secondary' }, 'Shrinks big tool output (git diff, grep, ls, logs) before it is sent and paid for. Your own messages are never touched.'),
       field(c.rtk, 'enabled', { type: 'switch', label: 'Token saver on' }),
-      h('div', { class: 'row' }, [['git_diff', 'git diff'], ['grep', 'grep results'], ['ls', 'directory listings'], ['logs', 'logs'], ['truncate', 'any very long output']].map(([k, l]) => h('div', { class: 'col-6' }, field(c.rtk, k, { type: 'switch', label: l }))))), { class: 'h-100' })),
-    h('div', { class: 'col-lg-6' }, card('Quality judge (JEV)', h('div', {}, h('p', { class: 'text-secondary' }, 'Candidate models answer a few test questions and kenari\'s System One model scores each answer. The score decides which models are good enough for a preset. Judging costs a little, so a daily limit applies.'),
-      h('div', { class: 'mb-2' }, badge(j.enabled ? 'on' : 'off', j.enabled ? 'green' : 'secondary'), badge(`today Rp ${idr(j.spent_idr)} of Rp ${idr(j.budget_idr)}`)),
-      field(c.jev, 'enabled', { type: 'switch', label: 'Judge models automatically' }),
-      judgeOrder(c.jev, j),
-      (j.chain || []).length > 1 && h('div', { class: 'small text-secondary mb-3' }, savedOrderDiffers(c.jev, j) ? 'Saved order (press Save to apply your changes): ' : 'In effect now: ', j.chain.map((x, i) => h('span', {}, (i ? ' → ' : ''), h('span', { class: 'mono' + (x.configured ? '' : ' text-secondary') }, x.id), x.configured ? '' : ' (automatic)'))),
-      j.system_key ? h('div', { class: 'small text-secondary mb-3' }, icon('shield-check', 'me-1 text-green'), 'Uses the dashboard\'s own account key (the one that reads plan and balance), never a client\'s key. Judging calls show up as "_system" in the request list.')
-        : h('div', { class: 'alert alert-warning py-2' }, 'Judging needs the account key. Add it on the ', h('a', { class: 'clickable', onclick: () => go('overview') }, 'Overview'), ' page, under Kenari plan & balance.'),
-      field(c.jev, 'daily_budget_idr', { type: 'num', label: 'Daily limit (Rp)' }),
-      j.last && j.last.at && !String(j.last.at).startsWith('0001') ? h('div', { class: 'small mb-2 ' + (j.last.error ? 'text-danger' : 'text-secondary') }, `Last round ${ago(j.last.at)} ago: judged ${j.last.judged} model${j.last.judged === 1 ? '' : 's'}${j.last.error ? ' · ' + j.last.error : ''}`) : h('div', { class: 'small text-secondary mb-2' }, 'No round yet. The first one starts about a minute after you switch it on and save.'),
-      btn('Judge pending models now', 'btn-outline-primary btn-sm mb-3', () => api('jev/run', { method: 'POST', body: {} }).then(() => { toast('Started in the background'); setTimeout(render, 8000); }, fail)),
-      Object.keys(j.scores || {}).length ? h('div', { class: 'table-responsive' }, h('table', { class: 'table table-sm' }, h('thead', {}, h('tr', {}, ['Model', 'Score', 'Judged'].map(x => h('th', {}, x)))), h('tbody', {}, Object.entries(j.scores).sort((a, b) => b[1].Score - a[1].Score).map(([m, s]) => h('tr', {}, h('td', { class: 'mono' }, m), h('td', {}, s.Score.toFixed(2)), h('td', { class: 'text-secondary' }, ago(s.TS) + ' ago')))))) : h('div', { class: 'text-secondary small' }, 'No scores yet.')), { class: 'h-100' })));
+      h('div', { class: 'row' }, [['git_diff', 'git diff'], ['grep', 'grep results'], ['ls', 'directory listings'], ['logs', 'logs'], ['truncate', 'any very long output']].map(([k, l]) => h('div', { class: 'col-6' }, field(c.rtk, k, { type: 'switch', label: l }))))), { class: 'h-100' })));
 };
 
 // ---------- Config file ----------

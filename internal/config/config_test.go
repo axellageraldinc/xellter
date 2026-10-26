@@ -53,44 +53,6 @@ func TestValidationCatchesMistakes(t *testing.T) {
 	}
 }
 
-func TestOldSingleJudgeKeyMovesIntoTheOrder(t *testing.T) {
-	c, err := Parse([]byte("jev:\n  enabled: true\n  model: clef:free\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(c.JEV.Judges) != 1 || c.JEV.Judges[0] != "clef:free" || c.JEV.Model != "" {
-		t.Fatalf("migration: %+v", c.JEV)
-	}
-	if c.JEV.Model != "" {
-		t.Fatal("the old key must not be written back")
-	}
-	// an explicit order wins, and the old key is prepended to it
-	c, err = Parse([]byte("jev:\n  judges: [clef:free, jev-1-13:free]\n  model: jev-1-14\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(c.JEV.Judges) != 3 || c.JEV.Judges[0] != "jev-1-14" || c.JEV.Judges[1] != "clef:free" {
-		t.Fatalf("judges: %v", c.JEV.Judges)
-	}
-	if _, err := Parse([]byte("jev:\n  judges: [\"\"]\n")); err == nil {
-		t.Fatal("an empty judge id must be rejected")
-	}
-	if _, err := Parse([]byte("jev:\n  judges: [clef:free, clef:free]\n")); err == nil {
-		t.Fatal("a repeated judge id must be rejected")
-	}
-	// saving writes the new shape and drops the old key
-	dir := t.TempDir()
-	file := filepath.Join(dir, "xellter.yaml")
-	c.Server.DataDir = filepath.Join(dir, "data")
-	if err := Save(file, c); err != nil {
-		t.Fatal(err)
-	}
-	b, _ := os.ReadFile(file)
-	if !strings.Contains(string(b), "judges:") || strings.Contains(string(b), "model: jev-1-14") {
-		t.Fatalf("saved config:\n%s", b)
-	}
-}
-
 func TestSaveKeepsHistoryAndNeverStoresSecrets(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "xellter.yaml")
@@ -159,15 +121,26 @@ func TestHiddenKnobsKeepTheBackendDefault(t *testing.T) {
 	if c.RTK.MinChars != d.RTK.MinChars || c.RTK.MaxChars != d.RTK.MaxChars || c.RTK.DiffContext != d.RTK.DiffContext {
 		t.Fatalf("hidden rtk knobs did not keep the default: %+v", c.RTK)
 	}
-	if c.JEV.PassThreshold != d.JEV.PassThreshold || c.JEV.EveryHours != d.JEV.EveryHours || len(c.JEV.Prompts) != len(d.JEV.Prompts) {
-		t.Fatalf("hidden jev knobs did not keep the default: %+v", c.JEV)
-	}
 	// an explicit hidden value still wins
-	c, err = Parse([]byte("rules:\n  free_bonus: 0.25\nrtk:\n  min_chars: 500\njev:\n  pass_threshold: 0.8\n"))
+	c, err = Parse([]byte("rules:\n  free_bonus: 0.25\nrtk:\n  min_chars: 500\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Rules.FreeBonus != 0.25 || c.RTK.MinChars != 500 || c.JEV.PassThreshold != 0.8 {
-		t.Fatalf("an explicit hidden value was overwritten: %+v %+v %+v", c.Rules, c.RTK, c.JEV)
+	if c.Rules.FreeBonus != 0.25 || c.RTK.MinChars != 500 {
+		t.Fatalf("an explicit hidden value was overwritten: %+v %+v", c.Rules, c.RTK)
+	}
+}
+
+// The judge is gone: a config file that still asks for it is refused instead of
+// being silently ignored (ADR 0016).
+func TestRetiredJEVKeysAreRefused(t *testing.T) {
+	cases := map[string]string{
+		"jev section": "jev:\n  enabled: true\n",
+		"jev weight":  "clients:\n  - name: x\n    presets:\n      p: {modality: chat, mode: auto, strategy: priority, weights: {cost: 1, jev: 20}}\n",
+	}
+	for name, y := range cases {
+		if _, err := Parse([]byte(y)); err == nil || !strings.Contains(err.Error(), "ADR 0016") {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }

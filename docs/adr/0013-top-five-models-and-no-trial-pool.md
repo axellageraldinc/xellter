@@ -37,7 +37,7 @@ The owner also wanted more room: five models instead of four.
 - **There is no trial pool.** A model is no longer held back because it is new or because its
   quality is unknown. The score decides; the top five by score serve.
 - **The "unverified" flag stays, but only as information.** A text model with no quality evidence
-  at all (no configured benchmark, no leaderboard score, no price to estimate from, no JEV score)
+  at all (no configured benchmark, no leaderboard score, no price to estimate from)
   is still marked "unverified", so the panel says that the quality behind it is a guess. It does
   not keep the model out of the list.
 - **The trial machinery is removed**, not left behind as a switch: `rules.new_model_days`,
@@ -51,7 +51,7 @@ The owner also wanted more room: five models instead of four.
   day of a model's life is no longer different from any other day.
 - The panel has one list per preset: the five models that serve, and the reason every other model
   was left out. The "On trial" section and the "trial" badge in the request log are gone.
-- The JEV judge now only judges the models in the main list, which is where a score can change
+- The JEV judge now only judged the models in the main list, which is where a score can change. *The judge is gone (ADR 0016).*
   the outcome.
 - The `seen` table and the `canary` column are dropped from the SQLite file on the first start
   after the upgrade.

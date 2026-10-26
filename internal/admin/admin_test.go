@@ -120,8 +120,8 @@ func TestConfigPutAppliesAHiddenKnob(t *testing.T) {
 		t.Fatalf("the hidden knobs did not apply: %+v %+v", after.Rules, after.RTK)
 	}
 	// the untouched hidden knobs kept their default
-	if after.JEV.PassThreshold != config.Default().JEV.PassThreshold {
-		t.Fatalf("an untouched hidden knob changed: %v", after.JEV.PassThreshold)
+	if after.Rules.PlanBonus != config.Default().Rules.PlanBonus || after.RTK.DiffContext != config.Default().RTK.DiffContext {
+		t.Fatalf("an untouched hidden knob changed: %v %v", after.Rules.PlanBonus, after.RTK.DiffContext)
 	}
 	// the change is on disk
 	b, err := os.ReadFile(a.Path)

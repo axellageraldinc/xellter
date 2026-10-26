@@ -36,7 +36,7 @@ func fixture(models ...*catalog.Model) *fx {
 }
 
 func (f *fx) rank(preset string, mod func(*Inputs)) *Ranking {
-	in := Inputs{Cfg: f.cfg, Snap: f.snap, Pool: f.pool, Now: now, JEV: map[string]store.JEVScore{}, Stats: map[string]store.ModelStat{}}
+	in := Inputs{Cfg: f.cfg, Snap: f.snap, Pool: f.pool, Now: now, Stats: map[string]store.ModelStat{}}
 	if mod != nil {
 		mod(&in)
 	}
@@ -164,17 +164,6 @@ func TestMainListSizeFollowsThePreset(t *testing.T) {
 	}
 }
 
-func TestJEVThresholdRejectsAndScoreLifts(t *testing.T) {
-	f := fixture(chat("a", 500, 1500), chat("b", 500, 1500))
-	f.cfg.JEV.Enabled = true
-	r := f.rank("text", func(in *Inputs) {
-		in.JEV = map[string]store.JEVScore{"a": {Score: 0.95}, "b": {Score: 0.2}}
-	})
-	if o := order(r); len(o) != 1 || o[0] != "a" {
-		t.Fatalf("b should fail the JEV threshold: %v %v", o, r.Rejected)
-	}
-}
-
 func TestGatesAndSunset(t *testing.T) {
 	noTools := chat("notools", 100, 300)
 	noTools.ToolCall = false
@@ -262,7 +251,7 @@ func TestCostScoreFollowsRelativePrice(t *testing.T) {
 	f := fixture(chat("cheap", 1000, 4000), chat("mid", 1150, 4600), chat("dear", 3000, 12000))
 	f.cfg.Benchmarks = map[string]float64{"cheap": 60, "mid": 70, "dear": 70} // the pricier ones are a bit better
 	p := f.cl.Presets["text"]
-	p.Weights = config.Weights{Cost: 60, Benchmark: 10, JEV: 10, Reliability: 15, Context: 5} // "Cheapest"
+	p.Weights = config.Weights{Cost: 60, Benchmark: 10, Reliability: 15, Context: 5} // "Cheapest"
 	p.MinQuality = 0.3
 	f.cl.Presets["text"] = p
 	r := f.rank("text", nil)
@@ -306,12 +295,12 @@ func TestUnverifiedModelIsFlaggedButStillRanks(t *testing.T) {
 	if !containsStr(mystery.Flags, "unverified") {
 		t.Fatalf("it must be marked as unverified: %+v", mystery.Flags)
 	}
-	// once JEV has judged it well, the flag is gone
-	f.cfg.JEV.Enabled = true
-	r = f.rank("text", func(in *Inputs) { in.JEV = map[string]store.JEVScore{"mystery:free": {Score: 0.9}} })
+	// once the model has a score from a leaderboard, the flag is gone
+	f.cfg.Benchmarks["mystery:free"] = 65
+	r = f.rank("text", nil)
 	for _, c := range r.Candidates {
 		if c.Model == "mystery:free" && containsStr(c.Flags, "unverified") {
-			t.Fatalf("a judged model is no longer unverified: %+v", c.Flags)
+			t.Fatalf("a scored model is no longer unverified: %+v", c.Flags)
 		}
 	}
 }
@@ -325,9 +314,9 @@ func TestObjectivesBehaveAsNamed(t *testing.T) {
 		w config.Weights
 		q float64
 	}{
-		"cheapest": {config.Weights{Cost: 60, Benchmark: 10, JEV: 10, Reliability: 15, Context: 5}, 0.30},
-		"balanced": {config.Weights{Cost: 30, Benchmark: 25, JEV: 20, Reliability: 15, Context: 10}, 0.45},
-		"quality":  {config.Weights{Cost: 5, Benchmark: 40, JEV: 30, Reliability: 15, Context: 10}, 0.60},
+		"cheapest": {config.Weights{Cost: 60, Benchmark: 10, Reliability: 15, Context: 5}, 0.30},
+		"balanced": {config.Weights{Cost: 30, Benchmark: 25, Reliability: 15, Context: 10}, 0.45},
+		"quality":  {config.Weights{Cost: 5, Benchmark: 40, Reliability: 15, Context: 10}, 0.60},
 	}
 	top := map[string]string{}
 	for name, o := range obj {
@@ -366,7 +355,7 @@ func TestStackedPlanAndPromoNeverBeatAFreeModelOfEqualQuality(t *testing.T) {
 	f.pool.Keys()[0].Account().SetInfo(&upstream.PlanInfo{Name: "P", Windows: map[string]upstream.Window{}, Fetched: now}, f.pool.Keys()[0].Name)
 	f.cfg.Benchmarks = map[string]float64{"free-ok:free": 70, "promo-plan": 70}
 	p := f.cl.Presets["text"]
-	p.Weights, p.MinQuality = config.Weights{Cost: 60, Benchmark: 10, JEV: 10, Reliability: 15, Context: 5}, 0.3
+	p.Weights, p.MinQuality = config.Weights{Cost: 60, Benchmark: 10, Reliability: 15, Context: 5}, 0.3
 	f.cl.Presets["text"] = p
 	r := f.rank("text", nil)
 	if len(r.Candidates) != 2 || r.Candidates[0].Model != "free-ok:free" {

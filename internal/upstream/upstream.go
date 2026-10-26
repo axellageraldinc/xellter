@@ -157,18 +157,6 @@ func (p *Pool) Accounts() []*Account {
 	return out
 }
 
-// SystemKey is the dashboard's own key (the account key that reads plan and balance).
-// Anything that needs an LLM but belongs to no client, such as the JEV judge, uses it.
-// It is nil until an account key is configured.
-func (p *Pool) SystemKey() *Key {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if k := p.by["account"]; k != nil && k.Secret != "" {
-		return k
-	}
-	return nil
-}
-
 // Next returns a monotonically increasing counter for round-robin rotation.
 func (p *Pool) Next() uint64 { return p.rr.Add(1) }
 
@@ -281,30 +269,6 @@ func (k *Key) check(m *catalog.Model, now time.Time) string {
 	if until, ok := k.blocked[m.ID]; ok && now.Before(until) {
 		return Blocked
 	}
-	return OK
-}
-
-// ReserveSystem is Reserve for the system key: it ignores the read-only flag
-// (the account key never serves client traffic) but still honours cooldowns
-// and the account-wide limits.
-func (k *Key) ReserveSystem(m *catalog.Model, snap *catalog.Snapshot, now time.Time) string {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	switch {
-	case k.Secret == "":
-		return NoSecret
-	case now.Before(k.cooldown):
-		return Cooldown
-	case now.Before(k.breaker):
-		return BreakerOpen
-	}
-	a := k.acct
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if r := a.check(m, snap, now); r != OK {
-		return r
-	}
-	a.reserve(m, now)
 	return OK
 }
 

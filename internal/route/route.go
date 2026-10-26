@@ -86,7 +86,6 @@ func (r *Router) Recompute(now time.Time) {
 	in := rank.Inputs{Cfg: cfg, Snap: snap, Pool: r.pool, Now: now}
 	if r.st != nil {
 		in.Stats, _ = r.st.Stats(now.Add(-time.Duration(cfg.Rules.StatsWindowHours) * time.Hour))
-		in.JEV, _ = r.st.JEVScores()
 		in.Bench, _ = r.st.Bench()
 	}
 	m := rank.All(in)

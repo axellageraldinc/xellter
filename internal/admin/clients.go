@@ -81,8 +81,6 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 	}
 	out["accounts"] = accts
 	out["account_key"] = map[string]any{"configured": accountKey != nil, "status": accountKey, "env": cfg.Kenari.AccountKeyEnv}
-	spent, limit := h.a.Judge.Budget()
-	out["jev"] = map[string]any{"enabled": cfg.JEV.Enabled, "spent_idr": spent, "budget_idr": limit}
 	usage := map[string]clientRow{}
 	if rows, err := h.a.St.Usage("client", now.Add(-24*time.Hour), ""); err == nil {
 		for _, u := range rows {

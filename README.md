@@ -10,7 +10,7 @@ shrinks tool output before it is paid for. One static Go binary, no runtime depe
 ## What it does
 
 - **Clients, keys, presets.** You add a *client* (an app such as Babu or aixell), give it one or more kenari API keys, and xellter generates its **presets** from the models those keys can call, duplicates merged: `text`, `image`, `video`, `tts`, `stt` (and `music`). The app uses a preset name as the model; for every request xellter picks the best model behind it right now.
-- **Auto rules.** Free models, plan-covered models and discounted models are preferred; the five best-scoring models of a preset serve, and image/video/speech presets are ordered by price, free first. Quality is gated by benchmarks you provide, a System One "JEV" judge and measured reliability.
+- **Auto rules.** Free models, plan-covered models and discounted models are preferred; the five best-scoring models of a preset serve, and image/video/speech presets are ordered by price, free first. Quality is gated by benchmarks you provide, the public Arena leaderboard and measured reliability, and the score is fully deterministic: no model ever grades another.
 - **Routing.** Round-robin or priority across models and keys, session stickiness (keeps provider caches warm), cooldowns and a circuit breaker per key, limits tracked per kenari account.
 - **Real plan numbers.** With an optional full-access account key, plan budgets, reset times and balance come straight from kenari.
 - **RTK.** Compresses large `git diff`, `grep`, `ls` and log output in tool results before sending.

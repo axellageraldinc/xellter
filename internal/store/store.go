@@ -1,5 +1,5 @@
 // Package store is the SQLite-backed state: request log, model health,
-// first-seen dates, JEV scores, admin sessions and async job routing.
+// leaderboard scores, admin sessions and async job routing.
 package store
 
 import (
@@ -47,13 +47,6 @@ type ModelStat struct {
 	LastError string
 }
 
-// JEVScore is the stored judge result of a model.
-type JEVScore struct {
-	Score float64
-	N     int
-	TS    time.Time
-}
-
 // Store wraps the database.
 type Store struct {
 	db   *sql.DB
@@ -71,7 +64,6 @@ CREATE INDEX IF NOT EXISTS req_ts ON requests(ts);
 CREATE INDEX IF NOT EXISTS req_model_ts ON requests(model, ts);
 CREATE INDEX IF NOT EXISTS req_up_ts ON requests(upstream, ts);
 CREATE INDEX IF NOT EXISTS req_client_ts ON requests(client, ts);
-CREATE TABLE IF NOT EXISTS jev(model TEXT PRIMARY KEY, score REAL, n INTEGER, ts INTEGER);
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, exp INTEGER NOT NULL, ip TEXT, ua TEXT, created INTEGER);
 CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, upstream TEXT NOT NULL, ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);
@@ -106,6 +98,14 @@ func Open(dir string) (*Store, error) {
 		}
 	}
 	if _, err := db.Exec(`DROP TABLE IF EXISTS seen`); err != nil {
+		return nil, err
+	}
+	// judging is gone: quality comes from leaderboards and configured benchmarks only,
+	// so the stored scores and the "_system" rows the judge wrote are dropped
+	if _, err := db.Exec(`DROP TABLE IF EXISTS jev`); err != nil {
+		return nil, err
+	}
+	if _, err := db.Exec(`DELETE FROM requests WHERE client='_system'`); err != nil {
 		return nil, err
 	}
 	s := &Store{db: db, logC: make(chan Request, 1024), stop: make(chan struct{})}
@@ -293,7 +293,7 @@ func (s *Store) Usage(group string, since time.Time, client string) ([]UsageRow,
 	if col == "" {
 		return nil, errors.New("bad group")
 	}
-	rows, err := s.db.Query(fmt.Sprintf(`SELECT %s k, COUNT(*), COUNT(*)-SUM(ok), COALESCE(SUM(in_tok),0), COALESCE(SUM(out_tok),0), COALESCE(SUM(cost),0), COALESCE(AVG(latency_ms),0), COALESCE(SUM(rtk_saved),0) FROM requests WHERE ts>=? AND (?='' OR client=?) AND substr(client,1,1)!='_' GROUP BY k ORDER BY k`, col), since.UnixMilli(), client, client)
+	rows, err := s.db.Query(fmt.Sprintf(`SELECT %s k, COUNT(*), COUNT(*)-SUM(ok), COALESCE(SUM(in_tok),0), COALESCE(SUM(out_tok),0), COALESCE(SUM(cost),0), COALESCE(AVG(latency_ms),0), COALESCE(SUM(rtk_saved),0) FROM requests WHERE ts>=? AND (?='' OR client=?) GROUP BY k ORDER BY k`, col), since.UnixMilli(), client, client)
 	if err != nil {
 		return nil, err
 	}
@@ -394,34 +394,6 @@ func (s *Store) Purge(retentionDays int) {
 	_, _ = s.db.Exec(`DELETE FROM requests WHERE ts<?`, cut)
 	_, _ = s.db.Exec(`DELETE FROM sessions WHERE exp<?`, time.Now().Unix())
 	_, _ = s.db.Exec(`DELETE FROM jobs WHERE ts<?`, time.Now().AddDate(0, 0, -3).Unix())
-}
-
-// ---- JEV ----
-
-// JEVScores returns stored judge scores.
-func (s *Store) JEVScores() (map[string]JEVScore, error) {
-	rows, err := s.db.Query(`SELECT model, score, n, ts FROM jev`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := map[string]JEVScore{}
-	for rows.Next() {
-		var m string
-		var j JEVScore
-		var ts int64
-		if err := rows.Scan(&m, &j.Score, &j.N, &ts); err != nil {
-			return nil, err
-		}
-		j.TS = time.Unix(ts, 0)
-		out[m] = j
-	}
-	return out, rows.Err()
-}
-
-// SetJEV stores a judge result.
-func (s *Store) SetJEV(model string, score float64, n int) {
-	_, _ = s.db.Exec(`INSERT INTO jev(model,score,n,ts) VALUES(?,?,?,?) ON CONFLICT(model) DO UPDATE SET score=excluded.score, n=excluded.n, ts=excluded.ts`, model, score, n, time.Now().Unix())
 }
 
 // ---- sessions ----

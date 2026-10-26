@@ -28,7 +28,6 @@ type Config struct {
 	Clients    []Client           `yaml:"clients" json:"clients"`
 	Rules      Rules              `yaml:"rules" json:"rules"`
 	Resilience Resilience         `yaml:"resilience" json:"resilience"`
-	JEV        JEV                `yaml:"jev" json:"jev"`
 	RTK        RTK                `yaml:"rtk" json:"rtk"`
 	Benchmarks map[string]float64 `yaml:"benchmarks" json:"benchmarks"`
 }
@@ -88,7 +87,6 @@ type Client struct {
 type Weights struct {
 	Cost        float64 `yaml:"cost" json:"cost"`
 	Benchmark   float64 `yaml:"benchmark" json:"benchmark"`
-	JEV         float64 `yaml:"jev" json:"jev"`
 	Reliability float64 `yaml:"reliability" json:"reliability"`
 	Context     float64 `yaml:"context" json:"context"`
 }
@@ -152,22 +150,6 @@ type Resilience struct {
 	BreakerOpenSec  int `yaml:"breaker_open_s" json:"breaker_open_s"`
 }
 
-// JEV configures the System One quality judge.
-type JEV struct {
-	Enabled bool `yaml:"enabled" json:"enabled"`
-	// Judges is the ordered chain of System One models that score an answer: the
-	// first one is used, the next one takes over when it is unavailable at
-	// kenari. Any other free System One judge is appended as a last resort.
-	Judges []string `yaml:"judges" json:"judges"`
-	// Model is the single-judge setting from before the chain existed. It is
-	// migrated into Judges on load and never written back.
-	Model          string   `yaml:"model,omitempty" json:"model,omitempty"`
-	DailyBudgetIDR float64  `yaml:"daily_budget_idr" json:"daily_budget_idr"`
-	EveryHours     int      `yaml:"every_hours" json:"every_hours"`
-	PassThreshold  float64  `yaml:"pass_threshold" json:"pass_threshold"`
-	Prompts        []string `yaml:"prompts" json:"prompts"`
-}
-
 // RTK configures the tool-output compressor.
 type RTK struct {
 	Enabled     bool `yaml:"enabled" json:"enabled"`
@@ -184,9 +166,6 @@ type RTK struct {
 // Modalities are the endpoint kinds a preset can serve.
 var Modalities = []string{"chat", "images", "videos", "audio_speech", "audio_transcription", "music"}
 
-// DefaultJEVJudge is the judge used when the config names none.
-const DefaultJEVJudge = "jev-1-13:free"
-
 // Default returns the built-in configuration (no upstreams, no clients).
 func Default() *Config {
 	c := &Config{
@@ -201,14 +180,6 @@ func Default() *Config {
 			AvoidSunsetDays: 3, StickyMinutes: 30, StatsWindowHours: 24,
 		},
 		Resilience: Resilience{MaxAttempts: 4, CooldownBaseSec: 30, CooldownMaxSec: 900, BreakerFailures: 5, BreakerOpenSec: 120},
-		JEV: JEV{
-			Enabled: false, DailyBudgetIDR: 1000, EveryHours: 24, PassThreshold: 0.6,
-			Prompts: []string{
-				"Explain in two sentences why the sky is blue.",
-				"Tulis fungsi Python untuk membalik string tanpa slicing, lengkap dengan contoh pemakaian.",
-				"Ringkas dalam tiga poin: manfaat tidur cukup bagi kesehatan.",
-			},
-		},
 		RTK:        RTK{Enabled: true, MinChars: 2000, MaxChars: 12000, GitDiff: true, Grep: true, LS: true, Logs: true, Truncate: true, DiffContext: 1},
 		Benchmarks: map[string]float64{},
 	}
@@ -251,7 +222,7 @@ func DefaultPreset(modality string) Preset {
 	switch modality {
 	case "chat":
 		return Preset{Description: "Text and chat. Picks the best model that is cheap enough.", Modality: "chat", Mode: "auto", Require: Require{ToolCall: true},
-			MinQuality: 0.50, MaxCandidates: 5, Strategy: "round_robin", RRBand: 0.04, Weights: Weights{Cost: 25, Benchmark: 35, JEV: 20, Reliability: 15, Context: 5},
+			MinQuality: 0.50, MaxCandidates: 5, Strategy: "round_robin", RRBand: 0.04, Weights: Weights{Cost: 25, Benchmark: 35, Reliability: 15, Context: 5},
 			Cost: CostProfile{InputTokens: 4000, OutputTokens: 600, CachedRatio: 0.7}}
 	case "images":
 		return Preset{Description: "Image generation, free and cheap models first.", Modality: "images", Mode: "auto", MaxCandidates: 5, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Images: 1}}
@@ -276,6 +247,9 @@ func DefaultPresets() map[string]Preset {
 
 // Parse decodes YAML on top of defaults and validates the result.
 func Parse(data []byte) (*Config, error) {
+	if err := checkRetired(data); err != nil {
+		return nil, err
+	}
 	c := Default()
 	if err := yaml.Unmarshal(data, c); err != nil {
 		return nil, fmt.Errorf("parse yaml: %w", err)
@@ -298,6 +272,34 @@ func Normalize(c *Config) error {
 	}
 	c.fillDefaults()
 	return c.Validate()
+}
+
+// checkRetired rejects configuration that still asks for something xellter no
+// longer does. Unknown keys are otherwise ignored, so a retired knob would look
+// like it still works; here it is an error that names the reason (ADR 0016).
+func checkRetired(data []byte) error {
+	var probe struct {
+		JEV     any `yaml:"jev"`
+		Clients []struct {
+			Presets map[string]struct {
+				Weights map[string]any `yaml:"weights"`
+			} `yaml:"presets"`
+		} `yaml:"clients"`
+	}
+	if err := yaml.Unmarshal(data, &probe); err != nil {
+		return nil // the real decode reports the syntax error with a better message
+	}
+	if probe.JEV != nil {
+		return errors.New("jev: the System One judge is gone; quality comes from benchmarks.<model> and the Arena leaderboard (ADR 0016)")
+	}
+	for _, cl := range probe.Clients {
+		for name, p := range cl.Presets {
+			if _, ok := p.Weights["jev"]; ok {
+				return fmt.Errorf("presets.%s.weights.jev: there is no judge to score; use benchmark (ADR 0016)", name)
+			}
+		}
+	}
+	return nil
 }
 
 func (c *Config) fillDefaults() {
@@ -362,26 +364,6 @@ func (c *Config) fillDefaults() {
 	}
 	if c.RTK.MaxChars <= 0 {
 		c.RTK.MaxChars = d.RTK.MaxChars
-	}
-	if c.JEV.Model != "" {
-		// older configs name one judge; it becomes the head of the chain
-		c.JEV.Judges = append([]string{c.JEV.Model}, c.JEV.Judges...)
-		c.JEV.Model = ""
-	}
-	for i, id := range c.JEV.Judges {
-		c.JEV.Judges[i] = strings.TrimSpace(id) // Validate reports empty and repeated ids
-	}
-	if len(c.JEV.Judges) == 0 {
-		c.JEV.Judges = []string{DefaultJEVJudge}
-	}
-	if c.JEV.PassThreshold <= 0 {
-		c.JEV.PassThreshold = d.JEV.PassThreshold
-	}
-	if c.JEV.EveryHours <= 0 {
-		c.JEV.EveryHours = d.JEV.EveryHours
-	}
-	if len(c.JEV.Prompts) == 0 {
-		c.JEV.Prompts = d.JEV.Prompts
 	}
 	if c.Kenari.AccountKeyEnv == "" {
 		c.Kenari.AccountKeyEnv = d.Kenari.AccountKeyEnv
@@ -467,10 +449,10 @@ func (c *Config) Validate() error {
 				bad("%s: strategy must be round_robin or priority", where)
 			}
 			w := s.Weights
-			if w.Cost < 0 || w.Benchmark < 0 || w.JEV < 0 || w.Reliability < 0 || w.Context < 0 {
+			if w.Cost < 0 || w.Benchmark < 0 || w.Reliability < 0 || w.Context < 0 {
 				bad("%s: weights must be >= 0", where)
 			}
-			if s.Mode == "auto" && w.Cost+w.Benchmark+w.JEV+w.Reliability+w.Context <= 0 {
+			if s.Mode == "auto" && w.Cost+w.Benchmark+w.Reliability+w.Context <= 0 {
 				bad("%s: at least one weight must be > 0", where)
 			}
 			if s.MinQuality < 0 || s.MinQuality > 1 {
@@ -480,20 +462,6 @@ func (c *Config) Validate() error {
 	}
 	if c.Kenari.AccountKeyEnv != "" && !envRe.MatchString(c.Kenari.AccountKeyEnv) {
 		bad("kenari.account_key_env must look like KENARI_ACCOUNT_KEY")
-	}
-	for _, m := range c.JEV.Judges {
-		if strings.TrimSpace(m) == "" {
-			bad("jev.judges must not contain an empty model id")
-			break
-		}
-	}
-	seenJudge := map[string]bool{}
-	for _, m := range c.JEV.Judges {
-		if seenJudge[m] {
-			bad("jev.judges: %q is listed twice", m)
-			break
-		}
-		seenJudge[m] = true
 	}
 	for m, v := range c.Benchmarks {
 		if v < 0 || v > 100 {

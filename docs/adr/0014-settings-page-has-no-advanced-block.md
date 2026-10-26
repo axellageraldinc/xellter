@@ -45,12 +45,12 @@ was almost entirely empty for anyone who did not open it.
   panel control.
 
 ## Consequences
-- The Settings page is three cards: Smart routing, Token saver (RTK), Quality judge (JEV).
+- The Settings page is two cards: Smart routing and Token saver (RTK). *Superseded by ADR 0016: the Quality judge (JEV) card is gone with the judge.*
 - Every value the owner might want to change is still reachable, through the Config tab or
   `PUT /admin/api/config`; the skill documents both.
 - The panel no longer shows a benchmark score table. The Arena leaderboard is still downloaded
-  daily and still decides the `benchmark` component of the score, and the JEV card still shows
-  the judge's own scores.
+  daily and still decides the `benchmark` component of the score. *The JEV card that showed the
+  judge's own scores is gone with the judge (ADR 0016).*
 - The panel no longer shows the retry, cooldown, breaker, panel-host, session, log-retention and
   price-sync settings. They keep their defaults and are still in the config file.
 - An AI that changes xellter's configuration must read the skill first; the skill is the map of

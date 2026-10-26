@@ -10,7 +10,6 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
-	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -62,8 +61,6 @@ func New(a *app.App) *Handler {
 	api("catalog/refresh", h.refreshCatalog)
 	api("usage", h.usage)
 	api("requests", h.requests)
-	api("jev", h.jevInfo)
-	api("jev/run", h.jevRun)
 	api("bench", h.benchInfo)
 	api("bench/refresh", h.benchRefresh)
 	h.mux.HandleFunc("/admin/", h.static)
@@ -409,52 +406,6 @@ func (h *Handler) requests(w http.ResponseWriter, r *http.Request) {
 	rows, _ := h.a.St.Recent(n, r.URL.Query().Get("client"))
 	jok(w, rows)
 }
-
-// ---- JEV ----
-
-func (h *Handler) jevInfo(w http.ResponseWriter, r *http.Request) {
-	scores, _ := h.a.St.JEVScores()
-	spent, limit := h.a.Judge.Budget()
-	type judgeRow struct {
-		ID   string  `json:"id"`
-		Free bool    `json:"free"`
-		In   float64 `json:"in_idr"`
-	}
-	var judges []judgeRow
-	if snap := h.a.Cat.Snapshot(); snap != nil {
-		for _, id := range snap.IDs() {
-			if m := snap.Models[id]; m.Endpoint == "systemone" { // jev-* and clef-* are System One judges
-				judges = append(judges, judgeRow{id, m.Free, m.InIDR})
-			}
-		}
-	}
-	cfg := h.a.Cfg()
-	jok(w, map[string]any{"enabled": cfg.JEV.Enabled, "judges": judges, "chain": h.a.Judge.Chain(), "scores": scores, "spent_idr": spent, "budget_idr": limit, "system_key": h.a.Pool.SystemKey() != nil, "last": h.a.Judge.Last()})
-}
-
-func (h *Handler) jevRun(w http.ResponseWriter, r *http.Request) {
-	var in struct{ Model string }
-	_ = readJSON(r, &in)
-	if r.Method != http.MethodPost {
-		jerr(w, 405, "POST")
-		return
-	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		defer cancel()
-		if in.Model != "" {
-			if _, err := h.a.Judge.Evaluate(ctx, in.Model); err != nil {
-				h.a.Logf("jev evaluate %s: %v", in.Model, err)
-			}
-		} else if _, err := h.a.Judge.RunDue(ctx, 6); err != nil {
-			h.a.Logf("jev run: %v", err)
-		}
-		h.a.Rt.Recompute(time.Now())
-	}()
-	jok(w, map[string]any{"ok": true, "started": true})
-}
-
-var _ = io.EOF
 
 // ---- quality scores from public leaderboards ----
 

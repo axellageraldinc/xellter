@@ -18,7 +18,6 @@ import (
 	"github.com/axellageraldinc/xellter/internal/bench"
 	"github.com/axellageraldinc/xellter/internal/catalog"
 	"github.com/axellageraldinc/xellter/internal/config"
-	"github.com/axellageraldinc/xellter/internal/jev"
 	"github.com/axellageraldinc/xellter/internal/proxy"
 	"github.com/axellageraldinc/xellter/internal/route"
 	"github.com/axellageraldinc/xellter/internal/store"
@@ -36,7 +35,6 @@ type App struct {
 	Rt      *route.Router
 	St      *store.Store
 	Px      *proxy.Server
-	Judge   *jev.Judge
 	Auth    *auth.Authenticator
 	Started time.Time
 	Logf    func(string, ...any)
@@ -76,7 +74,6 @@ func New(path string, src catalog.Source) (*App, error) {
 	a.Rt = route.New(cfg, a.Cat, a.Pool, st)
 	a.Px = proxy.New(cfg, a.Cat, a.Pool, a.Rt, st)
 	a.Px.Logf = func(f string, v ...any) { a.Logf(f, v...) }
-	a.Judge = &jev.Judge{Cfg: a.Cfg, Cat: a.Cat, Pool: a.Pool, St: st, HC: &http.Client{}, Rankings: a.Rt.Rankings, Logf: func(f string, v ...any) { a.Logf(f, v...) }, Now: time.Now}
 	a.BenchBase = bench.DefaultBase
 	a.Cat.OnUpdate(func(s *catalog.Snapshot) {
 		for _, ac := range a.Pool.Accounts() {
@@ -457,7 +454,6 @@ func (a *App) Start(ctx context.Context) {
 			}
 		}
 	}()
-	go a.Judge.Run(ctx)
 }
 
 // Close flushes state.

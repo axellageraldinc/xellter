@@ -3,7 +3,7 @@
 ```
 client ──(xl-… key)──▶ proxy ──▶ router ──▶ upstream key pool ──▶ kenari.id
                          │          │              ▲
-                         │          └─ rankings ◀──┴── catalog (prices, promos, plans) + store (health, JEV)
+                         │          └─ rankings ◀──┴── catalog (prices, promos, plans) + store (health, leaderboard scores)
                          └─ RTK, usage accounting, request log (SQLite, async)
 admin panel ──▶ app.Apply(config) ──▶ hot reload of pool, router, proxy
 ```
@@ -27,13 +27,13 @@ Per client and auto preset, for every catalog model of the preset's modality tha
 2. **Components** (each 0..1):
    - `cost`: price of a reference request (`cost_profile`; for text 4000 input tokens, 70% of them cache hits, 600 output tokens) from the live catalog: running promo and scheduled price changes included, cache discount applied, zero if the model is free, `plan_cost_factor` × list price if a plan that still has budget covers it. Score: free = 1, otherwise `1 / (1 + ln(cost / cheapest))` where the reference is the cheapest paid candidate (equal price 1.0, 13% dearer 0.89, twice 0.59, ten times 0.30).
    - `benchmark`: your configured score, else the Arena leaderboard score (a win probability against the arena's median model, taken from the lower end of the 95% interval so thinly measured models must prove themselves; see `internal/bench`), else a price-percentile estimate, else 0.5. Previously: configured score/100, else a price-percentile proxy computed from *undiscounted* prices (a promo never makes a model look weaker; a `:free` twin uses its paid sibling), else 0.5.
-   - `jev`: stored System One score; unscored models get 0.4 while JEV is enabled.
    - `reliability`: success rate and latency vs the median over `stats_window_hours` (0.6 until 5 samples).
    - `context`: log scale between a fixed baseline of 8000 tokens and 16× that (a soft preference; there is no context gate).
 3. **Score** = weighted average of the components with weight > 0 (per-preset `weights`), plus bonuses: free, plan-covered, promo (scaled by percent off, only when ≥ `promo_min_remaining_hours` remain). The bonuses are multiplied by how much the preset cares about cost (its cost weight share ÷ 0.30, between 0.25 and 2): Cheapest doubles them, Balanced keeps them, Best quality cuts them to a third, so "free" cannot outvote quality when quality is the goal.
-4. **Quality gate**: weighted average of benchmark, jev and context must reach `min_quality`; a JEV score below `jev.pass_threshold` rejects the model.
-5. **Unverified models are flagged, not held back.** A text model with no evidence of quality (no configured benchmark, no price to estimate from, no JEV score) gets the "unverified" flag, so the panel says its quality is a guess. It still competes on its score (ADR 0013).
-6. The top `max_candidates` (5 by default) form the main list; those within `rr_band` of the leader are the round-robin front group (`strategy: round_robin`).
+4. **Quality gate**: the `benchmark` component must reach `min_quality` (context is not part of it: the context size is a soft preference only).
+5. **Unverified models are flagged, not held back.** A text model with no evidence of quality (no configured benchmark, no leaderboard score, no price to estimate from) gets the "unverified" flag, so the panel says its quality is a guess. It still competes on its score (ADR 0013).
+6. **The score is deterministic.** Every input is catalog data, account state, the request log and the leaderboard snapshot: the same inputs always produce the same order. No model is asked to grade another (ADR 0016).
+7. The top `max_candidates` (5 by default) form the main list; those within `rr_band` of the leader are the round-robin front group (`strategy: round_robin`).
 
 Rankings are recomputed every 30 s, after each catalog sync and after each config change, and cached; requests only read them. Every candidate carries its components, bonuses, flags and a reason string, and rejected models carry the reason (shown in the panel).
 
@@ -66,7 +66,7 @@ See ADR 0015.
 |---|---|
 | config (clients, presets, rules, benchmarks) | `xellter.yaml` (0600), history in `data/config-history/` |
 | upstream key values | `data/secrets.env` (0600) |
-| request log, JEV scores, sessions, video job -> key | `data/xellter.db` (SQLite, WAL) |
+| request log, health stats, leaderboard scores, sessions, video job -> key | `data/xellter.db` (SQLite, WAL) |
 | last good catalog | `data/catalog.json` (used when kenari is unreachable) |
 | admin login | `data/auth-record.json` (0600), `login-state.json`, `recovery-used.json` |
 
@@ -77,9 +77,6 @@ Counters (rpm, free quota, plan ledger, client spend) are rebuilt from the reque
 - No candidate right now: `503 no_candidates`/`no_capacity` with `Retry-After`; client budget used: `429 budget_exceeded`.
 - Streaming failure after the first byte cannot be retried; it is logged as an error.
 - Panics in RTK are caught and the original text is sent.
-
-## Calls that belong to no client
-Anything that needs an LLM but is not on behalf of a client (today: the JEV judge) uses the dashboard's own key, the optional **account key** (`kenari.account_key_env`, the same key that reads plan and balance), through `Pool.SystemKey()` and `Key.ReserveSystem`. It never borrows a client's key, so a client's quota and logs are not touched. Those calls are logged under the internal client `_system` and excluded from the Usage totals. Without an account key such features report that they need one instead of falling back to a client's key.
 
 ## Quality scores from public leaderboards (`internal/bench`)
 The Arena (LMArena) leaderboard dataset on Hugging Face needs no key and covers text, text-to-image and text-to-video with human-preference ratings and confidence intervals. xellter downloads the "overall" category when its stored copy is older than a day, keeps the raw rows in SQLite, and re-matches them to the kenari catalog whenever the catalog changes (no network). Names are matched after dropping run settings (`High`, `Max`, `NVFP4`, dates, `Preview`, resolution) and trying aliases written in parentheses; of several entries for one model the most voted wins. A rating becomes `1/(1+10^((median-r)/400))`, using the interval's lower end. Audio and music have no leaderboard in that dataset and keep the price-based estimate. The leaderboard is applied in the background and is not shown in the panel (ADR 0014); `GET /admin/api/bench` still reports how many paid models were matched and which were not.

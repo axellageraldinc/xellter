@@ -66,38 +66,6 @@ func TestAFailingModelFallsBackToTheNext(t *testing.T) {
 	}
 }
 
-func TestJEVEvaluationStoresScoreAndRespectsBudget(t *testing.T) {
-	e := setup(t, func(c *config.Config) {
-		c.JEV.Enabled = true
-		c.JEV.Prompts = []string{"say hi", "say bye"}
-		c.JEV.DailyBudgetIDR = 5
-	})
-	e.a.Judge.HC = e.f.srv.Client()
-	score, err := e.a.Judge.Evaluate(context.Background(), "free-a:free")
-	if err != nil || score < 0.89 || score > 0.91 {
-		t.Fatalf("score=%v err=%v", score, err)
-	}
-	for _, c := range e.f.calls {
-		if (c.Path == "/v1/systemone" || c.Model == "free-a:free") && c.Auth != "Bearer secret-account" {
-			t.Fatalf("a call that belongs to no client must use the account key, used %q on %s", c.Auth, c.Path)
-		}
-	}
-	scores, _ := e.a.St.JEVScores()
-	if scores["free-a:free"].N != 2 {
-		t.Fatalf("stored: %+v", scores)
-	}
-	e.a.Rt.Recompute(time.Now())
-	for _, c := range e.a.Rt.Rankings()["babu/text"].Candidates {
-		if c.Model == "free-a:free" && c.Components["jev"] < 0.89 {
-			t.Fatalf("JEV score must feed the ranking: %+v", c.Components)
-		}
-	}
-	e.a.Judge.Cfg().JEV.DailyBudgetIDR = 0
-	if _, err := e.a.Judge.RunDue(context.Background(), 3); err == nil {
-		t.Fatal("a zero budget must stop evaluation")
-	}
-}
-
 func TestProbeLearnsAllowListWithoutBilling(t *testing.T) {
 	e := setup(t, nil)
 	e.f.chat = func(c call, n int) (int, string) {
@@ -182,7 +150,7 @@ func TestPresetsAreGeneratedFromWhatTheKeysCanCall(t *testing.T) {
 	e.a.Pool.Reload(e.a.Cfg(), e.a.Secrets(), e.a.St)
 	e.f.chat = func(c call, n int) (int, string) {
 		if c.Model == "xellter-probe" && c.Auth == "Bearer secret-gen" {
-			return 400, `{"error":{"code":"bad_request","message":"model 'xellter-probe' is not allowed by this key. Allowed models: cheap-b, free-a:free, img-free:free, jev-1-13:free"}}`
+			return 400, `{"error":{"code":"bad_request","message":"model 'xellter-probe' is not allowed by this key. Allowed models: cheap-b, free-a:free, img-free:free"}}`
 		}
 		return 0, ""
 	}
@@ -231,33 +199,6 @@ func TestPresetsAreGeneratedFromWhatTheKeysCanCall(t *testing.T) {
 	}
 }
 
-func TestJEVStopsTheRoundWhenTheJudgeIsDown(t *testing.T) {
-	e := setup(t, func(c *config.Config) { c.JEV.Enabled = true; c.JEV.Prompts = []string{"say hi"} })
-	e.a.Judge.HC = e.f.srv.Client()
-	e.f.judge = func(string) (int, string) {
-		return 503, `{"error":{"code":"all_providers_failed","message":"upstream unavailable"}}`
-	}
-	n, err := e.a.Judge.RunDue(context.Background(), 5)
-	if err == nil || n != 0 || !strings.Contains(err.Error(), "unavailable") {
-		t.Fatalf("n=%d err=%v", n, err)
-	}
-	calls := e.f.count("cheap-b") + e.f.count("free-a:free") + e.f.count("pro-c")
-	if calls > 1 {
-		t.Fatalf("a failing judge must not make us generate answers for every model: %d candidate calls", calls)
-	}
-	if last := e.a.Judge.Last(); last.Error == "" || last.Judged != 0 {
-		t.Fatalf("panel status: %+v", last)
-	}
-	// while the judge is known to be down, nothing is spent on candidate answers
-	before := e.f.count("cheap-b") + e.f.count("free-a:free") + e.f.count("pro-c")
-	if _, err := e.a.Judge.Evaluate(context.Background(), "cheap-b"); err == nil {
-		t.Fatal("expected the cool-down error")
-	}
-	if after := e.f.count("cheap-b") + e.f.count("free-a:free") + e.f.count("pro-c"); after != before {
-		t.Fatal("candidate answers were requested although the judge is down")
-	}
-}
-
 func TestClientsNeverSeeEachOthersModels(t *testing.T) {
 	e := setup(t, func(c *config.Config) {
 		text := config.DefaultPreset("chat")
@@ -294,73 +235,6 @@ func TestClientsNeverSeeEachOthersModels(t *testing.T) {
 	r, _ := e.post(t, "xl-one", "/v1/chat/completions", `{"model":"text","messages":[{"role":"user","content":"hi"}]}`)
 	if r.Header.Get("X-Xellter-Model") != "cheap-b" {
 		t.Fatalf("served by %q", r.Header.Get("X-Xellter-Model"))
-	}
-}
-
-func TestJEVNeedsTheAccountKey(t *testing.T) {
-	e := setup(t, func(c *config.Config) { c.JEV.Enabled = true; c.Kenari.AccountKeyEnv = "KENARI_NOT_SET" })
-	e.a.Judge.HC = e.f.srv.Client()
-	if _, err := e.a.Judge.Evaluate(context.Background(), "cheap-b"); err == nil || !strings.Contains(err.Error(), "account key") {
-		t.Fatalf("judging without an account key must say so, got %v", err)
-	}
-	if len(e.f.calls) != 0 {
-		t.Fatal("no call may be made with a client's key")
-	}
-}
-
-func TestJudgeFallsBackToTheNextSystemOneModel(t *testing.T) {
-	e := setup(t, func(c *config.Config) { c.JEV.Enabled = true; c.JEV.Prompts = []string{"say hi"} })
-	e.a.Judge.HC = e.f.srv.Client()
-	e.f.judge = func(model string) (int, string) {
-		if model == "jev-1-13:free" {
-			return 503, `{"error":{"code":"all_providers_failed","message":"upstream unavailable"}}`
-		}
-		return 200, `{"model":"` + model + `","answers":{"q":{"type":"noul","noul":0.8}},"usage":{"input_tokens":50,"output_tokens":0}}`
-	}
-	score, err := e.a.Judge.Evaluate(context.Background(), "free-a:free")
-	if err != nil || score < 0.79 || score > 0.81 {
-		t.Fatalf("clef:free should have judged when jev-1-13:free is down: score=%v err=%v", score, err)
-	}
-	var tried []string
-	for _, c := range e.f.calls {
-		if c.Path == "/v1/systemone" {
-			tried = append(tried, c.Model)
-		}
-	}
-	if len(tried) != 2 || tried[0] != "jev-1-13:free" || tried[1] != "clef:free" {
-		t.Fatalf("judges tried in order: %v", tried)
-	}
-}
-
-func TestJudgeOrderIsTheConfiguredOrder(t *testing.T) {
-	e := setup(t, func(c *config.Config) {
-		c.JEV.Enabled = true
-		c.JEV.Prompts = []string{"say hi"}
-		c.JEV.Judges = []string{"clef:free", "jev-1-13:free"} // the owner puts clef first
-	})
-	e.a.Judge.HC = e.f.srv.Client()
-	e.f.judge = func(model string) (int, string) {
-		if model == "clef:free" {
-			return 503, `{"error":{"code":"all_providers_failed","message":"upstream unavailable"}}`
-		}
-		return 200, `{"model":"` + model + `","answers":{"q":{"type":"noul","noul":0.7}},"usage":{"input_tokens":50,"output_tokens":0}}`
-	}
-	chain := e.a.Judge.Chain()
-	if len(chain) < 2 || chain[0].ID != "clef:free" || !chain[0].Configured || chain[1].ID != "jev-1-13:free" {
-		t.Fatalf("chain: %+v", chain)
-	}
-	score, err := e.a.Judge.Evaluate(context.Background(), "free-a:free")
-	if err != nil || score < 0.69 || score > 0.71 {
-		t.Fatalf("score=%v err=%v", score, err)
-	}
-	var tried []string
-	for _, c := range e.f.calls {
-		if c.Path == "/v1/systemone" {
-			tried = append(tried, c.Model)
-		}
-	}
-	if len(tried) != 2 || tried[0] != "clef:free" || tried[1] != "jev-1-13:free" {
-		t.Fatalf("judges must be tried in the configured order: %v", tried)
 	}
 }
 

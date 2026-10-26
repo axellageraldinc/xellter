@@ -54,12 +54,12 @@ Key = the name the app sends as `model`.
 | `min_quality` | 0..1 quality gate |
 | `max_candidates` | size of the main list (5 by default) |
 | `strategy` / `rr_band` | `round_robin` rotates within `rr_band` of the top score; `priority` always starts with the best |
-| `weights` | relative weights of `cost`, `benchmark`, `jev`, `reliability`, `context` |
+| `weights` | relative weights of `cost`, `benchmark`, `reliability`, `context` |
 | `cost_profile` | reference request: `input_tokens`, `output_tokens`, `cached_ratio` (chat); `images`; `seconds`, `variant` (video/STT); `chars` (TTS) |
 
 A preset has no model allow or deny list and no context-size gate: the models the client's keys may call are the ones it can use, and the context size is only a soft preference in the score (ADR 0012).
 
-In the panel, a preset card offers the objective buttons ("Optimise for"): Cheapest (60/10/10/15/5, .35), Balanced (25/35/20/15/5, .50), Best quality (2/55/25/15/3, .64), the tie-break strategy, and the tool-calling and image-input requirements. Everything else keeps the backend default.
+In the panel, a preset card offers the objective buttons ("Optimise for"): Cheapest (cost/benchmark/reliability/context 60/10/15/5, .35), Balanced (25/35/15/5, .50), Best quality (2/55/15/3, .64), the tie-break strategy, and the tool-calling and image-input requirements. Everything else keeps the backend default.
 
 ## rules
 `free_bonus` .10, `plan_bonus` .08, `plan_cost_factor` .3 (a plan-covered request counts for this share of its list price, because plan budget is finite), `promo_bonus_max` .05, `promo_min_remaining_hours` 12, `upcoming_lookahead_hours` 24, `avoid_sunset_days` 3, `sticky_minutes` 30, `stats_window_hours` 24.
@@ -70,13 +70,6 @@ Sticky sessions are keyed by `X-Xellter-Session` (also `X-Session-Id`, `X-Claude
 
 ## resilience
 `max_attempts` 4, `cooldown_base_s` 30, `cooldown_max_s` 900, `breaker_failures` 5, `breaker_open_s` 120. Not in the panel (ADR 0014).
-
-## jev
-`enabled` (false), `judges` (`[jev-1-13:free]`; an ordered list of System One models, reorder it in the panel), `daily_budget_idr` (1000), `every_hours` (24), `pass_threshold` (.6), `prompts` (golden prompts). Judging uses the dashboard's account key, never a client's key. Candidates answer the prompts, the judge answers one `noul` question per answer ("is this correct, complete, on-topic, right language?"); the average is stored per model.
-
-The panel shows `enabled`, `judges` and `daily_budget_idr`; `every_hours`, `pass_threshold` and `prompts` keep the backend default (ADR 0014).
-
-The first judge in `judges` scores every answer. When kenari cannot serve it (5xx or a timeout) the next one in the list takes over, and after the configured ones any other free System One judge is appended automatically, so a single outage never stops a round. The old single-judge key `model` is still read and moved to the front of `judges` on load; it is never written back.
 
 ## rtk
 `enabled`, `min_chars` (2000), `max_chars` (12000), `git_diff`, `grep`, `ls`, `logs`, `truncate`, `diff_context` (1). Per request: header `X-Xellter-RTK: off`.
