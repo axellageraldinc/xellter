@@ -80,3 +80,30 @@ tr.clickable:hover td { background: var(--tblr-bg-surface-secondary); }
 .crumbs { font-size: .85rem; color: var(--tblr-secondary); }
 .crumbs a { color: inherit; }
 @media (max-width: 991.98px) { .page-header { margin-top: .75rem; } }
+
+/* The model picker. A family is a heading with a select-all box, and under it
+   one row per model. On a phone a row wraps into two lines: the id on the
+   first, the numbers on the second; on a desktop the numbers line up in
+   columns because every row uses the same grid. */
+.picker-box { border: 1px solid var(--tblr-border-color); border-radius: 6px; padding: 0; }
+.picker-box > summary { padding: .55rem .75rem; cursor: pointer; font-weight: 600; list-style: none; }
+.picker-box > summary::-webkit-details-marker { display: none; }
+.picker-box > summary::before { content: "▸"; display: inline-block; width: 1rem; color: var(--tblr-secondary); }
+.picker-box[open] > summary::before { content: "▾"; }
+.picker-box[open] > summary { border-bottom: 1px solid var(--tblr-border-color); }
+.picker { max-height: 26rem; overflow: auto; padding: .35rem .75rem .75rem; }
+.picker-family { padding: .35rem 0; border-bottom: 1px solid var(--tblr-border-color); }
+.picker-family:last-child { border-bottom: 0; }
+.picker-head { margin: 0; padding: .25rem 0; position: sticky; top: 0; background: var(--tblr-bg-surface); z-index: 1; }
+.picker-rows { display: flex; flex-direction: column; }
+.picker-row { display: grid; align-items: center; gap: .35rem .6rem; margin: 0; padding: .3rem .25rem; border-radius: 5px; font-size: .8rem; cursor: pointer;
+  grid-template-columns: auto minmax(0, 1fr) auto; }
+.picker-row:hover { background: var(--tblr-bg-surface-secondary); }
+.picker-row.picked { background: var(--tblr-primary-lt); }
+.picker-row .form-check-input { margin: 0; flex: none; }
+.picker-id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker-price { font-variant-numeric: tabular-nums; }
+.picker-unit { font-size: .75rem; }
+@media (min-width: 768px) {
+  .picker-row { grid-template-columns: auto minmax(11rem, 1.4fr) auto auto auto auto minmax(15rem, 1.6fr) auto; }
+}

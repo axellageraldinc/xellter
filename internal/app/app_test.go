@@ -182,27 +182,27 @@ func setup(t testing.TB, mutate func(*config.Config)) *env {
 	cfg.Server.SecretsFile = filepath.Join(cfg.Server.DataDir, "secrets.env")
 	cfg.Server.AuthRecord = filepath.Join(cfg.Server.DataDir, "auth.json")
 	cfg.Kenari.BaseURL = f.srv.URL
-	babuKeys := []config.Upstream{
-		{Name: "plan", KeyEnv: "KEY_PLAN"},
-		{Name: "topup", KeyEnv: "KEY_TOPUP"},
-	}
-	budget := config.DefaultPreset("chat")
-	budget.Description, budget.MinQuality = "cheap", 0.30
-	budget.Weights = config.Weights{Cost: 50, Benchmark: 15, Reliability: 20, Context: 5}
-	babuPresets := config.DefaultPresets()
-	babuPresets["budget"] = budget
 	key := "xl-testkey"
-	one := func(env string) []config.Upstream {
-		return []config.Upstream{{Name: "k", KeyEnv: env}}
+	one := func(env string) []config.Upstream { return []config.Upstream{{Name: "k", KeyEnv: env}} }
+	// babu: every category, all models, so a test can drive any endpoint.
+	all := map[string]config.Preset{
+		"text":  {Category: "chat", Optimization: "cheapest", Models: []string{"free-a:free", "cheap-b", "pro-c", "promo-d"}},
+		"image": {Category: "images", Optimization: "cheapest", Models: []string{"img-paid", "img-free:free"}},
+		"stt":   {Category: "audio_transcription", Optimization: "cheapest", Models: []string{"stt-1"}},
 	}
 	cfg.Clients = []config.Client{
-		{Name: "babu", Enabled: true, KeyHash: proxy.HashKey(key), Keys: babuKeys, Presets: babuPresets, Seeded: config.PresetModalities},
-		{Name: "locked", Enabled: true, KeyHash: proxy.HashKey("xl-locked"), Keys: one("KEY_LOCKED"), Presets: map[string]config.Preset{"budget": budget}, Seeded: config.PresetModalities},
-		{Name: "off", Enabled: false, KeyHash: proxy.HashKey("xl-off"), Presets: config.DefaultPresets(), Seeded: config.PresetModalities},
-		{Name: "direct", Enabled: true, KeyHash: proxy.HashKey("xl-direct"), Keys: one("KEY_DIRECT"), Presets: map[string]config.Preset{"text": config.DefaultPreset("chat")}, Passthrough: []string{"cheap-*"}, Seeded: config.PresetModalities},
+		{Name: "babu", Enabled: true, Purpose: "general", KeyHash: proxy.HashKey(key), KeyHint: "…babu",
+			Keys:    []config.Upstream{{Name: "plan", KeyEnv: "KEY_PLAN"}, {Name: "topup", KeyEnv: "KEY_TOPUP"}},
+			Presets: all},
+		{Name: "locked", Enabled: true, Purpose: "general", KeyHash: proxy.HashKey("xl-locked"), Keys: one("KEY_LOCKED"),
+			Presets: map[string]config.Preset{"text": {Category: "chat", Optimization: "cheapest", Models: []string{"cheap-b"}}}},
+		{Name: "off", Enabled: false, Purpose: "general", KeyHash: proxy.HashKey("xl-off"), Presets: all},
+		// direct: one model in its pool, so naming that model directly is allowed and nothing else is
+		{Name: "direct", Enabled: true, Purpose: "general", KeyHash: proxy.HashKey("xl-direct"), Keys: one("KEY_DIRECT"),
+			Presets: map[string]config.Preset{"text": {Category: "chat", Optimization: "cheapest", Models: []string{"cheap-b"}}}},
+		{Name: "coded", Enabled: true, Purpose: "coding", KeyHash: proxy.HashKey("xl-coded"), Keys: one("KEY_CODED"),
+			Presets: map[string]config.Preset{"text": {Category: "chat", Optimization: "balanced", Models: []string{"cheap-b", "pro-c", "promo-d"}}}},
 	}
-	// known qualities keep the fixture's ranking independent of the price-based estimate
-	cfg.Benchmarks = map[string]float64{"free-a:free": 55, "cheap-b": 60, "pro-c": 85, "promo-d": 55}
 	if mutate != nil {
 		mutate(cfg)
 	}
@@ -213,7 +213,7 @@ func setup(t testing.TB, mutate func(*config.Config)) *env {
 	if err := config.Save(path, cfg); err != nil {
 		t.Fatal(err)
 	}
-	for k, v := range map[string]string{"KEY_PLAN": "secret-plan", "KEY_TOPUP": "secret-topup", "KEY_LOCKED": "secret-locked", "KEY_DIRECT": "secret-direct", "KENARI_ACCOUNT_KEY": "secret-account"} {
+	for k, v := range map[string]string{"KEY_PLAN": "secret-plan", "KEY_TOPUP": "secret-topup", "KEY_LOCKED": "secret-locked", "KEY_DIRECT": "secret-direct", "KEY_CODED": "secret-coded", "KENARI_ACCOUNT_KEY": "secret-account"} {
 		if err := config.SetSecret(cfg.Server.SecretsFile, k, v); err != nil {
 			t.Fatal(err)
 		}
@@ -223,7 +223,19 @@ func setup(t testing.TB, mutate func(*config.Config)) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.Logf = t.Logf
+	// Background probes keep logging after a test ends; a Logf that guards against that keeps `go test -race`
+	// from panicking on a log line that arrives late.
+	var logMu sync.Mutex
+	done := false
+	a.Logf = func(f string, v ...any) {
+		logMu.Lock()
+		defer logMu.Unlock()
+		if done {
+			return
+		}
+		t.Logf(f, v...)
+	}
+	t.Cleanup(func() { logMu.Lock(); done = true; logMu.Unlock() })
 	if err := a.Cat.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -265,17 +277,14 @@ func TestAuthAndModelAccess(t *testing.T) {
 	if r, _ := e.post(t, "xl-off", "/v1/chat/completions", fmt.Sprintf(chatBody, "text")); r.StatusCode != 403 {
 		t.Fatalf("disabled client: %d", r.StatusCode)
 	}
-	if r, _ := e.post(t, "xl-locked", "/v1/chat/completions", fmt.Sprintf(chatBody, "text")); r.StatusCode != 404 {
+	if r, _ := e.post(t, "xl-locked", "/v1/chat/completions", fmt.Sprintf(chatBody, "image")); r.StatusCode != 404 {
 		t.Fatalf("a client only knows its own presets: %d", r.StatusCode)
 	}
-	if r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "cheap-b")); r.StatusCode != 403 {
-		t.Fatalf("passthrough must be off by default: %d", r.StatusCode)
-	}
 	if r, _ := e.post(t, "xl-direct", "/v1/chat/completions", fmt.Sprintf(chatBody, "cheap-b")); r.StatusCode != 200 {
-		t.Fatalf("allowed passthrough: %d", r.StatusCode)
+		t.Fatalf("a model in the client's own pool must be callable by name: %d", r.StatusCode)
 	}
 	if r, _ := e.post(t, "xl-direct", "/v1/chat/completions", fmt.Sprintf(chatBody, "pro-c")); r.StatusCode != 403 {
-		t.Fatalf("passthrough glob must not match pro-c: %d", r.StatusCode)
+		t.Fatalf("a model outside every pool must be refused: %d", r.StatusCode)
 	}
 	if r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "nope")); r.StatusCode != 404 {
 		t.Fatalf("unknown model: %d", r.StatusCode)
@@ -301,19 +310,24 @@ func TestPresetRoutesToFreeOrPlanFirstAndRewritesModel(t *testing.T) {
 	if strings.Contains(e.f.last().Auth, "xl-") {
 		t.Fatal("client key leaked upstream")
 	}
+	// the ranking explains the choice: a free model leads a cheapest preset, and the dearest model is last
 	rk := e.a.Rt.Rankings()["babu/text"]
-	for _, c := range rk.Candidates {
-		if c.Model == "pro-c" && rk.Candidates[0].Model == "pro-c" {
-			t.Fatalf("expensive model must not lead: %+v", rk.Candidates)
-		}
+	if len(rk.Candidates) == 0 {
+		t.Fatal("the preset must have a ranking")
+	}
+	if rk.Candidates[0].Model != "free-a:free" {
+		t.Fatalf("a cheapest preset must lead with the free model: %+v", rk.Candidates)
+	}
+	if last := rk.Candidates[len(rk.Candidates)-1].Model; last != "pro-c" {
+		t.Fatalf("the dearest model must come last: %+v", rk.Candidates)
 	}
 }
 
-func TestFallbackOnUpstreamErrorAndRateLimit(t *testing.T) {
+// A model that fails is blocked on the key that saw the failure, so the next request does not pay for the
+// same discovery again.
+func TestAFailingModelIsSkippedAfterwards(t *testing.T) {
 	e := setup(t, func(c *config.Config) {
-		sh := c.Clients[0].Presets["text"]
-		sh.Mode, sh.Models, sh.Strategy = "combo", []string{"free-a:free", "cheap-b"}, "priority"
-		c.Clients[0].Presets["text"] = sh
+		c.Clients[0].Presets["text"] = config.Preset{Category: "chat", Optimization: "cheapest", Models: []string{"free-a:free", "cheap-b"}}
 	})
 	e.f.chat = func(c call, n int) (int, string) {
 		if c.Model == "free-a:free" {
@@ -325,44 +339,145 @@ func TestFallbackOnUpstreamErrorAndRateLimit(t *testing.T) {
 	if resp.StatusCode != 200 || resp.Header.Get("X-Xellter-Model") != "cheap-b" {
 		t.Fatalf("expected fallback to cheap-b, got %d %s model=%s", resp.StatusCode, body, resp.Header.Get("X-Xellter-Model"))
 	}
-	// the failing model is now blocked: next request goes straight to cheap-b
-	before := e.f.count("free-a:free")
-	e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "text"))
-	if e.f.count("free-a:free") > before+0 && e.f.count("free-a:free") > 2 {
-		t.Fatalf("blocked model kept being retried: %d calls", e.f.count("free-a:free"))
+	if n := e.f.count("free-a:free"); n != 2 {
+		t.Fatalf("the failing model gets one try and one retry, saw %d", n)
+	}
+	// the failure blocked the model on both keys of the account, so the next session skips it entirely
+	resp, body = e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "text"), "X-Xellter-Session", "s2")
+	if resp.StatusCode != 200 || resp.Header.Get("X-Xellter-Model") != "cheap-b" {
+		t.Fatalf("a blocked model must be skipped: %d %s", resp.StatusCode, body)
+	}
+	if n := e.f.count("free-a:free"); n != 2 {
+		t.Fatalf("a blocked model must not be tried again, saw %d calls", n)
 	}
 }
 
+// kenari limits per account and there is only one account, so a rate limit on one key of a client blocks the
+// other key too. The retry of requirement 15 does not change that: it is the same account being limited.
 func TestRateLimitCooldownIsAccountWide(t *testing.T) {
 	e := setup(t, func(c *config.Config) {
-		sh := c.Clients[0].Presets["text"]
-		sh.Mode, sh.Models, sh.Strategy = "combo", []string{"free-a:free"}, "priority"
-		c.Clients[0].Presets["text"] = sh
+		c.Clients[0].Presets["text"] = config.Preset{Category: "chat", Optimization: "cheapest", Models: []string{"free-a:free"}}
 	})
 	e.f.chat = func(c call, n int) (int, string) {
-		if c.Auth == "Bearer secret-plan" || c.Auth == "Bearer secret-topup" {
-			if n == 1 { // first ever call to this model: 429 whichever key got it
-				return 429, `{"error":{"code":"rate_limit_exceeded","message":"slow down"}}`
-			}
-		}
-		return 0, ""
+		return 429, `{"error":{"code":"rate_limit_exceeded","message":"slow down"}}`
 	}
-	// kenari limits per account and there is only one account, so the other key of
-	// the client cannot take the request either.
 	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "text"))
 	if resp.StatusCode != 429 {
 		t.Fatalf("the account is rate limited, got %d %s", resp.StatusCode, body)
 	}
-	if e.f.count("free-a:free") != 1 {
-		t.Fatalf("expected exactly 1 upstream call, got %d", e.f.count("free-a:free"))
+	// one attempt plus its one retry, and the second key of the client is not used: the limit is account wide
+	if n := e.f.count("free-a:free"); n != 2 {
+		t.Fatalf("expected 2 upstream calls (one try plus one retry), got %d", n)
+	}
+	m := e.a.Cat.Snapshot().Models["free-a:free"]
+	for _, k := range e.a.Pool.Keys() {
+		if why := k.Check(m, e.a.Cat.Snapshot(), time.Now()); why != "cooldown" {
+			t.Fatalf("key %s must be cooling down too, got %q", k.Name, why)
+		}
+	}
+	// a new session cannot be served either: no key may take it
+	resp, _ = e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "text"), "X-Xellter-Session", "s2")
+	if resp.StatusCode != 429 {
+		t.Fatalf("a cooling account must refuse a new session: %d", resp.StatusCode)
+	}
+	if n := e.f.count("free-a:free"); n != 2 {
+		t.Fatalf("a cooling account must not reach kenari again: %d calls", n)
+	}
+}
+
+// Requirement 15: a retriable error retries the same model once, and only then moves to the next model.
+func TestRetriableErrorRetriesTheSameModelOnce(t *testing.T) {
+	e := setup(t, func(c *config.Config) {
+		c.Clients[0].Presets["text"] = config.Preset{Category: "chat", Optimization: "cheapest", Models: []string{"free-a:free", "cheap-b"}}
+	})
+	e.f.chat = func(c call, n int) (int, string) {
+		if c.Model == "free-a:free" {
+			return 503, `{"error":{"code":"upstream_error","message":"down"}}`
+		}
+		return 0, ""
+	}
+	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "text"))
+	if resp.StatusCode != 200 || resp.Header.Get("X-Xellter-Model") != "cheap-b" {
+		t.Fatalf("expected the next model: %d %s model=%s", resp.StatusCode, body, resp.Header.Get("X-Xellter-Model"))
+	}
+	// the first model was tried exactly twice: once, then its one retry
+	if n := e.f.count("free-a:free"); n != 2 {
+		t.Fatalf("a retriable error must be retried exactly once, saw %d attempts", n)
+	}
+	if got := resp.Header.Get("X-Xellter-Attempt"); got != "3" {
+		t.Fatalf("the attempt number must be reported: %q", got)
+	}
+}
+
+// A non-retriable error is not retried on the same model: the next model takes over at once.
+func TestNonRetriableErrorMovesOnAtOnce(t *testing.T) {
+	e := setup(t, func(c *config.Config) {
+		c.Clients[0].Presets["text"] = config.Preset{Category: "chat", Optimization: "cheapest", Models: []string{"free-a:free", "cheap-b"}}
+	})
+	e.f.chat = func(c call, n int) (int, string) {
+		if c.Model == "free-a:free" {
+			return 400, `{"error":{"code":"bad_request","message":"messages is required"}}`
+		}
+		return 0, ""
+	}
+	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "text"))
+	if resp.StatusCode != 200 || resp.Header.Get("X-Xellter-Model") != "cheap-b" {
+		t.Fatalf("expected the next model: %d %s model=%s", resp.StatusCode, body, resp.Header.Get("X-Xellter-Model"))
+	}
+	if n := e.f.count("free-a:free"); n != 1 {
+		t.Fatalf("a client error must not be retried, saw %d attempts", n)
+	}
+}
+
+func TestThreeErrorsEvictTheModelFromThePreset(t *testing.T) {
+	e := setup(t, func(c *config.Config) {
+		c.Clients[0].Presets["text"] = config.Preset{Category: "chat", Optimization: "cheapest", Models: []string{"free-a:free", "cheap-b"}}
+	})
+	e.f.chat = func(c call, n int) (int, string) {
+		if c.Model == "free-a:free" {
+			return 400, `{"error":{"code":"bad_request","message":"messages is required"}}`
+		}
+		return 0, ""
+	}
+	// two errors are already on record, so the next failure is the third and evicts
+	e.a.Rt.Failed("babu", "text", "free-a:free", time.Now().Add(-2*time.Minute))
+	e.a.Rt.Failed("babu", "text", "free-a:free", time.Now().Add(-time.Minute))
+
+	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "text"), "X-Xellter-Session", "s1")
+	if resp.StatusCode != 200 || resp.Header.Get("X-Xellter-Model") != "cheap-b" {
+		t.Fatalf("the failing model must fall back: %d %s model=%s", resp.StatusCode, body, resp.Header.Get("X-Xellter-Model"))
+	}
+	ev := e.a.Rt.Evictions("babu", "text", time.Now())
+	if _, ok := ev["free-a:free"]; !ok {
+		t.Fatalf("the third error must evict the model: %v", ev)
+	}
+
+	// the next request goes straight to the replacement
+	before := e.f.count("free-a:free")
+	resp, _ = e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "text"), "X-Xellter-Session", "s2")
+	if resp.Header.Get("X-Xellter-Model") != "cheap-b" {
+		t.Fatalf("an evicted model must be skipped: %s", resp.Header.Get("X-Xellter-Model"))
+	}
+	if n := e.f.count("free-a:free"); n != before {
+		t.Fatalf("an evicted model must not be tried again: %d -> %d", before, n)
+	}
+
+	// eviction is routing state, not a re-ranking: the model is still in the list
+	rk := e.a.Rt.Rankings()["babu/text"]
+	found := false
+	for _, c := range rk.Candidates {
+		if c.Model == "free-a:free" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("eviction must not remove the model from the ranking: %+v", rk.Candidates)
 	}
 }
 
 func TestStreamingAndUsageAccounting(t *testing.T) {
 	e := setup(t, func(c *config.Config) {
-		sh := c.Clients[0].Presets["text"]
-		sh.Mode, sh.Models, sh.Strategy = "combo", []string{"cheap-b"}, "priority"
-		c.Clients[0].Presets["text"] = sh
+		c.Clients[0].Presets["text"] = config.Preset{Category: "chat", Optimization: "cheapest", Models: []string{"cheap-b"}}
 	})
 	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", `{"model":"text","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
 	if resp.StatusCode != 200 || !strings.Contains(body, "t0") || !strings.Contains(body, "[DONE]") {
@@ -379,21 +494,6 @@ func TestStreamingAndUsageAccounting(t *testing.T) {
 	}
 	if rows[0].Cost <= 0 {
 		t.Fatalf("catalog cost should be recorded for plan traffic: %+v", rows[0])
-	}
-}
-
-func TestClientBudget(t *testing.T) {
-	e := setup(t, func(c *config.Config) {
-		c.Clients[0].DailyBudget = 0.0001
-		sh := c.Clients[0].Presets["text"]
-		sh.Mode, sh.Models, sh.Strategy = "combo", []string{"pro-c"}, "priority"
-		c.Clients[0].Presets["text"] = sh
-	})
-	if r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "text")); r.StatusCode != 200 {
-		t.Fatalf("first call: %d", r.StatusCode)
-	}
-	if r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "text")); r.StatusCode != 429 {
-		t.Fatalf("budget not enforced: %d", r.StatusCode)
 	}
 }
 
@@ -415,13 +515,6 @@ func TestRTKCompressesToolOutput(t *testing.T) {
 	}
 	if !strings.Contains(e.f.last().Body, `+new`) {
 		t.Fatal("changed lines must survive compression")
-	}
-	// per-request bypass
-	if r, _ := e.post(t, e.keyCl, "/v1/chat/completions", body, "X-Xellter-RTK", "off"); r.StatusCode != 200 {
-		t.Fatal("bypass failed")
-	}
-	if got := len(e.f.last().Body); got < len(body)/2 {
-		t.Fatalf("bypass header ignored: %d", got)
 	}
 }
 
@@ -457,27 +550,26 @@ func TestModelListShowsOnlyAllowedPresets(t *testing.T) {
 	r, _ := http.DefaultClient.Do(req)
 	var out struct{ Data []struct{ ID string } }
 	json.NewDecoder(r.Body).Decode(&out)
-	if len(out.Data) != 1 || out.Data[0].ID != "budget" {
+	// the preset, plus the one model in its pool (a client may name a model it already routes to)
+	if len(out.Data) != 2 || out.Data[0].ID != "text" || out.Data[1].ID != "cheap-b" {
 		t.Fatalf("got %+v", out.Data)
 	}
 }
 
 func TestLearnsAllowedModelsFromRestrictedKey(t *testing.T) {
 	e := setup(t, func(c *config.Config) {
-		sh := c.Clients[0].Presets["text"]
-		sh.Mode, sh.Models, sh.Strategy = "combo", []string{"pro-c", "cheap-b"}, "priority"
-		c.Clients[0].Presets["text"] = sh
+		c.Clients[0].Presets["text"] = config.Preset{Category: "chat", Optimization: "cheapest", Models: []string{"pro-c", "cheap-b"}}
 		c.Clients[0].Keys = c.Clients[0].Keys[:1]
 	})
 	e.f.chat = func(c call, n int) (int, string) {
-		if c.Model == "pro-c" {
-			return 400, `{"error":{"code":"bad_request","message":"model not permitted for this key. Allowed models: cheap-b, free-a:free"}}`
+		if c.Model == "cheap-b" { // the cheapest model is the one this key may not use
+			return 400, `{"error":{"code":"bad_request","message":"model not permitted for this key. Allowed models: pro-c, free-a:free"}}`
 		}
 		return 0, ""
 	}
 	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "text"))
-	if resp.StatusCode != 200 || resp.Header.Get("X-Xellter-Model") != "cheap-b" {
-		t.Fatalf("expected cheap-b after learning: %d %s", resp.StatusCode, body)
+	if resp.StatusCode != 200 || resp.Header.Get("X-Xellter-Model") != "pro-c" {
+		t.Fatalf("expected pro-c after learning: %d %s", resp.StatusCode, body)
 	}
 	e.a.Rt.Recompute(time.Now())
 	st := e.a.Pool.Keys()[0].Status(time.Now())

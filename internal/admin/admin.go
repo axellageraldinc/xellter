@@ -51,15 +51,20 @@ func New(a *app.App) *Handler {
 	api("config", h.config)
 	api("rollback", h.rollback)
 	api("clients", h.clients)
+	api("client", h.clientDetail)
+	api("presets", h.presets)
 	api("keys", h.keys)
 	api("account-key", h.accountKey)
 	api("keys/reset", h.resetKey)
 	api("keys/probe", h.probeKeys)
 	api("ranking", h.ranking)
 	api("recompute", h.recompute)
-	api("catalog", h.catalog)
+	api("catalog/models", h.catalogModels)
 	api("catalog/refresh", h.refreshCatalog)
 	api("usage", h.usage)
+	api("usage/drill", h.usageDrill)
+	api("usage/keys", h.usageKeys)
+	api("session", h.sessionInfo)
 	api("requests", h.requests)
 	api("bench", h.benchInfo)
 	api("bench/refresh", h.benchRefresh)
@@ -231,10 +236,6 @@ func (h *Handler) config(w http.ResponseWriter, r *http.Request) {
 			jerr(w, 400, "send {config} or {yaml}")
 			return
 		}
-		if err := config.CheckPresetNames(next); err != nil {
-			jerr(w, 422, err.Error())
-			return
-		}
 		if err := h.a.Apply(next); err != nil {
 			jerr(w, 422, err.Error())
 			return
@@ -310,9 +311,32 @@ func (h *Handler) probeKeys(w http.ResponseWriter, r *http.Request) {
 
 // ---- ranking / catalog ----
 
+// recompute is the panel's Recalculate button. With ?client= it recomputes every preset of that client; with
+// no client it recomputes everything. Rankings are a pure function of the inputs, so this can never make the
+// order worse, only current.
 func (h *Handler) recompute(w http.ResponseWriter, r *http.Request) {
-	h.a.Rt.Recompute(time.Now())
-	jok(w, map[string]any{"ok": true})
+	start := time.Now()
+	h.a.Rt.Recompute(start)
+	client := r.URL.Query().Get("client")
+	out := map[string]any{"ok": true, "computed": h.a.Rt.Computed()}
+	if client != "" {
+		// The client is checked against the configuration, not the rankings: a
+		// client with no catalog yet is still a client, and its Recalculate must
+		// not report it as missing.
+		if findClient(h.a.Cfg(), client) == nil {
+			jerr(w, 404, "no such client")
+			return
+		}
+		var presets []string
+		for key, rk := range h.a.Rt.Rankings() {
+			if rk.Client == client {
+				presets = append(presets, key)
+			}
+		}
+		sort.Strings(presets)
+		out["client"], out["presets"] = client, presets
+	}
+	jok(w, out)
 }
 
 func (h *Handler) refreshCatalog(w http.ResponseWriter, r *http.Request) {
@@ -323,39 +347,6 @@ func (h *Handler) refreshCatalog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jok(w, map[string]any{"ok": true})
-}
-
-func (h *Handler) catalog(w http.ResponseWriter, r *http.Request) {
-	snap := h.a.Cat.Snapshot()
-	if snap == nil {
-		jok(w, []any{})
-		return
-	}
-	mod := r.URL.Query().Get("modality")
-	type row struct {
-		ID       string  `json:"id"`
-		Endpoint string  `json:"endpoint"`
-		Free     bool    `json:"free"`
-		Context  int     `json:"context"`
-		In       float64 `json:"in_idr"`
-		Out      float64 `json:"out_idr"`
-		Promo    float64 `json:"promo_off"`
-		Tool     bool    `json:"tool_call"`
-		Vision   bool    `json:"vision"`
-	}
-	var rows []row
-	for _, id := range snap.IDs() {
-		m := snap.Models[id]
-		if mod != "" && m.Endpoint != mod {
-			continue
-		}
-		x := row{ID: id, Endpoint: m.Endpoint, Free: m.Free, Context: m.Context, In: m.InIDR, Out: m.OutIDR, Tool: m.ToolCall, Vision: m.Vision}
-		if m.PromoActive(time.Now(), 0) {
-			x.Promo = m.Promo.PercentOff
-		}
-		rows = append(rows, x)
-	}
-	jok(w, rows)
 }
 
 // ---- usage ----
@@ -380,7 +371,7 @@ func (h *Handler) usage(w http.ResponseWriter, r *http.Request) {
 	case "minute":
 		since = ceilTo(since, time.Minute)
 	}
-	rows, err := h.a.St.Usage(g, since, r.URL.Query().Get("client"))
+	rows, err := h.a.St.Usage(g, since, r.URL.Query().Get("client"), r.URL.Query().Get("preset"))
 	if err != nil {
 		jerr(w, 400, err.Error())
 		return
@@ -436,9 +427,11 @@ func (h *Handler) benchInfo(w http.ResponseWriter, r *http.Request) {
 		}
 		kinds = append(kinds, k)
 	}
-	for _, s := range scores {
-		if s.Date > latest {
-			latest = s.Date
+	for _, byArena := range scores {
+		for _, s := range byArena {
+			if s.Date > latest {
+				latest = s.Date
+			}
 		}
 	}
 	jok(w, map[string]any{"fetched": h.a.BenchFetched(), "latest": latest, "models": len(scores), "kinds": kinds, "source": "LMArena leaderboard dataset (Hugging Face), overall category"})

@@ -3,6 +3,10 @@
 // The configuration is one YAML file. Secrets (upstream API keys) are never
 // part of it: upstreams reference an environment variable name instead, and the
 // admin panel can store values in a separate 0600 secrets file.
+//
+// The shape is deliberately small. A client has a purpose and at most one
+// preset per category; a preset is a list of models plus one optimization. Every
+// other routing rule is a constant (see docs/rewrite-plan.md).
 package config
 
 import (
@@ -23,13 +27,10 @@ import (
 // Config is the whole runtime configuration. JSON tags mirror YAML tags so the
 // admin panel can round-trip it.
 type Config struct {
-	Server     Server             `yaml:"server" json:"server"`
-	Kenari     Kenari             `yaml:"kenari" json:"kenari"`
-	Clients    []Client           `yaml:"clients" json:"clients"`
-	Rules      Rules              `yaml:"rules" json:"rules"`
-	Resilience Resilience         `yaml:"resilience" json:"resilience"`
-	RTK        RTK                `yaml:"rtk" json:"rtk"`
-	Benchmarks map[string]float64 `yaml:"benchmarks" json:"benchmarks"`
+	Server  Server   `yaml:"server" json:"server"`
+	Kenari  Kenari   `yaml:"kenari" json:"kenari"`
+	Routing Routing  `yaml:"routing" json:"routing"`
+	Clients []Client `yaml:"clients" json:"clients"`
 }
 
 // Server holds listener and storage settings.
@@ -40,7 +41,6 @@ type Server struct {
 	AdminHosts   []string `yaml:"admin_hosts" json:"admin_hosts"` // Host header values allowed to reach /admin
 	MaxBodyMB    int      `yaml:"max_body_mb" json:"max_body_mb"`
 	LogRetention int      `yaml:"log_retention_days" json:"log_retention_days"`
-	LogRequests  bool     `yaml:"log_requests" json:"log_requests"`
 	TrustedProxy bool     `yaml:"trusted_proxy" json:"trusted_proxy"` // honour X-Forwarded-Proto/For (tailscale serve, cloudflared)
 	SessionHours int      `yaml:"session_hours" json:"session_hours"`
 	AuthRecord   string   `yaml:"auth_record" json:"auth_record"` // path to the admin login record
@@ -58,6 +58,18 @@ type Kenari struct {
 	AccountKeyEnv string `yaml:"account_key_env" json:"account_key_env"`
 }
 
+// Routing is the small set of knobs that survived the rewrite. Everything a
+// preset or a model decides is not here.
+type Routing struct {
+	RankRefreshMinutes int  `yaml:"rank_refresh_minutes" json:"rank_refresh_minutes"` // 0 = never refresh on a timer
+	TopModels          int  `yaml:"top_models" json:"top_models"`                     // how many models a preset routes against
+	EvictErrors        int  `yaml:"evict_errors" json:"evict_errors"`                 // errors that take a model out of a preset
+	EvictWindowMin     int  `yaml:"evict_window_minutes" json:"evict_window_minutes"`
+	EvictCooldownMin   int  `yaml:"evict_cooldown_minutes" json:"evict_cooldown_minutes"`
+	AvoidSunsetDays    int  `yaml:"avoid_sunset_days" json:"avoid_sunset_days"`
+	StickySession      bool `yaml:"sticky_session" json:"sticky_session"` // one model per session (ADR 0020)
+}
+
 // Upstream is one kenari API key of a client. Only a name and the secret
 // name are configurable: xellter detects the account, the plan and the limits
 // by itself (ADR 0012).
@@ -67,182 +79,78 @@ type Upstream struct {
 }
 
 // Client is an app that calls xellter (Babu, aixell, polifin, ...). It has one
-// xellter API key (stored only as a hash), its own kenari keys and its own
-// presets, which xellter generates from the models those keys can use.
+// xellter API key (stored only as a hash), its own kenari keys, one purpose that
+// decides how its text preset is scored, and at most one preset per category.
 type Client struct {
-	Name        string            `yaml:"name" json:"name"`
-	Enabled     bool              `yaml:"enabled" json:"enabled"`
-	KeyHash     string            `yaml:"key_hash" json:"key_hash"`
-	KeyHint     string            `yaml:"key_hint" json:"key_hint"`
-	Keys        []Upstream        `yaml:"keys" json:"keys"`                         // kenari API keys of this client
-	Presets     map[string]Preset `yaml:"presets" json:"presets"`                   // name -> preset; generated automatically, editable
-	Seeded      []string          `yaml:"seeded" json:"seeded"`                     // modalities already offered a generated preset
-	Passthrough []string          `yaml:"passthrough" json:"passthrough"`           // real model globs allowed directly; empty = none
-	DailyBudget float64           `yaml:"daily_budget_idr" json:"daily_budget_idr"` // 0 = unlimited
-	RTK         *bool             `yaml:"rtk" json:"rtk"`                           // nil = follow global
-	Note        string            `yaml:"note" json:"note"`
+	Name    string            `yaml:"name" json:"name"`
+	Enabled bool              `yaml:"enabled" json:"enabled"`
+	Purpose string            `yaml:"purpose" json:"purpose"` // general | coding | agentic | vision | bulk
+	KeyHash string            `yaml:"key_hash" json:"key_hash"`
+	KeyHint string            `yaml:"key_hint" json:"key_hint"`
+	Keys    []Upstream        `yaml:"keys" json:"keys"`       // kenari API keys of this client
+	Presets map[string]Preset `yaml:"presets" json:"presets"` // preset name (one per category) -> preset
+	Note    string            `yaml:"note" json:"note"`
 }
 
-// Weights are relative weights of the ranking components.
-type Weights struct {
-	Cost        float64 `yaml:"cost" json:"cost"`
-	Benchmark   float64 `yaml:"benchmark" json:"benchmark"`
-	Reliability float64 `yaml:"reliability" json:"reliability"`
-	Context     float64 `yaml:"context" json:"context"`
-}
-
-// Require are hard capability gates. There is no context-size gate: every
-// model the client's keys can call may serve a preset (ADR 0012).
-type Require struct {
-	ToolCall  bool `yaml:"tool_call" json:"tool_call"`
-	Vision    bool `yaml:"vision" json:"vision"`
-	Reasoning bool `yaml:"reasoning" json:"reasoning"`
-}
-
-// CostProfile is the reference request used to turn prices into one number.
-type CostProfile struct {
-	InputTokens  int     `yaml:"input_tokens" json:"input_tokens"`
-	OutputTokens int     `yaml:"output_tokens" json:"output_tokens"`
-	CachedRatio  float64 `yaml:"cached_ratio" json:"cached_ratio"`
-	Images       float64 `yaml:"images" json:"images"`
-	Seconds      float64 `yaml:"seconds" json:"seconds"`
-	Chars        float64 `yaml:"chars" json:"chars"`
-	Variant      string  `yaml:"variant" json:"variant"`
-}
-
-// Preset is a virtual model exposed to clients. Mode "auto" ranks the catalog;
-// mode "combo" uses Models as an explicit ordered list. A preset has no model
-// allow or deny list: the models the client's kenari keys may call are the
-// ones it can use (ADR 0012).
+// Preset is a virtual model exposed to clients: a chosen pool of real models
+// plus the rule that orders them. The name is fixed per category (text, image,
+// video, tts, stt, music, systemone), so a client cannot hold two of a kind.
 type Preset struct {
-	Description   string      `yaml:"description" json:"description"`
-	Modality      string      `yaml:"modality" json:"modality"` // chat | images | videos | audio_speech | audio_transcription | music
-	Mode          string      `yaml:"mode" json:"mode"`         // auto | combo
-	Models        []string    `yaml:"models" json:"models"`     // combo: ordered list
-	Require       Require     `yaml:"require" json:"require"`
-	MinQuality    float64     `yaml:"min_quality" json:"min_quality"`
-	MaxCandidates int         `yaml:"max_candidates" json:"max_candidates"`
-	Strategy      string      `yaml:"strategy" json:"strategy"` // round_robin | priority
-	RRBand        float64     `yaml:"rr_band" json:"rr_band"`   // score distance treated as a tie
-	Weights       Weights     `yaml:"weights" json:"weights"`
-	Cost          CostProfile `yaml:"cost_profile" json:"cost_profile"`
+	Category     string   `yaml:"category" json:"category"`         // chat | images | videos | audio_speech | audio_transcription | music | systemone
+	Optimization string   `yaml:"optimization" json:"optimization"` // cheapest | balanced | best_quality
+	Models       []string `yaml:"models" json:"models"`             // the pool, chosen in the panel
 }
 
-// Rules are the auto-route policy knobs shared by all auto presets.
-type Rules struct {
-	FreeBonus            float64 `yaml:"free_bonus" json:"free_bonus"`
-	PlanBonus            float64 `yaml:"plan_bonus" json:"plan_bonus"`
-	PlanCostFactor       float64 `yaml:"plan_cost_factor" json:"plan_cost_factor"` // share of list price a plan-covered request counts for
-	PromoBonusMax        float64 `yaml:"promo_bonus_max" json:"promo_bonus_max"`
-	PromoMinRemainingHrs float64 `yaml:"promo_min_remaining_hours" json:"promo_min_remaining_hours"`
-	UpcomingLookaheadHrs float64 `yaml:"upcoming_lookahead_hours" json:"upcoming_lookahead_hours"`
-	AvoidSunsetDays      int     `yaml:"avoid_sunset_days" json:"avoid_sunset_days"`
-	StickyMinutes        int     `yaml:"sticky_minutes" json:"sticky_minutes"`
-	StatsWindowHours     int     `yaml:"stats_window_hours" json:"stats_window_hours"`
+// Categories are the endpoint kinds a preset can serve, in display order.
+var Categories = []string{"chat", "images", "videos", "audio_speech", "audio_transcription", "music", "systemone"}
+
+// PresetName is the preset name of a category.
+func PresetName(category string) string {
+	return map[string]string{
+		"chat": "text", "images": "image", "videos": "video", "audio_speech": "tts",
+		"audio_transcription": "stt", "music": "music", "systemone": "systemone",
+	}[category]
 }
 
-// Resilience tunes retries, cooldowns and the circuit breaker.
-type Resilience struct {
-	MaxAttempts     int `yaml:"max_attempts" json:"max_attempts"`
-	CooldownBaseSec int `yaml:"cooldown_base_s" json:"cooldown_base_s"`
-	CooldownMaxSec  int `yaml:"cooldown_max_s" json:"cooldown_max_s"`
-	BreakerFailures int `yaml:"breaker_failures" json:"breaker_failures"`
-	BreakerOpenSec  int `yaml:"breaker_open_s" json:"breaker_open_s"`
+// CategoryOfPreset is the inverse of PresetName ("" when the name is unknown).
+func CategoryOfPreset(name string) string {
+	for _, c := range Categories {
+		if PresetName(c) == name {
+			return c
+		}
+	}
+	return ""
 }
 
-// RTK configures the tool-output compressor.
-type RTK struct {
-	Enabled     bool `yaml:"enabled" json:"enabled"`
-	MinChars    int  `yaml:"min_chars" json:"min_chars"`
-	MaxChars    int  `yaml:"max_chars" json:"max_chars"`
-	GitDiff     bool `yaml:"git_diff" json:"git_diff"`
-	Grep        bool `yaml:"grep" json:"grep"`
-	LS          bool `yaml:"ls" json:"ls"`
-	Logs        bool `yaml:"logs" json:"logs"`
-	Truncate    bool `yaml:"truncate" json:"truncate"`
-	DiffContext int  `yaml:"diff_context" json:"diff_context"`
-}
+// Purposes are the client purposes that change how a text preset is scored.
+var Purposes = []string{"general", "coding", "agentic", "vision", "bulk"}
 
-// Modalities are the endpoint kinds a preset can serve.
-var Modalities = []string{"chat", "images", "videos", "audio_speech", "audio_transcription", "music"}
+// Optimizations are the three preset rules.
+var Optimizations = []string{"cheapest", "balanced", "best_quality"}
 
 // Default returns the built-in configuration (no upstreams, no clients).
 func Default() *Config {
-	c := &Config{
+	return &Config{
 		Server: Server{
 			Listen: "127.0.0.1:8480", DataDir: "data", MaxBodyMB: 64, LogRetention: 30,
-			LogRequests: true, TrustedProxy: true, SessionHours: 12,
+			TrustedProxy: true, SessionHours: 12,
 			AdminHosts: []string{"localhost", "127.0.0.1"},
 		},
-		Kenari: Kenari{BaseURL: "https://kenari.id", SyncMinutes: 10, UserAgent: "xellter/1.0", FirstByteSecs: 60, MusicTimeoutSec: 900, AccountKeyEnv: "KENARI_ACCOUNT_KEY"},
-		Rules: Rules{
-			FreeBonus: 0.10, PlanBonus: 0.08, PlanCostFactor: 0.3, PromoBonusMax: 0.05, PromoMinRemainingHrs: 12, UpcomingLookaheadHrs: 24,
-			AvoidSunsetDays: 3, StickyMinutes: 30, StatsWindowHours: 24,
+		Kenari: Kenari{
+			BaseURL: "https://kenari.id", SyncMinutes: 10, UserAgent: "xellter/1.0",
+			FirstByteSecs: 60, MusicTimeoutSec: 900, AccountKeyEnv: "KENARI_ACCOUNT_KEY",
 		},
-		Resilience: Resilience{MaxAttempts: 4, CooldownBaseSec: 30, CooldownMaxSec: 900, BreakerFailures: 5, BreakerOpenSec: 120},
-		RTK:        RTK{Enabled: true, MinChars: 2000, MaxChars: 12000, GitDiff: true, Grep: true, LS: true, Logs: true, Truncate: true, DiffContext: 1},
-		Benchmarks: map[string]float64{},
+		Routing: Routing{
+			RankRefreshMinutes: 5, TopModels: 10, EvictErrors: 3, EvictWindowMin: 60,
+			EvictCooldownMin: 720, AvoidSunsetDays: 3, StickySession: true,
+		},
 	}
-	return c
 }
 
-// PresetModalities lists the kinds of presets xellter generates, in display order.
-var PresetModalities = []string{"chat", "images", "videos", "audio_speech", "audio_transcription", "music"}
-
-// PresetName is the generated preset name for a modality.
-func PresetName(modality string) string {
-	return map[string]string{"chat": "text", "images": "image", "videos": "video", "audio_speech": "tts", "audio_transcription": "stt", "music": "music"}[modality]
-}
-
-// CheckPresetNames enforces that every preset is one of the predefined kinds under its own name (text is chat,
-// image is images, ...). A client therefore never has two presets of one kind, and apps can rely on the names.
-func CheckPresetNames(c *Config) error {
-	for _, cl := range c.Clients {
-		for name, p := range cl.Presets {
-			kind := ""
-			for _, m := range PresetModalities {
-				if PresetName(m) == name {
-					kind = m
-				}
-			}
-			if kind == "" {
-				return fmt.Errorf("client %s: %q is not a preset name; use one of text, image, video, tts, stt, music", cl.Name, name)
-			}
-			if p.Modality != kind {
-				return fmt.Errorf("client %s: preset %q must be of kind %s", cl.Name, name, kind)
-			}
-		}
-	}
-	return nil
-}
-
-// DefaultPreset returns the generated preset for a modality.
-func DefaultPreset(modality string) Preset {
-	media := Weights{Cost: 70, Benchmark: 10, Reliability: 20}
-	switch modality {
-	case "chat":
-		return Preset{Description: "Text and chat. Picks the best model that is cheap enough.", Modality: "chat", Mode: "auto", Require: Require{ToolCall: true},
-			MinQuality: 0.50, MaxCandidates: 5, Strategy: "round_robin", RRBand: 0.04, Weights: Weights{Cost: 25, Benchmark: 35, Reliability: 15, Context: 5},
-			Cost: CostProfile{InputTokens: 4000, OutputTokens: 600, CachedRatio: 0.7}}
-	case "images":
-		return Preset{Description: "Image generation, free and cheap models first.", Modality: "images", Mode: "auto", MaxCandidates: 5, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Images: 1}}
-	case "videos":
-		return Preset{Description: "Video generation, cheapest first.", Modality: "videos", Mode: "auto", MaxCandidates: 5, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Seconds: 5, Variant: "720p"}}
-	case "audio_speech":
-		return Preset{Description: "Text to speech, cheapest first.", Modality: "audio_speech", Mode: "auto", MaxCandidates: 5, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Chars: 1000}}
-	case "audio_transcription":
-		return Preset{Description: "Speech to text, cheapest first.", Modality: "audio_transcription", Mode: "auto", MaxCandidates: 5, Strategy: "priority", RRBand: 0.03, Weights: media, Cost: CostProfile{Seconds: 60}}
-	}
-	return Preset{Description: "Music generation, cheapest first.", Modality: "music", Mode: "auto", MaxCandidates: 5, Strategy: "priority", RRBand: 0.03, Weights: media}
-}
-
-// DefaultPresets returns every generated preset keyed by name (used by tests and as a template).
-func DefaultPresets() map[string]Preset {
-	out := map[string]Preset{}
-	for _, m := range PresetModalities {
-		out[PresetName(m)] = DefaultPreset(m)
-	}
-	return out
+// DefaultPreset is the preset a new client gets for a category: an empty pool
+// and Balanced, so the owner only has to pick models.
+func DefaultPreset(category string) Preset {
+	return Preset{Category: category, Optimization: "balanced", Models: []string{}}
 }
 
 // Parse decodes YAML on top of defaults and validates the result.
@@ -254,9 +162,6 @@ func Parse(data []byte) (*Config, error) {
 	if err := yaml.Unmarshal(data, c); err != nil {
 		return nil, fmt.Errorf("parse yaml: %w", err)
 	}
-	if c.Benchmarks == nil {
-		c.Benchmarks = map[string]float64{}
-	}
 	c.fillDefaults()
 	if err := c.Validate(); err != nil {
 		return nil, err
@@ -267,35 +172,39 @@ func Parse(data []byte) (*Config, error) {
 // Normalize fills defaults and validates a config built outside Parse (for
 // example decoded from the admin panel's JSON).
 func Normalize(c *Config) error {
-	if c.Benchmarks == nil {
-		c.Benchmarks = map[string]float64{}
-	}
 	c.fillDefaults()
 	return c.Validate()
 }
 
 // checkRetired rejects configuration that still asks for something xellter no
 // longer does. Unknown keys are otherwise ignored, so a retired knob would look
-// like it still works; here it is an error that names the reason (ADR 0016).
+// like it still works; here it is an error that names the reason.
 func checkRetired(data []byte) error {
 	var probe struct {
-		JEV     any `yaml:"jev"`
-		Clients []struct {
-			Presets map[string]struct {
-				Weights map[string]any `yaml:"weights"`
-			} `yaml:"presets"`
+		Rules      any `yaml:"rules"`
+		Resilience any `yaml:"resilience"`
+		RTK        any `yaml:"rtk"`
+		Benchmarks any `yaml:"benchmarks"`
+		Clients    []struct {
+			Presets map[string]map[string]any `yaml:"presets"`
 		} `yaml:"clients"`
 	}
 	if err := yaml.Unmarshal(data, &probe); err != nil {
 		return nil // the real decode reports the syntax error with a better message
 	}
-	if probe.JEV != nil {
-		return errors.New("jev: the System One judge is gone; quality comes from benchmarks.<model> and the Arena leaderboard (ADR 0016)")
+	for key, val := range map[string]any{
+		"rules": probe.Rules, "resilience": probe.Resilience, "rtk": probe.RTK, "benchmarks": probe.Benchmarks,
+	} {
+		if val != nil {
+			return fmt.Errorf("%s: retired by the rewrite (ADR 0017); routing rules are constants and RTK is always on, see docs/rewrite-plan.md", key)
+		}
 	}
 	for _, cl := range probe.Clients {
 		for name, p := range cl.Presets {
-			if _, ok := p.Weights["jev"]; ok {
-				return fmt.Errorf("presets.%s.weights.jev: there is no judge to score; use benchmark (ADR 0016)", name)
+			for _, retired := range []string{"weights", "require", "min_quality", "max_candidates", "strategy", "rr_band", "mode", "cost_profile", "description"} {
+				if _, ok := p[retired]; ok {
+					return fmt.Errorf("presets.%s.%s: retired by the rewrite (ADR 0017); a preset is a category, an optimization and a model list", name, retired)
+				}
 			}
 		}
 	}
@@ -335,55 +244,41 @@ func (c *Config) fillDefaults() {
 	if c.Kenari.MusicTimeoutSec <= 0 {
 		c.Kenari.MusicTimeoutSec = d.Kenari.MusicTimeoutSec
 	}
-	if c.Resilience.MaxAttempts <= 0 {
-		c.Resilience.MaxAttempts = d.Resilience.MaxAttempts
-	}
-	if c.Resilience.CooldownBaseSec <= 0 {
-		c.Resilience.CooldownBaseSec = d.Resilience.CooldownBaseSec
-	}
-	if c.Resilience.CooldownMaxSec <= 0 {
-		c.Resilience.CooldownMaxSec = d.Resilience.CooldownMaxSec
-	}
-	if c.Resilience.BreakerFailures <= 0 {
-		c.Resilience.BreakerFailures = d.Resilience.BreakerFailures
-	}
-	if c.Resilience.BreakerOpenSec <= 0 {
-		c.Resilience.BreakerOpenSec = d.Resilience.BreakerOpenSec
-	}
-	if c.Rules.PlanCostFactor <= 0 {
-		c.Rules.PlanCostFactor = d.Rules.PlanCostFactor
-	}
-	if c.Rules.StatsWindowHours <= 0 {
-		c.Rules.StatsWindowHours = d.Rules.StatsWindowHours
-	}
-	if c.Rules.StickyMinutes < 0 {
-		c.Rules.StickyMinutes = 0
-	}
-	if c.RTK.MinChars <= 0 {
-		c.RTK.MinChars = d.RTK.MinChars
-	}
-	if c.RTK.MaxChars <= 0 {
-		c.RTK.MaxChars = d.RTK.MaxChars
-	}
 	if c.Kenari.AccountKeyEnv == "" {
 		c.Kenari.AccountKeyEnv = d.Kenari.AccountKeyEnv
 	}
+	r := &c.Routing
+	if r.TopModels <= 0 {
+		r.TopModels = d.Routing.TopModels
+	}
+	if r.EvictErrors <= 0 {
+		r.EvictErrors = d.Routing.EvictErrors
+	}
+	if r.EvictWindowMin <= 0 {
+		r.EvictWindowMin = d.Routing.EvictWindowMin
+	}
+	if r.EvictCooldownMin <= 0 {
+		r.EvictCooldownMin = d.Routing.EvictCooldownMin
+	}
+	if r.RankRefreshMinutes < 0 {
+		r.RankRefreshMinutes = 0
+	}
 	for i := range c.Clients {
 		cl := &c.Clients[i]
-		for name, s := range cl.Presets {
-			if s.Mode == "" {
-				s.Mode = "auto"
+		if cl.Purpose == "" {
+			cl.Purpose = "general"
+		}
+		for name, p := range cl.Presets {
+			if p.Category == "" {
+				p.Category = CategoryOfPreset(name)
 			}
-			if s.Strategy == "" {
-				s.Strategy = "round_robin"
+			if p.Optimization == "" {
+				p.Optimization = "balanced"
 			}
-			if s.MaxCandidates <= 0 {
-				s.MaxCandidates = 5
+			if p.Models == nil {
+				p.Models = []string{}
 			}
-			if s.RRBand < 0 {
-				s.RRBand = 0
-			}
-			cl.Presets[name] = s
+			cl.Presets[name] = p
 		}
 	}
 }
@@ -413,7 +308,10 @@ func (c *Config) Validate() error {
 		if cl.KeyHash != "" && !hashRe.MatchString(cl.KeyHash) {
 			bad("client %q: key_hash must be sha256 hex", cl.Name)
 		}
-		checkGlobs(&errs, "client "+cl.Name+".passthrough", cl.Passthrough)
+		// An empty purpose is the general one: a client created before the field existed must keep working.
+		if cl.Purpose != "" && !contains(Purposes, cl.Purpose) {
+			bad("client %q: purpose must be one of %v", cl.Name, Purposes)
+		}
 		kseen := map[string]bool{}
 		for _, u := range cl.Keys {
 			if !nameRe.MatchString(u.Name) {
@@ -431,56 +329,54 @@ func (c *Config) Validate() error {
 			}
 			envSeen[u.KeyEnv] = cl.Name + "/" + u.Name
 		}
-		for name, s := range cl.Presets {
+		cats := map[string]string{} // category -> preset name, to catch a second preset of a kind
+		for name, p := range cl.Presets {
 			where := "client " + cl.Name + " preset " + name
 			if !nameRe.MatchString(name) {
 				bad("%s: invalid name", where)
 			}
-			if !contains(Modalities, s.Modality) {
-				bad("%s: modality must be one of %v", where, Modalities)
+			want := CategoryOfPreset(name)
+			if want == "" {
+				bad("%s: not a preset name; use one of text, image, video, tts, stt, music, systemone", where)
+				continue
 			}
-			if s.Mode != "auto" && s.Mode != "combo" {
-				bad("%s: mode must be auto or combo", where)
+			if p.Category != "" && p.Category != want {
+				bad("%s: must be of category %s", where, want)
 			}
-			if s.Mode == "combo" && len(s.Models) == 0 {
-				bad("%s: combo needs models", where)
+			if other, dup := cats[want]; dup {
+				bad("%s: a client may hold only one %s preset (already %q)", where, want, other)
 			}
-			if s.Strategy != "round_robin" && s.Strategy != "priority" {
-				bad("%s: strategy must be round_robin or priority", where)
+			cats[want] = name
+			if !contains(Optimizations, p.Optimization) {
+				bad("%s: optimization must be one of %v", where, Optimizations)
 			}
-			w := s.Weights
-			if w.Cost < 0 || w.Benchmark < 0 || w.Reliability < 0 || w.Context < 0 {
-				bad("%s: weights must be >= 0", where)
-			}
-			if s.Mode == "auto" && w.Cost+w.Benchmark+w.Reliability+w.Context <= 0 {
-				bad("%s: at least one weight must be > 0", where)
-			}
-			if s.MinQuality < 0 || s.MinQuality > 1 {
-				bad("%s: min_quality must be 0..1", where)
+			seen := map[string]bool{}
+			for _, m := range p.Models {
+				if strings.TrimSpace(m) == "" {
+					bad("%s: empty model id", where)
+					continue
+				}
+				if seen[m] {
+					bad("%s: model %q listed twice", where, m)
+				}
+				seen[m] = true
 			}
 		}
 	}
 	if c.Kenari.AccountKeyEnv != "" && !envRe.MatchString(c.Kenari.AccountKeyEnv) {
 		bad("kenari.account_key_env must look like KENARI_ACCOUNT_KEY")
 	}
-	for m, v := range c.Benchmarks {
-		if v < 0 || v > 100 {
-			bad("benchmarks[%q] must be 0..100", m)
-		}
+	if c.Routing.TopModels < 1 || c.Routing.TopModels > 50 {
+		bad("routing.top_models must be 1..50")
+	}
+	if c.Routing.EvictWindowMin < 1 || c.Routing.EvictCooldownMin < 1 {
+		bad("routing.evict_window_minutes and evict_cooldown_minutes must be >= 1")
 	}
 	if len(errs) > 0 {
 		sort.Strings(errs)
 		return errors.New(strings.Join(errs, "; "))
 	}
 	return nil
-}
-
-func checkGlobs(errs *[]string, where string, globs []string) {
-	for _, g := range globs {
-		if _, err := path.Match(g, "x"); err != nil {
-			*errs = append(*errs, fmt.Sprintf("%s: bad glob %q", where, g))
-		}
-	}
 }
 
 func contains(list []string, v string) bool {
@@ -637,6 +533,20 @@ func SetSecret(file, name, value string) error {
 	}
 	m := LoadSecrets(file)
 	m[name] = value
+	return writeSecrets(file, m)
+}
+
+// DeleteSecret removes one secret from the secrets file.
+func DeleteSecret(file, name string) error {
+	m := LoadSecrets(file)
+	if _, ok := m[name]; !ok {
+		return nil
+	}
+	delete(m, name)
+	return writeSecrets(file, m)
+}
+
+func writeSecrets(file string, m map[string]string) error {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
@@ -648,29 +558,6 @@ func SetSecret(file, name, value string) error {
 	}
 	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
 		return err
-	}
-	tmp := file + ".tmp"
-	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, file)
-}
-
-// DeleteSecret removes one secret from the secrets file.
-func DeleteSecret(file, name string) error {
-	m := LoadSecrets(file)
-	if _, ok := m[name]; !ok {
-		return nil
-	}
-	delete(m, name)
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var b strings.Builder
-	for _, k := range keys {
-		b.WriteString(k + "=" + m[k] + "\n")
 	}
 	tmp := file + ".tmp"
 	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {

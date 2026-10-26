@@ -1,81 +1,164 @@
 # Configuration reference
 
-One YAML file (`xellter -config`, default `xellter.yaml`, or `$XELLTER_CONFIG`). Missing fields take the defaults below; the panel (Config tab) edits the same data and keeps history. Unknown keys are ignored. Run `xellter check` to validate.
+One YAML file (`xellter -config`, default `xellter.yaml`, or `$XELLTER_CONFIG`). Missing fields take
+the defaults below. The panel's Config tab edits the same file, validates it, keeps a history under
+`<data_dir>/config-history` (last 50) and can restore a version. Run `xellter check` to validate
+without starting.
+
+Unknown keys are ignored — except the ones the rewrite deleted, which are **refused** (see the last
+section).
+
+## Shape
+
+```yaml
+server:   { listen, data_dir, secrets_file, admin_hosts, max_body_mb, log_retention_days,
+            trusted_proxy, session_hours, auth_record }
+kenari:   { base_url, sync_minutes, user_agent, first_byte_timeout_s, music_timeout_s, account_key_env }
+routing:  { rank_refresh_minutes, top_models, evict_errors, evict_window_minutes,
+            evict_cooldown_minutes, avoid_sunset_days, sticky_session }
+clients[]:
+  - { name, enabled, purpose, key_hash, key_hint, note,
+      keys[]:    { name, key_env },
+      presets{}: { <preset name>: { category, optimization, models[] } } }
+```
 
 ## server
+
 | key | default | meaning |
 |---|---|---|
-| `listen` | `127.0.0.1:8480` | bind address; keep it on loopback and put Tailscale/Caddy/cloudflared in front |
-| `data_dir` | `data` | relative paths resolve against the config file |
-| `secrets_file` | `<data_dir>/secrets.env` | `NAME=value` lines (0600); written by the panel's "Set key value" |
-| `auth_record` | `<data_dir>/auth-record.json` | admin login (`xellter admin init`) |
-| `admin_hosts` | `[localhost, 127.0.0.1]` | `Host` header values that may open `/admin`; others get 404. Add the tailnet name. Globs allowed |
-| `trusted_proxy` | `true` | use `X-Forwarded-For` for rate limiting and `X-Forwarded-Proto` for the Secure cookie |
-| `max_body_mb` | `64` | request body limit |
-| `log_retention_days` | `30` | request log retention |
-| `session_hours` | `12` | admin session lifetime |
+| `listen` | `127.0.0.1:8480` | bind address; must contain `:`. Keep it on loopback and put Tailscale/Caddy/cloudflared in front |
+| `data_dir` | `data` | SQLite, catalog cache, secrets, config history. Relative paths resolve against the config file |
+| `secrets_file` | `<data_dir>/secrets.env` | `NAME=value` lines, 0600; written by the panel |
+| `auth_record` | `<data_dir>/auth-record.json` | admin login record (`xellter admin init`) |
+| `admin_hosts` | `[localhost, 127.0.0.1]` | `Host` values allowed to reach `/admin`; globs allowed; anything else is 404. Add the tailnet name |
+| `max_body_mb` | `64` | request body limit (413 above it) |
+| `log_retention_days` | `30` | request-log retention; purged every 6 h |
+| `trusted_proxy` | `true` | honour `X-Forwarded-For` (rate limiting, login) and `X-Forwarded-Proto` (Secure cookie) |
+| `session_hours` | `12` | admin login lifetime |
 
 ## kenari
-`base_url` (`https://kenari.id`), `account_key_env` (secret name of the optional full-access account key; it only reads plan, usage and balance), `sync_minutes` (10), `first_byte_timeout_s` (60; non-streaming requests get 3×), `music_timeout_s` (900), `user_agent`.
+
+| key | default | meaning |
+|---|---|---|
+| `base_url` | `https://kenari.id` | upstream gateway |
+| `sync_minutes` | `10` | catalog refresh interval |
+| `user_agent` | `xellter/1.0` | sent upstream; kenari blocks the default Go UA |
+| `first_byte_timeout_s` | `60` | per attempt; non-streaming requests get 3x |
+| `music_timeout_s` | `900` | music generation timeout |
+| `account_key_env` | `KENARI_ACCOUNT_KEY` | secret name of an optional full-access key. It only reads plan, usage and balance, never serves a request. Must look like `UPPER_SNAKE` |
+
+## routing
+
+The seven knobs that survived the rewrite. Everything a preset or a model decides is not here: the
+optimization lives on the preset, and RTK, retry-once, key cooldown, the breaker and the reference
+request are constants. The panel does not edit `routing`: change it in this file or through
+`PUT /admin/api/config`.
+
+| key | default | meaning |
+|---|---|---|
+| `rank_refresh_minutes` | `5` | rebuild every ranking on this interval; also rebuilt after every catalog sync and every config change. Keep it >= 1: validation accepts `0` (and clamps a negative to it), but the refresh loop cannot start with a zero interval and the process panics at start-up |
+| `top_models` | `10` | how many models a preset routes against; 1..50 |
+| `evict_errors` | `3` | failures that take a model out of a preset |
+| `evict_window_minutes` | `60` | the window those failures are counted in; >= 1 |
+| `evict_cooldown_minutes` | `720` | how long the model stays out of that preset; >= 1 |
+| `avoid_sunset_days` | `3` | a model retiring sooner than this is rejected when ranking |
+| `sticky_session` | `true` | one model per session, for the life of the session (ADR 0020) |
+
+There is no way to switch the timer off: `0` is not a working value (see above). Rankings are always
+rebuilt after a catalog sync, after a config change and from the panel's Recalculate button.
 
 ## clients[]
-A client is one app that calls xellter. It has its own kenari keys and its own presets.
+
+A client is one app that calls xellter. It owns its kenari keys, one purpose and at most one preset
+per category.
 
 | key | meaning |
 |---|---|
-| `name` | letters, digits, dot, dash, underscore |
-| `enabled` | a disabled client gets 403 |
-| `key_hash`, `key_hint` | sha256 of the xellter key the app uses, and its last 4 characters; never the key itself |
+| `name` | `[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}`, unique |
+| `enabled` | a disabled client authenticates as 403 |
+| `purpose` | `general` \| `coding` \| `agentic` \| `vision` \| `bulk`; empty means `general`. Changes how the **text** preset is scored, never which models are in it (ADR 0018) |
+| `key_hash` | sha256 hex of the xellter key the app uses; created by `xellter client add` or the panel. Never the key itself |
+| `key_hint` | last four characters of that key, for display |
 | `keys[]` | the client's kenari API keys, see below |
-| `presets{}` | name -> preset. **Generated automatically** from the models the client's keys can call (see below); every field is editable |
-| `seeded[]` | kinds (`chat`, `images`, `videos`, `audio_speech`, `audio_transcription`, `music`) that already got a generated preset, so a deleted or edited preset is never recreated |
-| `passthrough` | real-model globs the app may also call directly; normally empty |
-| `daily_budget_idr` | spending cap at list price, free and plan traffic included; 0 = unlimited |
-| `rtk` | `null` = follow the global token saver setting |
+| `presets{}` | preset name -> preset, at most one per category, see below |
 | `note` | free text |
 
-The panel shows none of the client-level knobs: they keep their defaults, and the defaults are the sensible ones (see ADR 0012).
+### clients[].keys[]
 
-### keys[]
-A kenari key has a name and nothing else: `name` and `key_env` (the name of the secret that holds the key value in `data/secrets.env`, unique across clients). xellter detects the account, the plan, the tier and the limits by itself; the models a key may call are learned from kenari (a probe or a 400 answer), never configured. Rename a key in the panel; the secret moves with it.
-
-### Generated presets
-For each kind that has at least one model callable by the client's keys, xellter creates one preset once: `text` (chat), `image`, `video`, `tts` (text to speech), `stt` (speech to text), `music`. A client is only seeded after all its enabled keys have been probed. Preset names are predefined and a client has each at most once: the admin API refuses any other name or a kind that does not match its name. A preset can be edited or deleted (it is not recreated) and added back from the panel ("Add preset" lists only the missing ones). Preset names take precedence over real model names.
-
-## presets (per client)
-Key = the name the app sends as `model`.
+A kenari key is a name and a secret name. xellter detects the account, the plan, the tier, the limits
+and the models a key may call by itself.
 
 | key | meaning |
 |---|---|
-| `modality` | `chat`, `images`, `videos`, `audio_speech`, `audio_transcription`, `music` |
-| `mode` | `auto` (rank the callable models) or `combo` (use `models` in order) |
-| `models` | combo list |
-| `require` | `tool_call`, `vision`, `reasoning` |
-| `min_quality` | 0..1 quality gate |
-| `max_candidates` | size of the main list (5 by default) |
-| `strategy` / `rr_band` | `round_robin` rotates within `rr_band` of the top score; `priority` always starts with the best |
-| `weights` | relative weights of `cost`, `benchmark`, `reliability`, `context` |
-| `cost_profile` | reference request: `input_tokens`, `output_tokens`, `cached_ratio` (chat); `images`; `seconds`, `variant` (video/STT); `chars` (TTS) |
+| `name` | `[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}`, unique inside the client |
+| `key_env` | name of the secret holding the value, `UPPER_SNAKE`; must be unique across the whole file. `xellter key add` derives it from client and key name |
 
-A preset has no model allow or deny list and no context-size gate: the models the client's keys may call are the ones it can use, and the context size is only a soft preference in the score (ADR 0012).
+The value lives in `data/secrets.env` (0600), never in the YAML.
 
-In the panel, a preset card offers the objective buttons ("Optimise for"): Cheapest (cost/benchmark/reliability/context 60/10/15/5, .35), Balanced (25/35/15/5, .50), Best quality (2/55/15/3, .64), the tie-break strategy, and the tool-calling and image-input requirements. Everything else keeps the backend default.
+### clients[].presets[]
 
-## rules
-`free_bonus` .10, `plan_bonus` .08, `plan_cost_factor` .3 (a plan-covered request counts for this share of its list price, because plan budget is finite), `promo_bonus_max` .05, `promo_min_remaining_hours` 12, `upcoming_lookahead_hours` 24, `avoid_sunset_days` 3, `sticky_minutes` 30, `stats_window_hours` 24.
+Key = the model name the app sends. The name is fixed by the category, so a second preset of a kind
+cannot be expressed and is refused by validation.
 
-The panel shows only `sticky_minutes` and `avoid_sunset_days`; the other rules keep the backend default (ADR 0014).
+| Category | Preset name | kenari endpoint |
+|---|---|---|
+| `chat` | `text` | `/v1/chat/completions`, `/v1/responses`, `/v1/messages` |
+| `images` | `image` | `/v1/images/*` |
+| `videos` | `video` | `/v1/videos` |
+| `audio_speech` | `tts` | `/v1/audio/speech` |
+| `audio_transcription` | `stt` | `/v1/audio/transcriptions` |
+| `music` | `music` | `/v1/music` |
+| `systemone` | `systemone` | `/v1/models?modality=systemone` |
 
-Sticky sessions are keyed by `X-Xellter-Session` (also `X-Session-Id`, `X-Claude-Code-Session-Id`), `prompt_cache_key`, `user`, or a hash of the first messages. Identical first messages therefore stay on one model.
+| key | meaning |
+|---|---|
+| `category` | optional; must match the name when given, otherwise derived from it |
+| `optimization` | `cheapest` \| `balanced` \| `best_quality`; empty means `balanced` |
+| `models` | the pool: explicit catalog model ids, no duplicates, no blanks. The optimization only orders what is listed here; nothing is added or removed automatically |
 
-## resilience
-`max_attempts` 4, `cooldown_base_s` 30, `cooldown_max_s` 900, `breaker_failures` 5, `breaker_open_s` 120. Not in the panel (ADR 0014).
+A new preset starts with an empty pool and `balanced`. A model id that leaves kenari's catalog is
+reported as `not in the kenari catalog` instead of disappearing from the list.
 
-## rtk
-`enabled`, `min_chars` (2000), `max_chars` (12000), `git_diff`, `grep`, `ls`, `logs`, `truncate`, `diff_context` (1). Per request: header `X-Xellter-RTK: off`.
+## Removed sections are refused
 
-The panel shows `enabled` and the five filters; `min_chars`, `max_chars` and `diff_context` keep the backend default (ADR 0014).
+The rewrite deleted the ranking and routing machinery. A file that still carries any of it fails to
+load with a message naming **ADR 0017** and pointing at `docs/rewrite-plan.md`, because unknown keys
+are otherwise ignored and a retired knob would look like it still works.
 
-## benchmarks{}
-Your own quality scores, 0..100, per model id. They override the leaderboard. Without one, xellter uses the Arena leaderboard (`internal/bench`, refreshed daily from the public Hugging Face dataset) and, for models it does not list, an estimate from price.
-`model-id: 0..100`. Replaces the price proxy for that model. Not in the panel (ADR 0014).
+| Refused | Was |
+|---|---|
+| `rules` | `free_bonus`, `plan_bonus`, `plan_cost_factor`, `promo_bonus_max`, `promo_min_remaining_hours`, `upcoming_lookahead_hours`, `avoid_sunset_days`, `sticky_minutes`, `stats_window_hours` |
+| `resilience` | `max_attempts`, `cooldown_base_s`, `cooldown_max_s`, `breaker_failures`, `breaker_open_s` |
+| `rtk` | `enabled`, `min_chars`, `max_chars`, the five filters, `diff_context` — RTK is always on |
+| `benchmarks` | owner-typed 0..100 scores — quality is fetched |
+| `presets.<name>.weights` | per-preset component weights |
+| `presets.<name>.require` | `tool_call`, `vision`, `reasoning` gates |
+| `presets.<name>.min_quality` | quality gate |
+| `presets.<name>.max_candidates` | list size — `routing.top_models` replaces it |
+| `presets.<name>.strategy` | `round_robin` / `priority` — routing is always round-robin |
+| `presets.<name>.rr_band` | round-robin band |
+| `presets.<name>.mode` | `auto` / `combo` — a preset is a pool plus an optimization |
+| `presets.<name>.cost_profile` | reference request — fixed per category |
+| `presets.<name>.description` | free text |
+
+Client-level `passthrough`, `daily_budget_idr` and `seeded` are **not** refused: they are silently
+ignored, so an old file still loads. Being in a preset's pool is the allow list now (ADR 0019), the
+per-client budget is gone, and presets are never generated.
+
+## Migrating an old file
+
+```sh
+xellter migrate -config xellter.yaml           # prints the new file and a list of manual follow-ups
+xellter migrate -config xellter.yaml -write    # keeps the old one as xellter.yaml.pre-rewrite
+```
+
+The migration keeps server and kenari settings, every client with its keys, hash, hint and note, and
+every preset whose name is one of the seven (name, category and model list are preserved). The
+purpose becomes `general` and the optimization `balanced`. It reports every preset left with an empty
+pool and every preset dropped because its name is not a fixed one. A preset whose stored `modality`
+contradicts its fixed name fails validation, and the command prints that error instead of writing.
+Secrets are untouched.
+
+A pool is only carried over when the old preset listed explicit models (a `combo`); an `auto` preset
+becomes an empty pool, so its models must be ticked in the panel before it serves. See "Known gaps" in
+`docs/plan.md`.

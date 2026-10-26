@@ -15,39 +15,30 @@ kenari:
   # and balance; it is never used to serve requests.
   account_key_env: KENARI_ACCOUNT_KEY
 
-# A client is one app that calls xellter. It has its own kenari keys, and xellter
-# generates its presets from the models those keys can call.
+# Routing is the same for every client and preset. These are the only knobs left.
+routing:
+  rank_refresh_minutes: 5         # rankings are rebuilt on this interval, after a catalog sync, and by Recalculate
+  top_models: 10                  # how many models a preset routes against
+  evict_errors: 3                 # errors that take a model out of one preset
+  evict_window_minutes: 60        # ... counted inside this window
+  evict_cooldown_minutes: 720     # ... and the model is skipped for this long
+  avoid_sunset_days: 3            # a model retiring sooner than this is not offered
+  sticky_session: true            # one model per session, for the life of the session
+
+# A client is one app that calls xellter. It has its own kenari keys, one purpose
+# that decides how its text preset is scored, and at most one preset per category.
 clients:
   - name: babu
     enabled: true
+    purpose: general              # general | coding | agentic | vision | bulk
     key_hash: ""                  # sha256 of the xellter key; created by `xellter client add` or the panel
     keys:                         # kenari API keys of this client (values live in data/secrets.env)
       - name: main
         key_env: KENARI_KEY_BABU_MAIN
-    presets: {}                   # filled automatically: text, image, video, tts, stt, music
-    seeded: []                    # kinds that already got a generated preset
-    daily_budget_idr: 0           # 0 = unlimited
-    passthrough: []               # real model globs the app may also call directly, normally empty
-    # You can also write presets by hand, for example a second text preset:
-    # presets:
-    #   coding:
-    #     modality: chat
-    #     mode: auto
-    #     strategy: priority
-    #     require: {tool_call: true}
-    #     min_quality: 0.55
-    #     weights: {cost: 20, benchmark: 35, reliability: 15, context: 10}
-
-rules:
-  free_bonus: 0.10
-  plan_bonus: 0.08
-  promo_bonus_max: 0.05
-  sticky_minutes: 30
-
-# Benchmark scores (0-100) override the leaderboard. Use numbers from a benchmark
-# that matches your workload; leave empty to rely on the Arena leaderboard and the
-# price-based estimate.
-benchmarks: {}
-
-rtk:
-  enabled: true
+    presets:                      # one entry per category; the name is fixed by the category
+      text:                       # chat   | image: images | video: videos
+        category: chat            # tts: audio_speech | stt: audio_transcription
+        optimization: balanced    # music: music | systemone: systemone
+        models: []                # the pool, picked in the panel; the optimization only orders it
+    # A second preset of the same category is refused: a client holds one of each.
+    # optimization: cheapest | balanced | best_quality

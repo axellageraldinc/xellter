@@ -169,14 +169,32 @@ func TestAdminConfigClientsAndRollback(t *testing.T) {
 			polifin = c
 		}
 	}
-	if _, ok := polifin.Presets["text"]; !ok || polifin.Presets["image"].Modality != "images" {
-		t.Fatalf("presets were not generated: %+v", polifin.Presets)
+	// presets are not generated any more: a new client starts empty and the owner picks its models
+	if len(polifin.Presets) != 0 {
+		t.Fatalf("a new client must start with no presets: %+v", polifin.Presets)
 	}
-	if r, _ := ae.post(t, created.Key, "/v1/chat/completions", `{"model":"text","messages":[{"role":"user","content":"hi"}]}`); r.StatusCode != 200 {
-		t.Fatalf("new client key rejected: %d", r.StatusCode)
+	// the key authenticates, but with no preset configured there is nothing to route to
+	if r, _ := ae.post(t, created.Key, "/v1/chat/completions", `{"model":"text","messages":[{"role":"user","content":"hi"}]}`); r.StatusCode != 404 {
+		t.Fatalf("a client without presets must not serve: %d", r.StatusCode)
 	}
-	if r, _ := ae.post(t, created.Key, "/v1/chat/completions", `{"model":"cheap-b","messages":[{"role":"user","content":"hi"}]}`); r.StatusCode != 403 {
-		t.Fatalf("direct models must be off by default: %d", r.StatusCode)
+	// give it a preset and it serves at once
+	_, b = ae.do(t, ck, "GET", "/admin/api/config", nil)
+	var full struct{ Config map[string]any }
+	_ = json.Unmarshal(b, &full)
+	for _, c := range full.Config["clients"].([]any) {
+		cl := c.(map[string]any)
+		if cl["name"] == "polifin" {
+			cl["presets"] = map[string]any{"text": map[string]any{"category": "chat", "optimization": "cheapest", "models": []any{"cheap-b"}}}
+		}
+	}
+	if r, b := ae.do(t, ck, "PUT", "/admin/api/config", map[string]any{"config": full.Config}); r.StatusCode != 200 {
+		t.Fatalf("config with a preset: %d %s", r.StatusCode, b)
+	}
+	if r, b := ae.post(t, created.Key, "/v1/chat/completions", `{"model":"text","messages":[{"role":"user","content":"hi"}]}`); r.StatusCode != 200 {
+		t.Fatalf("new client key rejected: %d %s", r.StatusCode, b)
+	}
+	if r, _ := ae.post(t, created.Key, "/v1/chat/completions", `{"model":"pro-c","messages":[{"role":"user","content":"hi"}]}`); r.StatusCode != 403 {
+		t.Fatalf("a model outside the pool must be refused: %d", r.StatusCode)
 	}
 	data, _ := os.ReadFile(ae.a.Path)
 	if strings.Contains(string(data), created.Key) || strings.Contains(string(data), "kn-polifin") {
@@ -207,31 +225,31 @@ func TestAdminConfigClientsAndRollback(t *testing.T) {
 	text := func() map[string]any {
 		return cur.Config["clients"].([]any)[0].(map[string]any)["presets"].(map[string]any)["text"].(map[string]any)
 	}
-	text()["strategy"] = "nonsense"
+	text()["optimization"] = "nonsense"
 	if r, _ := ae.do(t, ck, "PUT", "/admin/api/config", map[string]any{"config": cur.Config}); r.StatusCode != 422 {
 		t.Fatalf("invalid config accepted: %d", r.StatusCode)
 	}
-	if ae.a.Cfg().Clients[0].Presets["text"].Strategy == "nonsense" {
+	if ae.a.Cfg().Clients[0].Presets["text"].Optimization == "nonsense" {
 		t.Fatal("invalid config was applied")
 	}
 
-	// presets are predefined: a made-up name is refused, and once it is gone the config is accepted
-	text()["strategy"] = "priority"
+	// a preset name that is not one of the categories is refused
 	presetsOf := func(i int) map[string]any {
 		return cur.Config["clients"].([]any)[i].(map[string]any)["presets"].(map[string]any)
 	}
+	text()["optimization"] = "balanced"
+	presetsOf(0)["my-preset"] = map[string]any{"category": "chat", "optimization": "cheapest"}
 	if r, b := ae.do(t, ck, "PUT", "/admin/api/config", map[string]any{"config": cur.Config}); r.StatusCode != 422 || !strings.Contains(string(b), "not a preset name") {
 		t.Fatalf("custom preset name accepted: %d %s", r.StatusCode, b)
 	}
-	for i := range cur.Config["clients"].([]any) {
-		delete(presetsOf(i), "budget")
-	}
+	delete(presetsOf(0), "my-preset")
 
 	// a valid edit applies live and is reversible
+	text()["optimization"] = "best_quality"
 	if r, b := ae.do(t, ck, "PUT", "/admin/api/config", map[string]any{"config": cur.Config}); r.StatusCode != 200 {
 		t.Fatalf("valid config rejected: %d %s", r.StatusCode, b)
 	}
-	if ae.a.Cfg().Clients[0].Presets["text"].Strategy != "priority" {
+	if ae.a.Cfg().Clients[0].Presets["text"].Optimization != "best_quality" {
 		t.Fatal("edit not applied")
 	}
 	_, b = ae.do(t, ck, "GET", "/admin/api/config", nil)
@@ -242,8 +260,8 @@ func TestAdminConfigClientsAndRollback(t *testing.T) {
 	if r, b := ae.do(t, ck, "POST", "/admin/api/rollback", map[string]string{"id": cur.History[0]}); r.StatusCode != 200 {
 		t.Fatalf("rollback: %d %s", r.StatusCode, b)
 	}
-	if got := ae.a.Cfg().Clients[0].Presets["text"].Strategy; got != "round_robin" {
-		t.Fatalf("rollback did not restore the previous strategy: %s", got)
+	if got := ae.a.Cfg().Clients[0].Presets["text"].Optimization; got == "best_quality" {
+		t.Fatalf("rollback did not restore the previous optimization: %s", got)
 	}
 
 	// ranking and the UI shell are served
@@ -287,15 +305,15 @@ func TestAdminKeysAndOverview(t *testing.T) {
 			Name    string
 			Keys    []struct{ Label string }
 			Presets []struct {
-				Name   string
-				Models int
+				Name string
+				Pool int
 			}
 		}
 	}
-	if err := json.Unmarshal(b, &ov); err != nil || ov.Status == "" || len(ov.Clients) != 4 {
+	if err := json.Unmarshal(b, &ov); err != nil || ov.Status == "" || len(ov.Clients) != 5 {
 		t.Fatalf("overview incomplete: %v %s", err, b)
 	}
-	if len(ov.Clients[0].Keys) != 3 || len(ov.Clients[0].Presets) == 0 || ov.Clients[0].Presets[0].Name != "text" || ov.Clients[0].Presets[0].Models == 0 {
+	if len(ov.Clients[0].Keys) != 3 || len(ov.Clients[0].Presets) == 0 || ov.Clients[0].Presets[0].Name != "text" || ov.Clients[0].Presets[0].Pool == 0 {
 		t.Fatalf("client row wrong: %+v", ov.Clients[0])
 	}
 	noKey := false

@@ -15,41 +15,66 @@ func TestMinimalYAMLWorksAndDefaultsFill(t *testing.T) {
 	if c.Server.Listen != "127.0.0.1:8480" || c.Kenari.AccountKeyEnv != "KENARI_ACCOUNT_KEY" {
 		t.Fatalf("defaults missing: %+v", c.Clients[0].Keys[0])
 	}
+	// the routing constants keep their defaults, and a client with no purpose is general
+	if c.Routing.TopModels != 10 || c.Routing.EvictErrors != 3 || !c.Routing.StickySession {
+		t.Fatalf("routing defaults missing: %+v", c.Routing)
+	}
+	if c.Clients[0].Purpose != "general" {
+		t.Fatalf("purpose default missing: %q", c.Clients[0].Purpose)
+	}
 }
 
-func TestGeneratedPresetsCoverEveryKind(t *testing.T) {
-	want := map[string]string{"chat": "text", "images": "image", "videos": "video", "audio_speech": "tts", "audio_transcription": "stt", "music": "music"}
+// Preset names are fixed per category, so a client can hold at most one of a kind, and a new client gets an
+// empty Balanced pool to fill in the panel.
+func TestPresetNamesCoverEveryCategory(t *testing.T) {
+	want := map[string]string{
+		"chat": "text", "images": "image", "videos": "video", "audio_speech": "tts",
+		"audio_transcription": "stt", "music": "music", "systemone": "systemone",
+	}
+	if len(Categories) != len(want) {
+		t.Fatalf("categories: %v", Categories)
+	}
 	for kind, name := range want {
 		if PresetName(kind) != name {
-			t.Errorf("%s -> %s", kind, PresetName(kind))
+			t.Errorf("%s -> %q, want %q", kind, PresetName(kind), name)
+		}
+		if got := CategoryOfPreset(name); got != kind {
+			t.Errorf("%s -> %q, want %q", name, got, kind)
 		}
 		p := DefaultPreset(kind)
-		if p.Modality != kind || p.Mode != "auto" || p.MaxCandidates == 0 || p.Weights.Cost == 0 {
-			t.Errorf("preset %s incomplete: %+v", kind, p)
+		if p.Category != kind || p.Optimization != "balanced" || len(p.Models) != 0 {
+			t.Errorf("default preset %s: %+v", kind, p)
 		}
 	}
-	if p := DefaultPreset("chat"); !p.Require.ToolCall || p.MinQuality == 0 {
-		t.Error("text preset must require tool calling and a quality floor")
+	if CategoryOfPreset("budget") != "" || PresetName("telepathy") != "" {
+		t.Fatal("unknown categories and presets must not map to anything")
 	}
 }
 
 func TestValidationCatchesMistakes(t *testing.T) {
-	good := "    keys:\n      - {name: main, key_env: KENARI_KEY_A}\n"
 	cases := map[string]string{
 		"bad secret name":          "clients:\n  - name: x\n    keys:\n      - {name: main, key_env: sk-live-123}\n",
 		"duplicate key in client":  "clients:\n  - name: x\n    keys:\n      - {name: a, key_env: K1}\n      - {name: a, key_env: K2}\n",
 		"secret shared by clients": "clients:\n  - name: x\n    keys:\n      - {name: a, key_env: K1}\n  - name: y\n    keys:\n      - {name: a, key_env: K1}\n",
 		"duplicate client":         "clients:\n  - {name: x}\n  - {name: x}\n",
-		"combo without models":     "clients:\n  - name: x\n" + good + "    presets:\n      p: {modality: chat, mode: combo, strategy: priority, weights: {cost: 1}}\n",
-		"bad modality":             "clients:\n  - name: x\n    presets:\n      p: {modality: telepathy, mode: auto, strategy: priority, weights: {cost: 1}}\n",
-		"negative weight":          "clients:\n  - name: x\n    presets:\n      p: {modality: chat, mode: auto, strategy: priority, weights: {cost: -1}}\n",
-		"bad preset name":          "clients:\n  - name: x\n    presets:\n      'a b': {modality: chat, mode: auto, strategy: priority, weights: {cost: 1}}\n",
+		"bad purpose":              "clients:\n  - {name: x, purpose: telepathy}\n",
+		"bad preset name":          "clients:\n  - name: x\n    presets:\n      'a b': {category: chat, optimization: balanced}\n",
+		"preset name of no kind":   "clients:\n  - name: x\n    presets:\n      budget: {category: chat, optimization: balanced}\n",
+		"preset of the wrong kind": "clients:\n  - name: x\n    presets:\n      text: {category: images, optimization: balanced}\n",
+		"bad optimization":         "clients:\n  - name: x\n    presets:\n      text: {category: chat, optimization: cheapestest}\n",
+		"model listed twice":       "clients:\n  - name: x\n    presets:\n      text: {category: chat, optimization: balanced, models: [a, a]}\n",
+		"empty model id":           "clients:\n  - name: x\n    presets:\n      text: {category: chat, optimization: balanced, models: ['  ']}\n",
 		"bad account key env":      "kenari: {account_key_env: not-an-env}\n",
+		"top_models out of range":  "routing: {top_models: 51}\n",
 	}
 	for name, y := range cases {
 		if _, err := Parse([]byte(y)); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+	// a second preset of the same category cannot exist: the names are the categories
+	if _, err := Parse([]byte("clients:\n  - name: x\n    presets:\n      text: {category: chat, optimization: balanced}\n")); err != nil {
+		t.Fatalf("a valid preset was refused: %v", err)
 	}
 }
 
@@ -58,9 +83,13 @@ func TestSaveKeepsHistoryAndNeverStoresSecrets(t *testing.T) {
 	file := filepath.Join(dir, "xellter.yaml")
 	c := Default()
 	c.Server.DataDir = filepath.Join(dir, "data")
-	c.Clients = []Client{{Name: "babu", Enabled: true, Keys: []Upstream{{Name: "main", KeyEnv: "KENARI_KEY_BABU_MAIN"}}, Presets: DefaultPresets()}}
-	for i := 0; i < 3; i++ {
-		c.Rules.StickyMinutes = i
+	c.Clients = []Client{{
+		Name: "babu", Enabled: true, Purpose: "coding",
+		Keys:    []Upstream{{Name: "main", KeyEnv: "KENARI_KEY_BABU_MAIN"}},
+		Presets: map[string]Preset{"text": {Category: "chat", Optimization: "balanced", Models: []string{"cheap-b", "pro-c"}}},
+	}}
+	for i := range 3 {
+		c.Routing.TopModels = 10 + i
 		if err := Save(file, c); err != nil {
 			t.Fatal(err)
 		}
@@ -89,8 +118,11 @@ func TestSaveKeepsHistoryAndNeverStoresSecrets(t *testing.T) {
 		t.Fatal("history id path traversal")
 	}
 	back, err := Load(file)
-	if err != nil || len(back.Clients[0].Presets) != 6 {
-		t.Fatalf("round trip lost presets: %v %+v", err, back)
+	if err != nil || len(back.Clients[0].Presets) != 1 || back.Clients[0].Presets["text"].Optimization != "balanced" {
+		t.Fatalf("round trip lost the preset: %v %+v", err, back)
+	}
+	if len(back.Clients[0].Presets["text"].Models) != 2 || back.Clients[0].Purpose != "coding" {
+		t.Fatalf("round trip lost the pool or the purpose: %+v", back.Clients[0])
 	}
 }
 
@@ -100,47 +132,59 @@ func TestMatchAny(t *testing.T) {
 	}
 }
 
-// The panel shows only a few knobs; the rest keep the backend default
-// (ADR 0014). A config that names only the visible knobs must still carry
-// the default for every hidden one, and a config that names a hidden knob
-// must keep that value.
-func TestHiddenKnobsKeepTheBackendDefault(t *testing.T) {
-	c, err := Parse([]byte("rules:\n  sticky_minutes: 5\nrtk:\n  enabled: false\n"))
-	if err != nil {
+// A config built outside Parse (the panel decodes JSON) is normalised the same way: missing routing knobs and
+// a missing optimization are filled, not left as zero values.
+func TestNormalizeFillsWhatThePanelLeavesOut(t *testing.T) {
+	c := &Config{Clients: []Client{{
+		Name: "x", Enabled: true, Purpose: "",
+		Presets: map[string]Preset{"text": {Models: []string{"a"}}},
+	}}}
+	if err := Normalize(c); err != nil {
 		t.Fatal(err)
 	}
-	d := Default()
-	if c.Rules.StickyMinutes != 5 {
-		t.Fatalf("the visible knob was not read: %d", c.Rules.StickyMinutes)
+	if c.Routing.TopModels != 10 || c.Routing.EvictCooldownMin != 720 {
+		t.Fatalf("routing defaults missing: %+v", c.Routing)
 	}
-	if c.Rules.FreeBonus != d.Rules.FreeBonus || c.Rules.PlanBonus != d.Rules.PlanBonus ||
-		c.Rules.PromoBonusMax != d.Rules.PromoBonusMax || c.Rules.PromoMinRemainingHrs != d.Rules.PromoMinRemainingHrs ||
-		c.Rules.UpcomingLookaheadHrs != d.Rules.UpcomingLookaheadHrs || c.Rules.PlanCostFactor != d.Rules.PlanCostFactor {
-		t.Fatalf("hidden rules did not keep the default: %+v", c.Rules)
+	p := c.Clients[0].Presets["text"]
+	if c.Clients[0].Purpose != "general" || p.Category != "chat" || p.Optimization != "balanced" {
+		t.Fatalf("preset defaults missing: %+v", c.Clients[0])
 	}
-	if c.RTK.MinChars != d.RTK.MinChars || c.RTK.MaxChars != d.RTK.MaxChars || c.RTK.DiffContext != d.RTK.DiffContext {
-		t.Fatalf("hidden rtk knobs did not keep the default: %+v", c.RTK)
-	}
-	// an explicit hidden value still wins
-	c, err = Parse([]byte("rules:\n  free_bonus: 0.25\nrtk:\n  min_chars: 500\n"))
-	if err != nil {
+	// a negative refresh means never, and must stay 0 instead of becoming a default
+	c2 := &Config{Routing: Routing{RankRefreshMinutes: -5}}
+	if err := Normalize(c2); err != nil {
 		t.Fatal(err)
 	}
-	if c.Rules.FreeBonus != 0.25 || c.RTK.MinChars != 500 {
-		t.Fatalf("an explicit hidden value was overwritten: %+v %+v", c.Rules, c.RTK)
+	if c2.Routing.RankRefreshMinutes != 0 {
+		t.Fatalf("a negative refresh must mean never: %d", c2.Routing.RankRefreshMinutes)
 	}
 }
 
-// The judge is gone: a config file that still asks for it is refused instead of
-// being silently ignored (ADR 0016).
-func TestRetiredJEVKeysAreRefused(t *testing.T) {
+// The rewrite deleted a pile of knobs. Unknown keys are otherwise ignored, so each retired section and each
+// retired preset key must be refused by name instead of looking like it still works (ADR 0017).
+func TestRetiredKeysAreRefused(t *testing.T) {
 	cases := map[string]string{
-		"jev section": "jev:\n  enabled: true\n",
-		"jev weight":  "clients:\n  - name: x\n    presets:\n      p: {modality: chat, mode: auto, strategy: priority, weights: {cost: 1, jev: 20}}\n",
+		"rules section":         "rules:\n  sticky_minutes: 5\n",
+		"resilience section":    "resilience:\n  cooldown_base_s: 30\n",
+		"rtk section":           "rtk:\n  enabled: false\n",
+		"benchmarks map":        "benchmarks:\n  gpt-6: 80\n",
+		"preset weights":        "clients:\n  - name: x\n    presets:\n      text: {weights: {cost: 1}}\n",
+		"preset require":        "clients:\n  - name: x\n    presets:\n      text: {require: {tool_call: true}}\n",
+		"preset min_quality":    "clients:\n  - name: x\n    presets:\n      text: {min_quality: 0.5}\n",
+		"preset max_candidates": "clients:\n  - name: x\n    presets:\n      text: {max_candidates: 5}\n",
+		"preset strategy":       "clients:\n  - name: x\n    presets:\n      text: {strategy: priority}\n",
+		"preset rr_band":        "clients:\n  - name: x\n    presets:\n      text: {rr_band: 0.1}\n",
+		"preset mode":           "clients:\n  - name: x\n    presets:\n      text: {mode: combo}\n",
+		"preset cost_profile":   "clients:\n  - name: x\n    presets:\n      text: {cost_profile: cheap}\n",
+		"preset description":    "clients:\n  - name: x\n    presets:\n      text: {description: cheap}\n",
 	}
 	for name, y := range cases {
-		if _, err := Parse([]byte(y)); err == nil || !strings.Contains(err.Error(), "ADR 0016") {
-			t.Errorf("%s: %v", name, err)
+		_, err := Parse([]byte(y))
+		if err == nil {
+			t.Errorf("%s: accepted", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), "retired by the rewrite") {
+			t.Errorf("%s: error does not name the reason: %v", name, err)
 		}
 	}
 }

@@ -12,12 +12,11 @@ import (
 
 	"github.com/axellageraldinc/xellter/internal/config"
 	"github.com/axellageraldinc/xellter/internal/proxy"
+	"github.com/axellageraldinc/xellter/internal/store"
 )
 
 func twoEqualModels(c *config.Config) {
-	sh := c.Clients[0].Presets["text"]
-	sh.Mode, sh.Models, sh.Strategy = "combo", []string{"cheap-b", "pro-c"}, "round_robin"
-	c.Clients[0].Presets["text"] = sh
+	c.Clients[0].Presets["text"] = config.Preset{Category: "chat", Optimization: "cheapest", Models: []string{"cheap-b", "pro-c"}}
 }
 
 func TestRoundRobinRotatesAndSessionsStick(t *testing.T) {
@@ -47,7 +46,7 @@ func TestRoundRobinRotatesAndSessionsStick(t *testing.T) {
 // A model that fails falls back to the next one in the list.
 func TestAFailingModelFallsBackToTheNext(t *testing.T) {
 	e := setup(t, nil)
-	rk := e.a.Rt.Rankings()["babu/budget"]
+	rk := e.a.Rt.Rankings()["babu/text"]
 	if len(rk.Candidates) < 2 {
 		t.Fatalf("the preset needs more than one candidate: %+v", rk)
 	}
@@ -60,7 +59,7 @@ func TestAFailingModelFallsBackToTheNext(t *testing.T) {
 	}
 	e.a.Pool.Keys()[0].ResetState()
 	e.a.Pool.Keys()[1].ResetState()
-	r, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "budget"))
+	r, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "text"))
 	if r.StatusCode != 200 || r.Header.Get("X-Xellter-Model") == first {
 		t.Fatalf("a failing model must fall back: %d %s %s", r.StatusCode, r.Header.Get("X-Xellter-Model"), body)
 	}
@@ -118,7 +117,7 @@ func TestAccountQuotaFromUnrestrictedKeyIsRead(t *testing.T) {
 		t.Fatal("exhausted weekly window must uncover plan models")
 	}
 	// plan limit is account wide: a 429 on one key blocks the other key of the account too
-	e.a.Pool.Keys()[0].Failure("cheap-b", 429, []byte(`{"error":{"code":"rate_limit_exceeded"}}`), 0, e.a.Cfg().Resilience, time.Now())
+	e.a.Pool.Keys()[0].Failure("cheap-b", 429, []byte(`{"error":{"code":"rate_limit_exceeded"}}`), 0, time.Now())
 	if r := e.a.Pool.Keys()[1].Check(m, e.a.Cat.Snapshot(), time.Now()); r != "cooldown" {
 		t.Fatalf("rate limits are per account, got %q", r)
 	}
@@ -130,7 +129,7 @@ func TestFreeQuotaErrorsAreAccountWide(t *testing.T) {
 	paid := e.a.Cat.Snapshot().Models["pro-c"]
 	k0, k1 := e.a.Pool.Keys()[0], e.a.Pool.Keys()[1]
 	now := time.Now()
-	k0.Failure("free-a:free", 429, []byte(`{"error":{"code":"free_quota_daily","message":"used"}}`), 0, e.a.Cfg().Resilience, now)
+	k0.Failure("free-a:free", 429, []byte(`{"error":{"code":"free_quota_daily","message":"used"}}`), 0, now)
 	if r := k1.Check(free, e.a.Cat.Snapshot(), now); r != "daily free quota used" {
 		t.Fatalf("free daily quota is per account, got %q", r)
 	}
@@ -139,7 +138,9 @@ func TestFreeQuotaErrorsAreAccountWide(t *testing.T) {
 	}
 }
 
-func TestPresetsAreGeneratedFromWhatTheKeysCanCall(t *testing.T) {
+// Presets are not generated any more: probing a key learns its allow list, and the client's presets stay
+// exactly what the owner configured (ADR 0019).
+func TestProbingDoesNotGeneratePresets(t *testing.T) {
 	e := setup(t, func(c *config.Config) {
 		c.Clients = append(c.Clients, config.Client{Name: "gen", Enabled: true, KeyHash: proxy.HashKey("xl-gen"),
 			Keys: []config.Upstream{{Name: "limited", KeyEnv: "KEY_GEN"}}})
@@ -150,62 +151,31 @@ func TestPresetsAreGeneratedFromWhatTheKeysCanCall(t *testing.T) {
 	e.a.Pool.Reload(e.a.Cfg(), e.a.Secrets(), e.a.St)
 	e.f.chat = func(c call, n int) (int, string) {
 		if c.Model == "xellter-probe" && c.Auth == "Bearer secret-gen" {
-			return 400, `{"error":{"code":"bad_request","message":"model 'xellter-probe' is not allowed by this key. Allowed models: cheap-b, free-a:free, img-free:free"}}`
+			return 400, `{"error":{"code":"bad_request","message":"model 'xellter-probe' is not allowed by this key. Allowed models: cheap-b, free-a:free"}}`
 		}
 		return 0, ""
 	}
 	e.a.ProbeKeys(context.Background())
-	gen := func() config.Client {
-		for _, c := range e.a.Cfg().Clients {
-			if c.Name == "gen" {
-				return c
-			}
-		}
-		return config.Client{}
-	}
-	got := gen()
-	if _, ok := got.Presets["text"]; !ok || got.Presets["image"].Modality != "images" || len(got.Presets) != 2 {
-		t.Fatalf("expected exactly text and image, got %v", got.Presets)
-	}
-	if rk := e.a.Rt.Rankings()["gen/text"]; rk == nil || rk.Callable != 2 { // cheap-b and free-a:free: deduplicated, limited to the key's models and the preset's needs
-		t.Fatalf("text ranking: %+v", rk)
-	}
-	if rk := e.a.Rt.Rankings()["gen/video"]; rk != nil {
-		t.Fatal("no video preset without video models")
-	}
-	// a preset the owner deleted is not generated again, and edits survive later probes
-	next := *e.a.Cfg()
-	next.Clients = append([]config.Client(nil), next.Clients...)
-	for i := range next.Clients {
-		if next.Clients[i].Name == "gen" {
-			cl := next.Clients[i]
-			cl.Presets = map[string]config.Preset{"image": cl.Presets["image"]}
-			p := cl.Presets["image"]
-			p.Strategy = "round_robin"
-			cl.Presets["image"] = p
-			next.Clients[i] = cl
+	for _, c := range e.a.Cfg().Clients {
+		if c.Name == "gen" && len(c.Presets) != 0 {
+			t.Fatalf("no preset may be created automatically: %v", c.Presets)
 		}
 	}
-	if err := e.a.Apply(&next); err != nil {
-		t.Fatal(err)
-	}
-	e.a.ProbeKeys(context.Background())
-	got = gen()
-	if _, ok := got.Presets["text"]; ok {
-		t.Fatal("a deleted preset came back")
-	}
-	if got.Presets["image"].Strategy != "round_robin" {
-		t.Fatal("an edited preset was overwritten")
+	// the learned allow list is still used: a model the key cannot call is not offered
+	if got := e.a.Pool.Get("gen/limited"); got == nil {
+		t.Fatal("the key is missing")
+	} else if !got.AllowedModel("cheap-b") || got.AllowedModel("pro-c") {
+		t.Fatalf("allow list not learned: %+v", got.Status(time.Now()).Learned)
 	}
 }
 
 func TestClientsNeverSeeEachOthersModels(t *testing.T) {
 	e := setup(t, func(c *config.Config) {
-		text := config.DefaultPreset("chat")
-		text.MinQuality, text.Require = 0, config.Require{}
+		pool := []string{"cheap-b", "pro-c", "promo-d"}
 		for _, n := range []string{"one", "two"} {
-			c.Clients = append(c.Clients, config.Client{Name: n, Enabled: true, KeyHash: proxy.HashKey("xl-" + n), Presets: map[string]config.Preset{"text": text}, Seeded: config.PresetModalities,
-				Keys: []config.Upstream{{Name: "k", KeyEnv: "KEY_" + strings.ToUpper(n)}}})
+			c.Clients = append(c.Clients, config.Client{Name: n, Enabled: true, Purpose: "general", KeyHash: proxy.HashKey("xl-" + n),
+				Presets: map[string]config.Preset{"text": {Category: "chat", Optimization: "cheapest", Models: pool}},
+				Keys:    []config.Upstream{{Name: "k", KeyEnv: "KEY_" + strings.ToUpper(n)}}})
 		}
 	})
 	for _, n := range []string{"one", "two"} {
@@ -223,13 +193,17 @@ func TestClientsNeverSeeEachOthersModels(t *testing.T) {
 		if rk == nil {
 			t.Fatalf("no ranking for %s", client)
 		}
-		return rk.Models
+		var out []string
+		for _, c := range rk.Candidates {
+			out = append(out, c.Model)
+		}
+		return out
 	}
 	if got := models("one"); len(got) != 1 || got[0] != "cheap-b" {
-		t.Fatalf("client one may only see cheap-b, got %v", got)
+		t.Fatalf("client one may only reach cheap-b, got %v", got)
 	}
 	if got := models("two"); len(got) != 2 {
-		t.Fatalf("client two may only see pro-c and promo-d, got %v", got)
+		t.Fatalf("client two may only reach pro-c and promo-d, got %v", got)
 	}
 	// and the request path agrees: client one cannot reach a model of client two
 	r, _ := e.post(t, "xl-one", "/v1/chat/completions", `{"model":"text","messages":[{"role":"user","content":"hi"}]}`)
@@ -238,8 +212,9 @@ func TestClientsNeverSeeEachOthersModels(t *testing.T) {
 	}
 }
 
-func TestLeaderboardScoresReplaceThePriceGuess(t *testing.T) {
-	e := setup(t, func(c *config.Config) { c.Benchmarks = map[string]float64{} })
+// Quality comes from the published leaderboards, fetched and stored, never typed into the config.
+func TestLeaderboardScoresFeedTheRanking(t *testing.T) {
+	e := setup(t, nil)
 	hf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		row := func(name string, rating float64) map[string]any {
 			return map[string]any{"row": map[string]any{"model_name": name, "rating": rating, "rating_lower": rating - 5, "rating_upper": rating + 5, "vote_count": 500, "category": "overall", "leaderboard_publish_date": "2026-10-22"}}
@@ -252,11 +227,14 @@ func TestLeaderboardScoresReplaceThePriceGuess(t *testing.T) {
 	}))
 	defer hf.Close()
 	e.a.BenchBase = hf.URL
+	e.a.SWEPage = hf.URL + "/swe"
+	e.a.AiderYAML = hf.URL + "/aider"
 	if err := e.a.SyncBench(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	scores, _ := e.a.St.Bench()
-	if len(scores) != 3 || scores["pro-c"].Value <= scores["cheap-b"].Value || scores["cheap-b"].Value <= scores["promo-d"].Value {
+	if len(scores) != 3 || scores["pro-c"]["text"].Value <= scores["cheap-b"]["text"].Value ||
+		scores["cheap-b"]["text"].Value <= scores["promo-d"]["text"].Value {
 		t.Fatalf("scores: %+v", scores)
 	}
 	rk := e.a.Rt.Rankings()["babu/text"]
@@ -264,7 +242,7 @@ func TestLeaderboardScoresReplaceThePriceGuess(t *testing.T) {
 	for _, c := range rk.Candidates {
 		found[c.Model] = c.BenchSource
 	}
-	if !strings.HasPrefix(found["pro-c"], "arena 2026-10-22") || !strings.HasPrefix(found["cheap-b"], "arena") {
+	if found["pro-c"] != "text" || found["cheap-b"] != "text" {
 		t.Fatalf("the ranking must use the leaderboard score: %v", found)
 	}
 	if e.a.BenchFetched().IsZero() {
@@ -276,4 +254,67 @@ func TestLeaderboardScoresReplaceThePriceGuess(t *testing.T) {
 	if again, _ := e.a.St.Bench(); len(again) != 3 {
 		t.Fatalf("catalog refresh must re-match the stored leaderboard: %d", len(again))
 	}
+}
+
+// Requirement 7 + the purpose decision: the same catalog and the same preset are scored differently for a
+// coding client than for a general one, and a model with no coding score falls back to the general arena
+// with the "general score" flag instead of being dropped.
+func TestPurposeChangesHowTheTextPresetIsScored(t *testing.T) {
+	e := setup(t, func(c *config.Config) {
+		// both clients hold the same pool and the same optimization, so only the purpose can differ
+		for _, name := range []string{"babu", "coded"} {
+			for i := range c.Clients {
+				if c.Clients[i].Name == name {
+					c.Clients[i].Presets["text"] = config.Preset{Category: "chat", Optimization: "best_quality", Models: []string{"cheap-b", "pro-c", "promo-d"}}
+				}
+			}
+		}
+	})
+	// the stored leaderboards: pro-c is the best coder, cheap-b the best generalist, promo-d has nothing
+	if err := e.a.St.ReplaceAllBench(map[string][]store.BenchRow{
+		"pro-c":   {{Arena: "swebench", Value: 0.9}, {Arena: "text", Value: 0.30}},
+		"cheap-b": {{Arena: "swebench", Value: 0.2}, {Arena: "text", Value: 0.90}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	e.a.Rt.Recompute(time.Now())
+
+	rk := e.a.Rt.Rankings()["babu/text"]
+	if rk.Purpose != "general" {
+		t.Fatalf("babu is a general client: %q", rk.Purpose)
+	}
+	if len(rk.Candidates) == 0 || rk.Candidates[0].Model != "cheap-b" || rk.Candidates[0].BenchSource != "text" {
+		t.Fatalf("a general client must rank on the general arena: %+v", rk.Candidates)
+	}
+	for _, c := range rk.Candidates {
+		if c.Model == "promo-d" && !containsStr(c.Flags, "general score") {
+			t.Fatalf("a model with no score must be flagged: %+v", c)
+		}
+	}
+
+	// the same preset for the coding client
+	coded := e.a.Rt.Rankings()["coded/text"]
+	if coded == nil || coded.Purpose != "coding" {
+		t.Fatalf("the coding client must be ranked: %+v", coded)
+	}
+	if len(coded.Candidates) == 0 || coded.Candidates[0].Model != "pro-c" || coded.Candidates[0].BenchSource != "swebench" {
+		t.Fatalf("a coding client must rank on the coding arenas: %+v", coded.Candidates)
+	}
+	// and the request path serves that model
+	r, body := e.post(t, "xl-coded", "/v1/chat/completions", fmt.Sprintf(chatBody, "text"))
+	if r.StatusCode != 200 {
+		t.Fatalf("chat: %d %s", r.StatusCode, body)
+	}
+	if got := r.Header.Get("X-Xellter-Model"); got != "pro-c" {
+		t.Fatalf("the coding client must be served by the model its purpose ranks first, got %q", got)
+	}
+}
+
+func containsStr(l []string, v string) bool {
+	for _, x := range l {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }

@@ -9,18 +9,27 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-
-	"github.com/axellageraldinc/xellter/internal/config"
 )
 
 // Filter is one compression strategy. Filters are tried in order; the first
 // whose Match returns true handles the text.
+//
+// There is nothing to configure: RTK is always on and every filter is enabled
+// (ADR 0017). The settings below are constants, which is why the interface takes
+// no configuration.
 type Filter interface {
 	Name() string
-	Enabled(c config.RTK) bool
 	Match(text string) bool
-	Apply(text string, c config.RTK) string
+	Apply(text string) string
 }
+
+// Fixed thresholds. They are constants because the panel has no RTK knob and a
+// preset cannot change them.
+const (
+	minChars    = 2000 // below this a tool output is not worth compressing
+	maxChars    = 12000
+	diffContext = 1
+)
 
 // Result reports what a Process call changed.
 type Result struct {
@@ -33,8 +42,8 @@ type Result struct {
 var Filters = []Filter{diffFilter{}, grepFilter{}, lsFilter{}, logFilter{}, truncFilter{}}
 
 // Compress runs the first matching enabled filter over text.
-func Compress(text string, c config.RTK) (out string, filter string) {
-	if len(text) < c.MinChars {
+func Compress(text string) (out string, filter string) {
+	if len(text) < minChars {
 		return text, ""
 	}
 	defer func() {
@@ -43,13 +52,13 @@ func Compress(text string, c config.RTK) (out string, filter string) {
 		}
 	}()
 	for _, f := range Filters {
-		if !f.Enabled(c) || !f.Match(text) {
+		if !f.Match(text) {
 			continue
 		}
-		res := f.Apply(text, c)
+		res := f.Apply(text)
 		if len(res) < len(text) {
-			if c.Truncate && c.MaxChars > 0 && len(res) > c.MaxChars {
-				res = headTail(res, c.MaxChars)
+			if len(res) > maxChars {
+				res = headTail(res, maxChars)
 			}
 			return res, f.Name()
 		}
@@ -60,7 +69,7 @@ func Compress(text string, c config.RTK) (out string, filter string) {
 // Process rewrites tool outputs in a decoded request body in place. It
 // understands OpenAI chat (role=tool), Anthropic (tool_result blocks) and
 // OpenAI Responses (function_call_output) shapes.
-func Process(body map[string]json.RawMessage, c config.RTK) (res Result) {
+func Process(body map[string]json.RawMessage) (res Result) {
 	defer func() { _ = recover() }()
 	if raw, ok := body["messages"]; ok {
 		var msgs []map[string]json.RawMessage
@@ -71,7 +80,7 @@ func Process(body map[string]json.RawMessage, c config.RTK) (res Result) {
 				_ = json.Unmarshal(m["role"], &role)
 				content := m["content"]
 				if role == "tool" || role == "function" {
-					if nc, r := fixContent(content, c); r.Items > 0 {
+					if nc, r := fixContent(content); r.Items > 0 {
 						m["content"], changed = nc, true
 						res.Items, res.Saved = res.Items+r.Items, res.Saved+r.Saved
 					}
@@ -89,7 +98,7 @@ func Process(body map[string]json.RawMessage, c config.RTK) (res Result) {
 						if typ != "tool_result" {
 							continue
 						}
-						if nc, r := fixContent(b["content"], c); r.Items > 0 {
+						if nc, r := fixContent(b["content"]); r.Items > 0 {
 							b["content"], bc = nc, true
 							res.Items, res.Saved = res.Items+r.Items, res.Saved+r.Saved
 						}
@@ -118,7 +127,7 @@ func Process(body map[string]json.RawMessage, c config.RTK) (res Result) {
 				if typ != "function_call_output" {
 					continue
 				}
-				if nc, r := fixContent(it["output"], c); r.Items > 0 {
+				if nc, r := fixContent(it["output"]); r.Items > 0 {
 					it["output"], changed = nc, true
 					res.Items, res.Saved = res.Items+r.Items, res.Saved+r.Saved
 				}
@@ -134,7 +143,7 @@ func Process(body map[string]json.RawMessage, c config.RTK) (res Result) {
 }
 
 // fixContent compresses a JSON string, or the text parts of a content array.
-func fixContent(raw json.RawMessage, c config.RTK) (json.RawMessage, Result) {
+func fixContent(raw json.RawMessage) (json.RawMessage, Result) {
 	var r Result
 	if len(raw) == 0 {
 		return raw, r
@@ -144,7 +153,7 @@ func fixContent(raw json.RawMessage, c config.RTK) (json.RawMessage, Result) {
 		if json.Unmarshal(raw, &s) != nil {
 			return raw, r
 		}
-		out, f := Compress(s, c)
+		out, f := Compress(s)
 		if f == "" {
 			return raw, r
 		}
@@ -161,7 +170,7 @@ func fixContent(raw json.RawMessage, c config.RTK) (json.RawMessage, Result) {
 			if json.Unmarshal(p["text"], &t) != nil {
 				continue
 			}
-			if out, f := Compress(t, c); f != "" {
+			if out, f := Compress(t); f != "" {
 				p["text"], _ = json.Marshal(out)
 				r.Items++
 				r.Saved += len(t) - len(out)
@@ -202,15 +211,14 @@ func clip(line string, n int) string {
 
 type diffFilter struct{}
 
-func (diffFilter) Name() string              { return "git_diff" }
-func (diffFilter) Enabled(c config.RTK) bool { return c.GitDiff }
+func (diffFilter) Name() string { return "git_diff" }
 func (diffFilter) Match(t string) bool {
 	return strings.HasPrefix(t, "diff --git") || (strings.Contains(t, "\n@@ ") && strings.Contains(t, "\n+++ ") && strings.Contains(t, "\n--- "))
 }
-func (diffFilter) Apply(t string, c config.RTK) string {
+func (diffFilter) Apply(t string) string {
 	lines := strings.Split(t, "\n")
 	keep := make([]bool, len(lines))
-	ctx := c.DiffContext
+	ctx := diffContext
 	for i, l := range lines {
 		switch {
 		case strings.HasPrefix(l, "diff --git"), strings.HasPrefix(l, "+++ "), strings.HasPrefix(l, "--- "), strings.HasPrefix(l, "@@"), strings.HasPrefix(l, "rename "), strings.HasPrefix(l, "new file"), strings.HasPrefix(l, "deleted file"), strings.HasPrefix(l, "Binary files"):
@@ -255,12 +263,11 @@ var (
 
 type grepFilter struct{}
 
-func (grepFilter) Name() string              { return "grep" }
-func (grepFilter) Enabled(c config.RTK) bool { return c.Grep }
+func (grepFilter) Name() string { return "grep" }
 func (grepFilter) Match(t string) bool {
 	return share(t, func(l string) bool { return grepRe.MatchString(l) && !tsRe.MatchString(l) }) >= 0.6
 }
-func (grepFilter) Apply(t string, c config.RTK) string {
+func (grepFilter) Apply(t string) string {
 	lines := strings.Split(t, "\n")
 	perFile := map[string]int{}
 	var out []string
@@ -295,12 +302,11 @@ var lsLongRe = regexp.MustCompile(`^[dlcbps-][rwxsStT-]{9}[.+@]?\s+\d+\s+\S+\s+\
 
 type lsFilter struct{}
 
-func (lsFilter) Name() string              { return "ls" }
-func (lsFilter) Enabled(c config.RTK) bool { return c.LS }
+func (lsFilter) Name() string { return "ls" }
 func (lsFilter) Match(t string) bool {
 	return share(t, func(l string) bool { return lsLongRe.MatchString(l) || strings.HasPrefix(l, "total ") }) >= 0.7
 }
-func (lsFilter) Apply(t string, c config.RTK) string {
+func (lsFilter) Apply(t string) string {
 	var out []string
 	for _, l := range strings.Split(t, "\n") {
 		if m := lsLongRe.FindStringSubmatch(l); m != nil {
@@ -327,12 +333,11 @@ var (
 
 type logFilter struct{}
 
-func (logFilter) Name() string              { return "logs" }
-func (logFilter) Enabled(c config.RTK) bool { return c.Logs }
+func (logFilter) Name() string { return "logs" }
 func (logFilter) Match(t string) bool {
 	return share(t, func(l string) bool { return logRe.MatchString(l) }) >= 0.6
 }
-func (logFilter) Apply(t string, c config.RTK) string {
+func (logFilter) Apply(t string) string {
 	lines := strings.Split(t, "\n")
 	var out []string
 	var prevKey string
@@ -377,14 +382,13 @@ func (logFilter) Apply(t string, c config.RTK) string {
 
 type truncFilter struct{}
 
-func (truncFilter) Name() string              { return "truncate" }
-func (truncFilter) Enabled(c config.RTK) bool { return c.Truncate }
-func (truncFilter) Match(t string) bool       { return true }
-func (truncFilter) Apply(t string, c config.RTK) string {
-	if c.MaxChars <= 0 || len(t) <= c.MaxChars {
+func (truncFilter) Name() string        { return "truncate" }
+func (truncFilter) Match(t string) bool { return true }
+func (truncFilter) Apply(t string) string {
+	if len(t) <= maxChars {
 		return t
 	}
-	return headTail(t, c.MaxChars)
+	return headTail(t, maxChars)
 }
 
 // share returns the fraction of non-empty lines for which f is true.

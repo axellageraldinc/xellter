@@ -30,6 +30,7 @@ const usage = `xellter - LLM gateway for kenari.id
 Usage:
   xellter serve        [-config xellter.yaml]
   xellter check        [-config xellter.yaml]        validate the config
+  xellter migrate      [-config f] [-write]           convert a pre-rewrite config to the current shape
   xellter explain      [-config f] [-preset name]    print the current ranking and why (fetches the catalog, probes keys)
   xellter admin init   [-config f] [-username u] [-from-record file] [-credentials-out file]
   xellter client add   [-config f] -name N [-presets a,b] [-passthrough glob,glob] [-upstreams u1,u2] [-budget IDR] [-out file]
@@ -47,6 +48,8 @@ func main() {
 		err = serve(os.Args[2:])
 	case "check":
 		err = check(os.Args[2:])
+	case "migrate":
+		err = migrateCmd(os.Args[2:])
 	case "explain":
 		err = explain(os.Args[2:])
 	case "admin":
@@ -157,20 +160,65 @@ func explain(args []string) error {
 	sort.Strings(names)
 	for _, n := range names {
 		r := a.Rt.Rankings()[n]
-		fmt.Printf("\n== %s / %s (%s, %s)  models callable: %d  round-robin group: %d\n", r.Client, r.Preset, r.Modality, r.Mode, r.Callable, r.Front)
+		fmt.Printf("\n== %s / %s (%s, %s, purpose %s)  models in the pool: %d  routed against: %d\n",
+			r.Client, r.Preset, r.Category, r.Optimization, r.Purpose, len(r.Candidates)+len(r.Rejected), len(r.Candidates))
 		for i, c := range r.Candidates {
-			fmt.Printf("%2d. %-34s list Rp%-9.2f quality %.2f (%s)  %s\n", i+1, c.Model, c.ListCost, c.Components["benchmark"], c.BenchSource, c.Reason)
+			fmt.Printf("%2d. %-34s %-8s Rp%-9.2f quality %.2f (%s)  %s\n", i+1, c.Model, c.Billing, c.CostIDR, c.Bench, c.BenchSource, c.Reason)
 		}
 		if len(r.Candidates) == 0 {
-			fmt.Println("    (no eligible model)")
+			fmt.Println("    (no usable model)")
 		}
 		for _, x := range r.Rejected {
 			fmt.Printf("    x %-32s %s\n", x.Model, x.Why)
 		}
-		if len(r.Unavailable) > 0 {
-			fmt.Printf("    (%d catalog models are not callable with this client's keys)\n", len(r.Unavailable))
+		if len(r.Unranked) > 0 {
+			fmt.Printf("    (%d models have no quality evidence: %s)\n", len(r.Unranked), strings.Join(r.Unranked, ", "))
 		}
 	}
+	return nil
+}
+
+// migrateCmd converts a pre-rewrite configuration file. It prints the result unless -write is given, and it
+// never overwrites the original without keeping a copy next to it.
+func migrateCmd(args []string) error {
+	fs := flag.NewFlagSet("migrate", flag.ExitOnError)
+	path := cfgPath(fs)
+	write := fs.Bool("write", false, "replace the config file (the old one is kept as <file>.pre-rewrite)")
+	_ = fs.Parse(args)
+	data, err := os.ReadFile(*path)
+	if err != nil {
+		return err
+	}
+	c, notes, err := config.Migrate(data)
+	if err != nil {
+		return err
+	}
+	fmt.Println("# migration notes")
+	fmt.Println(notes)
+	if !*write {
+		tmp, err := os.CreateTemp("", "xellter-migrate-*.yaml")
+		if err != nil {
+			return err
+		}
+		defer os.Remove(tmp.Name())
+		tmp.Close()
+		if err := config.Save(tmp.Name(), c); err != nil {
+			return err
+		}
+		out, err := os.ReadFile(tmp.Name())
+		if err != nil {
+			return err
+		}
+		fmt.Print(string(out))
+		return nil
+	}
+	if err := os.WriteFile(*path+".pre-rewrite", data, 0o600); err != nil {
+		return err
+	}
+	if err := config.Save(*path, c); err != nil {
+		return err
+	}
+	fmt.Printf("wrote %s (old file kept as %s.pre-rewrite)\n", *path, *path)
 	return nil
 }
 
@@ -243,8 +291,7 @@ func clientCmd(args []string) error {
 	fs := flag.NewFlagSet("client add", flag.ExitOnError)
 	path := cfgPath(fs)
 	name := fs.String("name", "", "client name")
-	pass := fs.String("passthrough", "", "comma separated real-model globs the client may call directly")
-	budget := fs.Float64("budget", 0, "daily budget in IDR (0 = unlimited)")
+	purpose := fs.String("purpose", "general", "client purpose: general, coding, agentic, vision or bulk")
 	out := fs.String("out", "", "write the API key to this file (mode 0600) instead of stdout")
 	_ = fs.Parse(args[1:])
 	c, err := config.Load(*path)
@@ -252,7 +299,7 @@ func clientCmd(args []string) error {
 		return err
 	}
 	key := "xl-" + auth.RandomHex(24)
-	c.Clients = append(c.Clients, config.Client{Name: *name, Enabled: true, KeyHash: proxy.HashKey(key), KeyHint: "…" + key[len(key)-4:], Passthrough: split(*pass), DailyBudget: *budget, Presets: map[string]config.Preset{}})
+	c.Clients = append(c.Clients, config.Client{Name: *name, Enabled: true, Purpose: *purpose, KeyHash: proxy.HashKey(key), KeyHint: "…" + key[len(key)-4:], Presets: map[string]config.Preset{}})
 	if err := config.Save(*path, c); err != nil {
 		return err
 	}

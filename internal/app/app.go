@@ -38,8 +38,10 @@ type App struct {
 	Auth    *auth.Authenticator
 	Started time.Time
 	Logf    func(string, ...any)
-	// BenchBase is where leaderboard data comes from; tests point it at a fake.
+	// BenchBase, SWEPage and AiderYAML are where quality data comes from; tests point them at fakes.
 	BenchBase string
+	SWEPage   string
+	AiderYAML string
 
 	cfg atomic.Pointer[config.Config]
 	mu  sync.Mutex // serialises Apply
@@ -75,6 +77,8 @@ func New(path string, src catalog.Source) (*App, error) {
 	a.Px = proxy.New(cfg, a.Cat, a.Pool, a.Rt, st)
 	a.Px.Logf = func(f string, v ...any) { a.Logf(f, v...) }
 	a.BenchBase = bench.DefaultBase
+	a.SWEPage = bench.DefaultSWEURL
+	a.AiderYAML = bench.DefaultAiderURL
 	a.Cat.OnUpdate(func(s *catalog.Snapshot) {
 		for _, ac := range a.Pool.Accounts() {
 			ac.SetTopupThreshold(s.Tier.Thresh)
@@ -134,7 +138,7 @@ func (a *App) ProbeKeys(ctx context.Context) {
 	cfg := a.Cfg()
 	hc := &http.Client{Timeout: 20 * time.Second}
 	for _, k := range a.Pool.Keys() {
-		if k.Secret == "" {
+		if k.Secret() == "" {
 			continue
 		}
 		if k.ReadOnly() { // read-only account key: used for plan and balance, never for requests
@@ -144,7 +148,7 @@ func (a *App) ProbeKeys(ctx context.Context) {
 		body := []byte(`{"model":"xellter-probe","max_tokens":1,"messages":[{"role":"user","content":"."}]}`)
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, cfg.Kenari.BaseURL+"/v1/chat/completions", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+k.Secret)
+		req.Header.Set("Authorization", "Bearer "+k.Secret())
 		req.Header.Set("User-Agent", cfg.Kenari.UserAgent)
 		resp, err := hc.Do(req)
 		if err != nil {
@@ -176,58 +180,9 @@ func (a *App) ProbeKeys(ctx context.Context) {
 // call: one per kind (text, image, video, tts, stt, music) that has at least one
 // model. Kinds are offered once; presets the owner edits or deletes are never
 // recreated or overwritten. A client is only seeded after all its keys were probed.
-func (a *App) seedPresets() {
-	snap := a.Cat.Snapshot()
-	if snap == nil {
-		return
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	cur := a.Cfg()
-	next := *cur
-	next.Clients = make([]config.Client, len(cur.Clients))
-	changed := false
-	for i, cl := range cur.Clients {
-		cl.Presets = clonePresets(cl.Presets)
-		cl.Seeded = append([]string(nil), cl.Seeded...)
-		keys := a.Pool.ClientKeys(cl.Name)
-		ready := len(keys) > 0
-		for _, k := range keys {
-			if k.Secret != "" && !k.Probed() {
-				ready = false
-			}
-		}
-		for _, kind := range config.PresetModalities {
-			if !ready || containsStr(cl.Seeded, kind) || !kindAvailable(snap, keys, kind) {
-				continue
-			}
-			if cl.Presets == nil {
-				cl.Presets = map[string]config.Preset{}
-			}
-			if _, exists := cl.Presets[config.PresetName(kind)]; !exists {
-				cl.Presets[config.PresetName(kind)] = config.DefaultPreset(kind)
-			}
-			cl.Seeded = append(cl.Seeded, kind)
-			changed = true
-		}
-		next.Clients[i] = cl
-	}
-	if !changed {
-		return
-	}
-	if err := config.Normalize(&next); err != nil {
-		a.Logf("preset generation: %v", err)
-		return
-	}
-	if err := config.Save(a.Path, &next); err != nil {
-		a.Logf("preset generation: %v", err)
-		return
-	}
-	a.cfg.Store(&next)
-	a.Px.SetConfig(&next)
-	a.Rt.SetConfig(&next)
-	a.Logf("presets generated from the models each client's keys can use")
-}
+// Presets are not generated: the owner creates one per category in the panel and picks its models, because a
+// generated preset would guess at both (ADR 0019). This is kept as a no-op so the probe loop can call it.
+func (a *App) seedPresets() {}
 
 func clonePresets(m map[string]config.Preset) map[string]config.Preset {
 	out := make(map[string]config.Preset, len(m))
@@ -241,22 +196,6 @@ func containsStr(l []string, s string) bool {
 	for _, v := range l {
 		if v == s {
 			return true
-		}
-	}
-	return false
-}
-
-// kindAvailable reports whether any enabled key can call a catalog model of the kind.
-func kindAvailable(snap *catalog.Snapshot, keys []*upstream.Key, kind string) bool {
-	for _, id := range snap.IDs() {
-		m := snap.Models[id]
-		if m.Endpoint != kind {
-			continue
-		}
-		for _, k := range keys {
-			if k.Secret != "" && k.AllowedModel(id) {
-				return true
-			}
 		}
 	}
 	return false
@@ -282,7 +221,7 @@ func (a *App) readAccount(ctx context.Context, k *upstream.Key) bool {
 	hc := &http.Client{Timeout: 20 * time.Second}
 	get := func(path string) (int, []byte) {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, cfg.Kenari.BaseURL+path, nil)
-		req.Header.Set("Authorization", "Bearer "+k.Secret)
+		req.Header.Set("Authorization", "Bearer "+k.Secret())
 		req.Header.Set("User-Agent", cfg.Kenari.UserAgent)
 		resp, err := hc.Do(req)
 		if err != nil {
@@ -343,7 +282,9 @@ const benchMaxAge = 24 * time.Hour
 func (a *App) SyncBench(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
-	rows, err := bench.Fetch(ctx, &http.Client{Timeout: 60 * time.Second}, a.BenchBase)
+	rows, err := bench.Fetch(ctx, &http.Client{Timeout: 60 * time.Second}, bench.Sources{
+		Base: a.BenchBase, SWE: a.SWEPage, Aider: a.AiderYAML,
+	})
 	if err != nil {
 		return err
 	}
@@ -364,11 +305,12 @@ func (a *App) rematchBench(snap *catalog.Snapshot) {
 	if json.Unmarshal([]byte(a.St.KVGet("bench_rows")), &rows) != nil || len(rows) == 0 {
 		return
 	}
-	out := map[string]store.BenchRow{}
+	out := map[string][]store.BenchRow{}
 	for _, sc := range bench.Match(rows, snap.Models) {
-		out[sc.Model] = store.BenchRow{Value: sc.Value, Rating: sc.Rating, Lo: sc.Lo, Hi: sc.Hi, Arena: sc.Arena, Matched: sc.Matched, Date: sc.Date, Votes: sc.Votes}
+		out[sc.Model] = append(out[sc.Model], store.BenchRow{Value: sc.Value, Rating: sc.Rating, Lo: sc.Lo, Hi: sc.Hi,
+			Arena: sc.Arena, Matched: sc.Matched, Date: sc.Date, Votes: sc.Votes})
 	}
-	if err := a.St.ReplaceBench(out); err != nil {
+	if err := a.St.ReplaceAllBench(out); err != nil {
 		a.Logf("bench: %v", err)
 	}
 }
@@ -439,15 +381,22 @@ func (a *App) Start(ctx context.Context) {
 		}
 	}()
 	go func() {
-		t := time.NewTicker(30 * time.Second)
-		defer t.Stop()
+		// Rankings are rebuilt on the configured interval (5 minutes by default), after every catalog sync and
+		// on demand from the panel. Nothing on the request path recomputes them. A zero interval means "only on
+		// a sync or a Recalculate", so no timer is started at all.
+		var refresh <-chan time.Time
+		if m := a.Cfg().Routing.RankRefreshMinutes; m > 0 {
+			t := time.NewTicker(time.Duration(m) * time.Minute)
+			defer t.Stop()
+			refresh = t.C
+		}
 		purge := time.NewTicker(6 * time.Hour)
 		defer purge.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-t.C:
+			case <-refresh:
 				a.Rt.Recompute(time.Now())
 			case <-purge.C:
 				a.St.Purge(a.Cfg().Server.LogRetention)

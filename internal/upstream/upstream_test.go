@@ -28,6 +28,7 @@ func snapWithFree(rpm, daily int) *catalog.Snapshot {
 }
 
 func key(t *testing.T, u config.Upstream) *Key {
+	t.Helper()
 	cfg := config.Default()
 	cfg.Clients = []config.Client{{Name: "c", Enabled: true, Keys: []config.Upstream{u}}}
 	p := NewPool()
@@ -39,14 +40,13 @@ func key(t *testing.T, u config.Upstream) *Key {
 // xellter sees it after reading the quota from kenari. The weekly window holds
 // 1000 Rp.
 func planKey(t *testing.T, u config.Upstream) *Key {
+	t.Helper()
 	k := key(t, u)
 	k.Account().SetInfo(&PlanInfo{Name: "Indie", Windows: map[string]Window{
 		"week": {BudgetRP: 1000, UsedRP: 0, ResetsAt: now.Add(7 * 24 * time.Hour)},
 	}, Fetched: now}, k.Name)
 	return k
 }
-
-var res = config.Resilience{CooldownBaseSec: 30, CooldownMaxSec: 900, BreakerFailures: 3, BreakerOpenSec: 120}
 
 func TestRPMAndDailyFreeLimits(t *testing.T) {
 	k := key(t, config.Upstream{Name: "k", KeyEnv: "K"})
@@ -101,51 +101,123 @@ func TestPlanCoverageAndBudgetExhaustion(t *testing.T) {
 	}
 }
 
+// A key that keeps failing is a key that is down. The numbers are constants now (ADR 0020): there is no
+// Resilience knob to pass in.
 func TestFailureClassification(t *testing.T) {
 	k := planKey(t, config.Upstream{Name: "k", KeyEnv: "K"})
 	m := &catalog.Model{ID: "plan-a", InIDR: 1}
 	s := snap()
 
-	v := k.Failure("plan-a", 429, []byte(`{"error":{"code":"plan_limit_reached","message":"x"}}`), 0, res, now)
+	v := k.Failure("plan-a", 429, []byte(`{"error":{"code":"plan_limit_reached","message":"x"}}`), 0, now)
 	if !v.Retry || k.Check(m, s, now.Add(time.Second)) != PlanLimit {
 		t.Fatalf("plan limit: %+v / %s", v, k.Check(m, s, now.Add(time.Second)))
 	}
 	k.ResetState()
 
-	v = k.Failure("plan-a", 429, []byte(`{}`), 20*time.Second, res, now)
+	v = k.Failure("plan-a", 429, []byte(`{}`), 20*time.Second, now)
 	if !v.Retry || k.Check(m, s, now.Add(5*time.Second)) != Cooldown || k.Check(m, s, now.Add(25*time.Second)) != OK {
 		t.Fatal("429 with Retry-After must cool the key for that long")
 	}
 	k.ResetState()
 
-	if v = k.Failure("plan-a", 400, []byte(`{"error":{"code":"bad_request","message":"messages is required"}}`), 0, res, now); v.Retry {
+	if v = k.Failure("plan-a", 400, []byte(`{"error":{"code":"bad_request","message":"messages is required"}}`), 0, now); v.Retry {
 		t.Fatal("genuine client errors must not be retried")
 	}
-	v = k.Failure("plan-a", 400, []byte(`{"error":{"message":"Allowed models: plan-b, free-x:free"}}`), 0, res, now)
-	if !v.Retry || k.Check(m, s, now) != NotAllowed || k.AllowedModel("plan-b") != true {
+	v = k.Failure("plan-a", 400, []byte(`{"error":{"message":"Allowed models: plan-b, free-x:free"}}`), 0, now)
+	if !v.Retry || k.Check(m, s, now) != NotAllowed || !k.AllowedModel("plan-b") {
 		t.Fatal("allow list not learned from 400")
 	}
 	k.ResetState()
 
-	for i := 0; i < 3; i++ {
-		k.Failure("plan-a", 503, nil, 0, res, now)
+	// A 5xx is the model's or the provider's problem: it blocks that model and must NOT trip the key's
+	// breaker, or one bad model would take every healthy model down with it.
+	for range breakerFails {
+		k.Failure("plan-a", 503, nil, 0, now)
+	}
+	if k.Check(&catalog.Model{ID: "other", InIDR: 1}, s, now.Add(time.Second)) != OK {
+		t.Fatal("a 5xx on one model must not make the whole key unusable")
+	}
+	if k.Check(&catalog.Model{ID: "plan-a", InIDR: 1}, s, now.Add(time.Second)) != Blocked {
+		t.Fatal("the model that failed must be blocked")
+	}
+	k.ResetState()
+	// A transport failure says nothing about a model, so it does trip the breaker.
+	for range breakerFails {
+		k.Failure("plan-a", 0, nil, 0, now)
 	}
 	if k.Check(&catalog.Model{ID: "zzz", InIDR: 1}, s, now.Add(time.Second)) != BreakerOpen {
-		t.Fatal("breaker should open after repeated 5xx")
+		t.Fatal("breaker should open after repeated network errors")
 	}
-	if k.Check(&catalog.Model{ID: "zzz", InIDR: 1}, s, now.Add(3*time.Minute)) != OK {
+	if k.Check(&catalog.Model{ID: "zzz", InIDR: 1}, s, now.Add(breakerOpen+time.Second)) != OK {
 		t.Fatal("breaker should close after its open time")
+	}
+}
+
+// The error codes of kenari's rate-limit page each have their own effect: the free quotas and the balance
+// are account-wide, a rejected key is not.
+func TestAccountWideFailures(t *testing.T) {
+	k := planKey(t, config.Upstream{Name: "k", KeyEnv: "K"})
+	s := snap()
+	free := &catalog.Model{ID: "f:free", Free: true}
+	paid := &catalog.Model{ID: "p", InIDR: 1}
+
+	if v := k.Failure("f:free", 429, []byte(`{"error":{"code":"free_quota_daily"}}`), 0, now); !v.Retry {
+		t.Fatal("the free daily quota is retriable")
+	}
+	if r := k.Check(free, s, now); r != DailyLimit {
+		t.Fatalf("free daily quota: %q", r)
+	}
+	if r := k.Check(paid, s, now); r != OK {
+		t.Fatalf("a used free quota must not block paid models: %q", r)
+	}
+	k.ResetState()
+
+	k.Failure("f:free", 429, []byte(`{"error":{"code":"free_quota_rpm"}}`), 0, now)
+	if r := k.Check(free, s, now.Add(time.Second)); r != RPMLimit {
+		t.Fatalf("free per-minute quota: %q", r)
+	}
+	k.ResetState()
+
+	if v := k.Failure("p", 402, []byte(`{"error":{"code":"insufficient_balance"}}`), 0, now); !v.Retry || v.Reason != "insufficient balance" {
+		t.Fatalf("402: %+v", v)
+	}
+	if r := k.Check(paid, s, now); r != NoBalance {
+		t.Fatalf("empty balance: %q", r)
+	}
+	k.ResetState()
+
+	// a provider rate limiting one model blocks that model only
+	if v := k.Failure("plan-a", 429, []byte(`{"error":{"code":"upstream_error"}}`), 0, now); !v.Retry {
+		t.Fatal("upstream_error is retriable")
+	}
+	if r := k.Check(&catalog.Model{ID: "plan-a"}, s, now); r != Blocked {
+		t.Fatalf("the model must be blocked: %q", r)
+	}
+	if r := k.Check(&catalog.Model{ID: "plan-b"}, s, now); r != OK {
+		t.Fatalf("another model must stay usable: %q", r)
+	}
+	k.ResetState()
+
+	// a rejected key cools down on its own
+	if v := k.Failure("p", 401, nil, 0, now); !v.Retry {
+		t.Fatal("401 is retriable on another key")
+	}
+	if r := k.Check(paid, s, now.Add(time.Second)); r != Cooldown {
+		t.Fatalf("rejected key: %q", r)
+	}
+	if r := k.Check(paid, s, now.Add(6*time.Minute)); r != OK {
+		t.Fatalf("the cooldown must end: %q", r)
 	}
 }
 
 func TestBlockBackoffGrowsAndSuccessResets(t *testing.T) {
 	k := key(t, config.Upstream{Name: "k", KeyEnv: "K"})
 	m := &catalog.Model{ID: "x", InIDR: 1}
-	k.Failure("x", 500, nil, 0, res, now)
-	if k.Check(m, snap(), now.Add(10*time.Second)) != Blocked || k.Check(m, snap(), now.Add(31*time.Second)) != OK {
+	k.Failure("x", 500, nil, 0, now)
+	if k.Check(m, snap(), now.Add(10*time.Second)) != Blocked || k.Check(m, snap(), now.Add(cooldownBase+time.Second)) != OK {
 		t.Fatal("first block should last the base cooldown")
 	}
-	k.Failure("x", 500, nil, 0, res, now.Add(time.Minute))
+	k.Failure("x", 500, nil, 0, now.Add(time.Minute))
 	if k.Check(m, snap(), now.Add(time.Minute+45*time.Second)) != Blocked {
 		t.Fatal("second block should be longer (exponential)")
 	}
@@ -179,5 +251,46 @@ func TestSeededFromStoreAndLearnedAllowList(t *testing.T) {
 	k.SetAllowed(nil)
 	if !k.AllowedModel("glm-5") {
 		t.Fatal("an unrestricted key may call every model")
+	}
+}
+
+// The pool keeps the state of keys whose name did not change, so a config reload does not forget a cooldown,
+// and the read-only account key is marked as such: it reads plan and balance, it never serves traffic.
+func TestReloadKeepsStateAndMarksTheAccountKey(t *testing.T) {
+	cfg := config.Default()
+	cfg.Clients = []config.Client{{Name: "c", Enabled: true, Keys: []config.Upstream{{Name: "k", KeyEnv: "K"}}}}
+	p := NewPool()
+	p.Reload(cfg, map[string]string{"K": "s", "KENARI_ACCOUNT_KEY": "a"}, nil)
+	k := p.Get("c/k")
+	k.Failure("m", 500, nil, 0, now)
+	p.Reload(cfg, map[string]string{"K": "s", "KENARI_ACCOUNT_KEY": "a"}, nil)
+	if again := p.Get("c/k"); again != k || again.Check(&catalog.Model{ID: "m"}, snap(), now.Add(time.Second)) != Blocked {
+		t.Fatal("a reload must keep the key's failure state")
+	}
+	if p.Get("c/k").ReadOnly() {
+		t.Fatal("a client key is not read-only")
+	}
+	acct := p.Get("account")
+	if acct == nil || !acct.ReadOnly() || acct.client != "" {
+		t.Fatalf("the account key: %+v", acct)
+	}
+	if keys := p.ClientKeys("c"); len(keys) != 1 {
+		t.Fatalf("client keys: %v", keys)
+	}
+	if keys := p.ClientKeys(""); len(keys) != 0 {
+		t.Fatal("the empty client name has no keys")
+	}
+	if len(p.Accounts()) != 1 || p.Accounts()[0].Name != DefaultAccount {
+		t.Fatalf("there is exactly one kenari account: %v", p.Accounts())
+	}
+}
+
+func TestParseAllowed(t *testing.T) {
+	list, ok := ParseAllowed([]byte(`{"error":{"message":"model 'x' is not allowed by this key. Allowed models: cheap-b, free-a:free"}}`))
+	if !ok || len(list) != 2 || list[0] != "cheap-b" || list[1] != "free-a:free" {
+		t.Fatalf("allow list: %v %v", list, ok)
+	}
+	if _, ok := ParseAllowed([]byte(`{"error":{"message":"bad request"}}`)); ok {
+		t.Fatal("an error without a list must not be parsed as one")
 	}
 }

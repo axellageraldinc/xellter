@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -34,11 +35,14 @@ type usageSummary struct {
 	} `json:"total"`
 }
 
-func (e *env) get(t *testing.T, key, path string) (*http.Response, string) {
+func (e *env) get(t *testing.T, key, path string, hdr ...string) (*http.Response, string) {
 	t.Helper()
 	req, _ := http.NewRequest("GET", e.px.URL+path, nil)
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	for i := 0; i+1 < len(hdr); i += 2 {
+		req.Header.Set(hdr[i], hdr[i+1])
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -197,5 +201,159 @@ func TestAccountEndpointsAnswerInKenariShape(t *testing.T) {
 	w := q.Plan.Windows["week"]
 	if w.BudgetRP != 1000 || w.UsedRP != 990 || w.UsedFrac != 0.99 {
 		t.Fatalf("week window: %+v", w)
+	}
+}
+
+// Requirement 12: /v1/session says which real model the session is using, and 404s when it has no traffic yet.
+func TestSessionEndpointNamesThePinnedModel(t *testing.T) {
+	e := setup(t, nil)
+	// nothing has happened in this session yet
+	if r, b := e.get(t, e.keyCl, "/v1/session?session=s-none"); r.StatusCode != 404 {
+		t.Fatalf("an unknown session must be 404: %d %s", r.StatusCode, b)
+	}
+	if r, _ := e.get(t, e.keyCl, "/v1/session"); r.StatusCode != 400 {
+		t.Fatalf("no session at all must be 400: %d", r.StatusCode)
+	}
+	if r, _ := e.get(t, "", "/v1/session?session=s1"); r.StatusCode != 401 {
+		t.Fatalf("no key: %d", r.StatusCode)
+	}
+
+	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "text"), "X-Xellter-Session", "s1")
+	if resp.StatusCode != 200 {
+		t.Fatalf("chat: %d %s", resp.StatusCode, body)
+	}
+	served := resp.Header.Get("X-Xellter-Model")
+	e.a.St.Flush()
+
+	// the caller reads its session back with the same header it sends with requests
+	resp, body = e.get(t, e.keyCl, "/v1/session", "X-Xellter-Session", "s1")
+	if resp.StatusCode != 200 {
+		t.Fatalf("session: %d %s", resp.StatusCode, body)
+	}
+	var s struct {
+		Object   string   `json:"object"`
+		Session  string   `json:"session"`
+		Client   string   `json:"client"`
+		Preset   string   `json:"preset"`
+		Model    string   `json:"model"`
+		Billing  string   `json:"billing"`
+		Context  int      `json:"context_window"`
+		ToolCall bool     `json:"tool_call"`
+		PinnedAt int64    `json:"pinned_at"`
+		Requests int      `json:"requests"`
+		InTok    int64    `json:"in_tok"`
+		OutTok   int64    `json:"out_tok"`
+		Models   []string `json:"models"`
+	}
+	if err := json.Unmarshal([]byte(body), &s); err != nil {
+		t.Fatalf("session is not json: %v %s", err, body)
+	}
+	if s.Object != "session" || s.Client != "babu" || s.Preset != "text" {
+		t.Fatalf("session header: %+v", s)
+	}
+	if s.Model != served || s.Model == "text" || s.Model == "" {
+		t.Fatalf("the session must name the real model (%q): %+v", served, s)
+	}
+	if s.Billing == "" || s.Context == 0 || !s.ToolCall || s.PinnedAt == 0 {
+		t.Fatalf("the model's numbers are missing: %+v", s)
+	}
+	if s.Requests != 1 || s.InTok != 1000 || s.OutTok != 50 || len(s.Models) != 1 || s.Models[0] != served {
+		t.Fatalf("session traffic: %+v", s)
+	}
+
+	// the id the session was logged under is what the endpoint reports, and the query parameter accepts it
+	resp, body = e.get(t, e.keyCl, "/v1/session?session="+s.Session)
+	if resp.StatusCode != 200 || !strings.Contains(body, `"model":"`+served+`"`) {
+		t.Fatalf("session by query: %d %s", resp.StatusCode, body)
+	}
+	// a different session header is a different session
+	if r, _ := e.get(t, e.keyCl, "/v1/session", "X-Xellter-Session", "s2"); r.StatusCode != 404 {
+		t.Fatalf("another session has no traffic: %d", r.StatusCode)
+	}
+	// and another client cannot read this session
+	if r, _ := e.get(t, "xl-direct", "/v1/session?session="+s.Session); r.StatusCode != 404 {
+		t.Fatalf("a session belongs to one client: %d", r.StatusCode)
+	}
+}
+
+// Requirement 18: usage splits by the xellter key that served the request and drills down to preset and model.
+func TestUsageByKeyAndByModel(t *testing.T) {
+	e := setup(t, nil)
+	for range 2 {
+		if r, b := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "text")); r.StatusCode != 200 {
+			t.Fatalf("chat: %d %s", r.StatusCode, b)
+		}
+	}
+	e.a.St.Flush()
+
+	resp, body := e.get(t, e.keyCl, "/v1/usage/keys?range=24h")
+	if resp.StatusCode != 200 {
+		t.Fatalf("usage/keys: %d %s", resp.StatusCode, body)
+	}
+	var keys struct {
+		Object string `json:"object"`
+		Data   []struct {
+			APIKey   string  `json:"api_key"`
+			Client   string  `json:"client"`
+			Requests int     `json:"requests"`
+			InTok    int64   `json:"in_tok"`
+			OutTok   int64   `json:"out_tok"`
+			CostIDR  float64 `json:"cost_idr"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(body), &keys); err != nil {
+		t.Fatalf("usage/keys is not json: %v %s", err, body)
+	}
+	if keys.Object != "usage.keys" || len(keys.Data) == 0 {
+		t.Fatalf("usage/keys: %s", body)
+	}
+	// The row is the xellter API key the caller used, identified by its hint: that is what the owner hands out
+	// and revokes. The key itself must never appear.
+	total := 0
+	for _, k := range keys.Data {
+		if k.Client != "babu" || k.APIKey == "" || k.APIKey == e.keyCl {
+			t.Fatalf("a key row names the xellter key by its hint, never the key: %+v", k)
+		}
+		total += k.Requests
+	}
+	if total != 2 {
+		t.Fatalf("both requests must be counted, got %d: %s", total, body)
+	}
+
+	resp, body = e.get(t, e.keyCl, "/v1/usage/models?range=24h&preset=text")
+	if resp.StatusCode != 200 {
+		t.Fatalf("usage/models: %d %s", resp.StatusCode, body)
+	}
+	var models struct {
+		Object string `json:"object"`
+		Data   []struct {
+			Preset   string `json:"preset"`
+			Model    string `json:"model"`
+			Requests int    `json:"requests"`
+			InTok    int64  `json:"in_tok"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(body), &models); err != nil {
+		t.Fatalf("usage/models is not json: %v %s", err, body)
+	}
+	if models.Object != "usage.models" || len(models.Data) == 0 {
+		t.Fatalf("usage/models: %s", body)
+	}
+	for _, m := range models.Data {
+		if m.Preset != "text" || m.Model == "" || m.Model == "text" || m.InTok == 0 {
+			t.Fatalf("a model row must name the real model and its preset: %+v", m)
+		}
+	}
+	// the wrong window is refused on both endpoints
+	if r, _ := e.get(t, e.keyCl, "/v1/usage/keys?range=7d"); r.StatusCode != 400 {
+		t.Fatalf("usage/keys bad range: %d", r.StatusCode)
+	}
+	if r, _ := e.get(t, e.keyCl, "/v1/usage/models?range=7d"); r.StatusCode != 400 {
+		t.Fatalf("usage/models bad range: %d", r.StatusCode)
+	}
+	// another client sees nothing
+	_, body = e.get(t, "xl-direct", "/v1/usage/keys?range=24h")
+	if !strings.Contains(body, `"data":[]`) {
+		t.Fatalf("another client must not see the traffic: %s", body)
 	}
 }

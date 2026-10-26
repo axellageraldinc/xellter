@@ -54,7 +54,8 @@ type Model struct {
 	Protocols   []string   `json:"protocols"`
 	InIDR       float64    `json:"in_idr"` // IDR per 1M tokens
 	OutIDR      float64    `json:"out_idr"`
-	CachedIDR   float64    `json:"cached_idr"`
+	CachedIDR   float64    `json:"cached_idr"`      // cache read
+	CacheWrite  float64    `json:"cache_write_idr"` // 0 = kenari publishes no value; shown as — in the panel
 	Lines       []Line     `json:"lines"`
 	Promo       *Promo     `json:"promo,omitempty"`
 	Upcoming    *Upcoming  `json:"upcoming,omitempty"`
@@ -230,10 +231,11 @@ type rawModel struct {
 		Input []string `json:"input"`
 	} `json:"modalities"`
 	Pricing struct {
-		Free      bool     `json:"free"`
-		Input     *float64 `json:"input"`
-		Output    *float64 `json:"output"`
-		CacheRead *float64 `json:"cache_read"`
+		Free       bool     `json:"free"`
+		Input      *float64 `json:"input"`
+		Output     *float64 `json:"output"`
+		CacheRead  *float64 `json:"cache_read"`
+		CacheWrite *float64 `json:"cache_write"`
 	} `json:"pricing"`
 	Lines []struct {
 		Unit    string  `json:"unit"`
@@ -292,6 +294,9 @@ func (k *Kenari) Fetch(ctx context.Context) (*Snapshot, error) {
 		} else {
 			m.CachedIDR = m.InIDR
 		}
+		if r.Pricing.CacheWrite != nil {
+			m.CacheWrite = *r.Pricing.CacheWrite / micro
+		}
 		for _, l := range r.Lines {
 			v := ""
 			if l.Variant != nil {
@@ -307,6 +312,39 @@ func (k *Kenari) Fetch(ctx context.Context) (*Snapshot, error) {
 			m.FreeSibling = strings.TrimSuffix(r.ID, ":free")
 		}
 		s.Models[m.ID] = m
+	}
+
+	// System One models live on their own catalog endpoint and are a preset category of their own (the sixth).
+	// They are not chat models: nothing here mixes them into the chat pool.
+	var sys struct {
+		Data []rawModel `json:"data"`
+	}
+	if err := k.get(ctx, "/v1/models?modality=systemone", &sys); err == nil {
+		for _, r := range sys.Data {
+			if _, taken := s.Models[r.ID]; taken {
+				continue
+			}
+			m := &Model{ID: r.ID, Owner: r.OwnedBy, Endpoint: "systemone", Endpoints: []string{"systemone"},
+				Free: r.Pricing.Free || strings.HasSuffix(r.ID, ":free"), Context: r.ContextLength}
+			if r.Pricing.Input != nil {
+				m.InIDR = *r.Pricing.Input / micro
+			}
+			if r.Pricing.Output != nil {
+				m.OutIDR = *r.Pricing.Output / micro
+			}
+			if r.Pricing.CacheRead != nil {
+				m.CachedIDR = *r.Pricing.CacheRead / micro
+			} else {
+				m.CachedIDR = m.InIDR
+			}
+			if r.Pricing.CacheWrite != nil {
+				m.CacheWrite = *r.Pricing.CacheWrite / micro
+			}
+			if strings.HasSuffix(r.ID, ":free") {
+				m.FreeSibling = strings.TrimSuffix(r.ID, ":free")
+			}
+			s.Models[m.ID] = m
+		}
 	}
 
 	// Public pricing: promos, upcoming prices, subscriber-only flags, free tier.

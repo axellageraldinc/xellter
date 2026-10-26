@@ -24,7 +24,7 @@ func TestOpenRenamesLegacyShadowColumn(t *testing.T) {
 	defer st.Close()
 	st.Log(Request{TS: time.Now().UnixMilli(), Client: "c", Preset: "text", Model: "m", OK: true})
 	st.Flush()
-	rows, err := st.Usage("preset", time.Now().Add(-time.Hour), "")
+	rows, err := st.Usage("preset", time.Now().Add(-time.Hour), "", "")
 	if err != nil || len(rows) != 1 || rows[0].Key != "text" {
 		t.Fatalf("rows=%v err=%v", rows, err)
 	}
@@ -69,5 +69,258 @@ func TestOpenDropsTheCanaryColumnAndTheSeenTable(t *testing.T) {
 	rows, err := st.Recent(10, "")
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("rows=%v err=%v", rows, err)
+	}
+}
+
+// The session and api_key columns arrived with the rewrite. A database from before them gains the columns
+// instead of being thrown away.
+func TestOpenAddsTheSessionAndKeyColumns(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "xellter.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE requests(id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, client TEXT, preset TEXT, requested TEXT, model TEXT, upstream TEXT, path TEXT, status INTEGER, ok INTEGER, latency_ms INTEGER, ttft_ms INTEGER, in_tok INTEGER, out_tok INTEGER, cached_tok INTEGER, cost REAL, billing TEXT, stream INTEGER, attempt INTEGER, rtk_saved INTEGER, err TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	st, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	for _, col := range []string{"session", "api_key"} {
+		var n int
+		if st.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('requests') WHERE name=?`, col).Scan(&n) != nil || n != 1 {
+			t.Fatalf("column %q missing: %d", col, n)
+		}
+	}
+}
+
+// A request row keeps its session, key, billing class and cost, and the aggregates read them back.
+func TestRequestsAggregateByClientPresetModelAndKey(t *testing.T) {
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now()
+	st.Log(Request{TS: now.UnixMilli(), Client: "babu", Preset: "text", Model: "cheap-b", Upstream: "babu/plan", OK: true, Billing: "plan",
+		InTok: 1000, OutTok: 50, CachedTok: 400, CatalogCost: 1.5, Session: "s1", Key: "plan", RTKSaved: 120})
+	st.Log(Request{TS: now.UnixMilli(), Client: "babu", Preset: "text", Model: "pro-c", Upstream: "babu/topup", Status: 503, Billing: "payg", Session: "s1", Key: "topup"})
+	st.Log(Request{TS: now.UnixMilli(), Client: "aixell", Preset: "image", Model: "img-paid", OK: true, Billing: "payg", CatalogCost: 2, Key: "main"})
+	st.Flush()
+	since := now.Add(-time.Hour)
+
+	// per client
+	rows, err := st.Usage("client", since, "", "")
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("client rows=%v err=%v", rows, err)
+	}
+	byClient := map[string]UsageRow{}
+	for _, r := range rows {
+		byClient[r.Client] = r
+	}
+	if b := byClient["babu"]; b.Requests != 2 || b.Errors != 1 || b.Cost != 1.5 {
+		t.Fatalf("babu row: %+v", b)
+	}
+	// per key, filtered by client
+	rows, err = st.Usage("key", since, "babu", "")
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("key rows=%v err=%v", rows, err)
+	}
+	for _, r := range rows {
+		if r.APIKey != "plan" && r.APIKey != "topup" {
+			t.Fatalf("key row: %+v", r)
+		}
+		if r.APIKey == "plan" && (r.InTok != 1000 || r.OutTok != 50 || r.Cached != 400 || r.RTKSaved != 120) {
+			t.Fatalf("plan key row: %+v", r)
+		}
+	}
+	// per preset and model, which is the drill-down's last level
+	rows, err = st.Usage("preset_model", since, "babu", "text")
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("preset_model rows=%v err=%v", rows, err)
+	}
+	for _, r := range rows {
+		if r.Preset != "text" || (r.Model != "cheap-b" && r.Model != "pro-c") {
+			t.Fatalf("preset_model row: %+v", r)
+		}
+	}
+	// another client's traffic never leaks in
+	rows, _ = st.Usage("preset_model", since, "aixell", "")
+	if len(rows) != 1 || rows[0].Model != "img-paid" {
+		t.Fatalf("aixell rows: %+v", rows)
+	}
+	// an unknown grouping is refused instead of silently returning everything
+	if _, err := st.Usage("nonsense", since, "", ""); err == nil {
+		t.Fatal("an unknown group must be an error")
+	}
+}
+
+// ModelUsage only counts successful requests: a failed attempt never reached the model, so it was never billed.
+func TestModelUsageCountsOnlySuccessfulRequests(t *testing.T) {
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now()
+	st.Log(Request{TS: now.UnixMilli(), Client: "babu", Model: "cheap-b", OK: true, Billing: "plan", InTok: 1000, OutTok: 50, CatalogCost: 1.5})
+	st.Log(Request{TS: now.UnixMilli(), Client: "babu", Model: "cheap-b", Status: 500, OK: false, Billing: "payg"})
+	st.Log(Request{TS: now.UnixMilli(), Client: "babu", Model: "pro-c", OK: true, Billing: "payg", InTok: 10, OutTok: 5, CatalogCost: 9})
+	st.Flush()
+	rows, err := st.ModelUsage(now.Add(-time.Hour), "babu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]ModelUsageRow{}
+	for _, r := range rows {
+		got[r.Model+"|"+r.Billing] = r
+	}
+	if len(got) != 2 || got["cheap-b|plan"].Requests != 1 || got["cheap-b|plan"].InTok != 1000 || got["pro-c|payg"].Cost != 9 {
+		t.Fatalf("rows: %+v", got)
+	}
+	if _, ok := got["cheap-b|payg"]; ok {
+		t.Fatal("a failed request must not be billed")
+	}
+}
+
+// A session's traffic is read back as one record: its tokens, its cost and the models it used.
+func TestSessionReadsTheSessionsTraffic(t *testing.T) {
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now()
+	st.Log(Request{TS: now.Add(-time.Minute).UnixMilli(), Client: "babu", Preset: "text", Model: "cheap-b", OK: true, Billing: "plan", InTok: 100, OutTok: 10, CatalogCost: 0.5, Session: "s1"})
+	st.Log(Request{TS: now.UnixMilli(), Client: "babu", Preset: "text", Model: "pro-c", OK: true, Billing: "payg", InTok: 200, OutTok: 20, CatalogCost: 1.5, Session: "s1"})
+	st.Log(Request{TS: now.UnixMilli(), Client: "babu", Preset: "text", Model: "pro-c", Status: 503, Session: "s1"})
+	st.Log(Request{TS: now.UnixMilli(), Client: "babu", Preset: "text", Model: "cheap-b", OK: true, Session: "other"})
+	st.Flush()
+	u, err := st.Session("babu", "s1")
+	if err != nil || u == nil {
+		t.Fatalf("session: %v %+v", err, u)
+	}
+	if u.Requests != 3 || u.Errors != 1 || u.InTok != 300 || u.OutTok != 30 || u.Cost != 2 {
+		t.Fatalf("session totals: %+v", u)
+	}
+	if len(u.Models) != 2 || u.Models[0] != "cheap-b" || u.Models[1] != "pro-c" || u.LastModel != "pro-c" {
+		t.Fatalf("session models: %+v", u)
+	}
+	if u.FirstTS == 0 || u.LastTS < u.FirstTS {
+		t.Fatalf("timestamps: %+v", u)
+	}
+	// another client cannot read it, and an unknown session is nil rather than an empty record
+	if u, err := st.Session("aixell", "s1"); err != nil || u != nil {
+		t.Fatalf("a session belongs to one client: %v %+v", err, u)
+	}
+	if u, err := st.Session("babu", "nope"); err != nil || u != nil {
+		t.Fatalf("unknown session: %v %+v", err, u)
+	}
+}
+
+// The bench table is one row per (model, arena): a score from another source is a different fact, not a
+// replacement. Bench returns them grouped model -> arena.
+func TestBenchRoundTripsPerArena(t *testing.T) {
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.ReplaceBench([]BenchRow{
+		{Arena: "text", Value: 0.62, Rating: 1483, Lo: 1478, Hi: 1488, Matched: "Claude Opus 4.7", Date: "2026-10-22", Votes: 12000},
+		{Arena: "webdev", Value: 0.7, Rating: 1450, Date: "2026-10-22"},
+	}, "claude-opus-4-7"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.Bench()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || len(got["claude-opus-4-7"]) != 2 {
+		t.Fatalf("bench rows: %+v", got)
+	}
+	if r := got["claude-opus-4-7"]["text"]; r.Value != 0.62 || r.Rating != 1483 || r.Matched != "Claude Opus 4.7" || r.Votes != 12000 {
+		t.Fatalf("text row: %+v", r)
+	}
+	// replacing one model keeps the other models' rows
+	if err := st.ReplaceAllBench(map[string][]BenchRow{"m2": {{Arena: "text", Value: 0.5}}}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = st.Bench()
+	if len(got) != 1 || got["claude-opus-4-7"] != nil {
+		t.Fatalf("ReplaceAllBench must swap the whole table: %+v", got)
+	}
+	// and one model can be re-scored without touching the rest
+	if err := st.ReplaceAllBench(map[string][]BenchRow{"a": {{Arena: "text", Value: 0.1}}, "b": {{Arena: "text", Value: 0.2}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ReplaceBench([]BenchRow{{Arena: "text", Value: 0.9}}, "a"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = st.Bench()
+	if got["a"]["text"].Value != 0.9 || got["b"]["text"].Value != 0.2 {
+		t.Fatalf("ReplaceBench must only touch its model: %+v", got)
+	}
+}
+
+// An old single-arena bench table is rebuilt instead of migrated: the new shape holds several rows per model.
+func TestOpenRebuildsTheOldBenchTable(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "xellter.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE bench(model TEXT PRIMARY KEY, value REAL, date TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	st, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.ReplaceBench([]BenchRow{{Arena: "text", Value: 0.5}, {Arena: "agent", Value: 0.4}}, "m"); err != nil {
+		t.Fatalf("the rebuilt table must accept several rows per model: %v", err)
+	}
+	if got, _ := st.Bench(); len(got["m"]) != 2 {
+		t.Fatalf("bench rows: %+v", got)
+	}
+}
+
+func TestSessionsAndJobs(t *testing.T) {
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	st.PutSession("h1", time.Now().Add(time.Hour), "127.0.0.1", "ua")
+	if !st.SessionValid("h1") || st.SessionCount() != 1 {
+		t.Fatal("session not stored")
+	}
+	st.PutSession("h2", time.Now().Add(-time.Hour), "127.0.0.1", "ua")
+	if st.SessionValid("h2") || st.SessionCount() != 1 {
+		t.Fatal("an expired session must not be valid")
+	}
+	st.DeleteSession("h1")
+	if st.SessionValid("h1") || st.SessionCount() != 0 {
+		t.Fatal("session not deleted")
+	}
+	st.PutJob("job-1", "babu/plan")
+	if up, ok := st.Job("job-1"); !ok || up != "babu/plan" {
+		t.Fatalf("job: %q %v", up, ok)
+	}
+	if _, ok := st.Job("nope"); ok {
+		t.Fatal("unknown job")
+	}
+	st.KVSet("k", "v")
+	if st.KVGet("k") != "v" {
+		t.Fatal("kv not stored")
+	}
+	st.KVSet("k", "w")
+	if st.KVGet("k") != "w" {
+		t.Fatal("kv not replaced")
 	}
 }

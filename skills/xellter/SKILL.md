@@ -1,226 +1,237 @@
 ---
 name: xellter
-description: "Use when changing xellter's configuration: clients, kenari keys, presets, ranking, rules, RTK, or the admin panel. Also use when the owner asks to change a value the panel does not show."
-version: 1.1.0
+description: "Use when operating xellter: adding a client, a kenari key or a preset, choosing an optimization, picking models, reading the panel's Serving now and eviction list, or changing a routing knob."
+version: 2.0.0
 author: Hermes Agent
 license: MIT
 platforms: [linux]
 metadata:
   hermes:
-    tags: [xellter, llm-gateway, kenari, admin-panel, presets, routing]
+    tags: [xellter, llm-gateway, kenari, admin-panel, presets, routing, eviction]
 ---
 
 # xellter — the LLM gateway in front of kenari.id
 
-xellter is one OpenAI/Anthropic-compatible endpoint in front of kenari.id. It owns the clients
-(the apps that call it), their kenari keys, and the **presets** it generates for them. An app asks
-for a preset name (`text`, `image`, `video`, `tts`, `stt`, `music`) as the model; xellter picks the
-best real model behind it for every request.
+xellter is one OpenAI/Anthropic-compatible endpoint in front of kenari.id. It owns the clients (the
+apps that call it), their kenari keys and their presets. An app asks for a preset name (`text`,
+`image`, `video`, `tts`, `stt`, `music`, `systemone`) as the model; xellter picks a real model from
+that preset's pool for every request.
 
-Repo: `~/apps/xellter`. Docs: `docs/architecture.md`, `docs/configuration.md`, `docs/adr/`.
-Decisions live in `docs/adr/` — read the latest ADR before changing the design.
+Repo: `~/apps/xellter`. Docs: `docs/architecture.md`, `docs/configuration.md`, `docs/adr/` (read the
+newest ADR, 0017–0020, before changing the design). Accepted design: `docs/rewrite-plan.md`.
+
+The one rule that decides most questions: **a preset is an explicit pool of models plus one
+optimization.** Nothing is generated, nothing is added, nothing is removed. If a model is not ticked,
+it is not used; if it is ticked, it is used unless it cannot serve.
 
 ## When to Use
 
-- The owner asks to change how xellter routes: a preset should be cheaper, stronger, or should
-  prefer a different model.
-- A client (Babu, aixell, polifin, ...) needs a new kenari key, a new xellter key, or a new preset.
-- Something is not routed as expected: the wrong model answers, a request 503s, a model is never used.
-- The owner wants a value changed that the panel does not show (the panel is deliberately small,
-  see ADR 0012 and ADR 0014). **Read this skill before answering: it lists every knob, where it
-  lives and how to change it.**
+- A client (Babu, aixell, polifin, …) needs an xellter key, a kenari key, or a preset.
+- The owner wants a preset cheaper, stronger, or wants a different model to answer.
+- Something is not routed as expected: the wrong model answers, a request 503s, a model is never used,
+  a model keeps disappearing.
+- A routing knob needs changing (`routing.*`).
+- An old config must be migrated.
 
-## The one rule that decides most questions
+## Add a client
 
-**The panel only shows the knobs that matter; everything else is detected or defaulted.**
-If a value is not in the panel, it is either detected by xellter (account, plan, tier, limits, the
-models a key may call) or it keeps the backend default. Do not add a control to the panel to make a
-value changeable; change the value in the config file instead.
+Panel -> **Clients** -> **New client**: name, purpose, optional kenari key. The xellter key is shown
+once — copy it then; only its sha256 is stored. Or:
 
-The Settings page has **no "Advanced" block**: Smart routing and Token saver (RTK) each show a few
-real switches, and everything else is a config-file edit (ADR 0014). The
-values that the panel hides still work; they just keep their default until the config names them.
-
-## What the panel can change
-
-| Where | What | Notes |
-|---|---|---|
-| Clients -> a client | Kenari key: add, rename, replace value, remove | A key has a name and nothing else |
-| Clients -> a client | Preset: "Optimise for" (Cheapest / Balanced / Best quality) | Sets `weights` and `min_quality` together |
-| Clients -> a client | Preset: tie-break strategy | `priority` (always the best) or `round_robin` (take turns) |
-| Clients -> a client | Preset: tool calling / image input requirement | Chat presets only |
-| Clients -> a client | Add / delete a preset | Names are fixed: text, image, video, tts, stt, music |
-| Settings -> Smart routing | `rules.sticky_minutes`, `rules.avoid_sunset_days` | Global |
-| Settings -> Token saver (RTK) | `rtk.enabled` and the five filters (git diff, grep, ls, logs, truncate) | Global |
-| Overview | Kenari account key (add / replace / remove) | It only reads plan, usage and balance |
-| Config file | The whole YAML, with history and rollback | The escape hatch |
-
-There is **no "Advanced" block and no other section on the Settings page** (ADR 0014). Everything
-that is not in the table above keeps the backend default or is a config-file edit.
-
-## What the panel cannot change (edit the config file)
-
-`clients[].daily_budget_idr`, `clients[].rtk`, `clients[].passthrough`, `clients[].enabled`,
-`clients[].note`, `presets[].mode` / `models` / `min_quality` / `max_candidates` / `rr_band` /
-`weights` / `cost_profile` / `description`, `resilience.*`, `server.*`, `kenari.*`,
-`benchmarks.*`, and the hidden parts of `rules` and `rtk`:
-
-| Hidden knob | Config key | Default |
-|---|---|---|
-| Preference for free / plan / discounted models | `rules.free_bonus`, `rules.plan_bonus`, `rules.promo_bonus_max` | .10, .08, .05 |
-| What a plan-covered request counts for | `rules.plan_cost_factor` | .3 |
-| Ignore a discount that ends within (h) | `rules.promo_min_remaining_hours` | 12 |
-| Look ahead for price changes (h) | `rules.upcoming_lookahead_hours` | 24 |
-| Health window (h) | `rules.stats_window_hours` | 24 |
-| Compress only outputs longer than (chars) | `rtk.min_chars` | 2000 |
-| Hard cap (chars) | `rtk.max_chars` | 12000 |
-| Context lines kept around a diff change | `rtk.diff_context` | 1 |
-| Models to try per request | `resilience.max_attempts` | 4 |
-| Your own quality scores | `benchmarks.<model>` | from the Arena leaderboard |
-
-The Config tab edits the same file, validates it, keeps a history and can roll back. A hand edit
-is therefore the normal way to change these — do not add a panel control for them.
-
-## The values and where they live
-
-| Want | Set | Default |
-|---|---|---|
-| Cheapest / Balanced / Best quality | panel button on the preset | Balanced (25/35/20/15/5, min_quality .50) |
-| Quality floor of a preset | `presets.<name>.min_quality` | .50 chat, 0 media |
-| Always the best model vs. take turns | `presets.<name>.strategy` | round_robin (chat), priority (media) |
-| How many models to keep | `presets.<name>.max_candidates` | 5 |
-| How close counts as equal | `presets.<name>.rr_band` | .04 chat, .03 media |
-| How much each factor counts | `presets.<name>.weights` | per objective above |
-| The reference request that turns prices into one number | `presets.<name>.cost_profile` | 4000 in / 600 out tokens, 70% cached |
-| A model must be able to call tools | `presets.<name>.require.tool_call` | true for chat |
-| A model must take images | `presets.<name>.require.vision` | false |
-| Keep one conversation on one model | `rules.sticky_minutes` (panel) | 30 |
-| Stop using models that end within (days) | `rules.avoid_sunset_days` (panel) | 3 |
-| Shrink big tool output | `rtk.enabled` and the filters (panel) | on, all five filters on |
-| Preference for free / plan / discounted models | `rules.free_bonus`, `plan_bonus`, `promo_bonus_max` | .10, .08, .05 |
-| Models to try per request | `resilience.max_attempts` | 4 |
-| Your own quality scores | `benchmarks.<model>` | from the Arena leaderboard |
-
-Weights are **relative**, not percentages: `cost 25, benchmark 35, reliability 15, context 5`
-means "benchmark counts 35/25 = 1.4x as much as cost". The context weight is a soft preference
-only; there is no context-size gate any more (ADR 0012).
-
-## How to make a change safely
-
-1. Read the current value: `grep` the config (`~/apps/xellter/xellter.yaml`) or read it from the
-   admin API (`GET /admin/api/config`).
-2. Change it in `xellter.yaml` (or the Config tab), then validate:
-   `./bin/xellter check -config xellter.yaml`.
-3. Apply it: the panel saves and applies at once; a hand edit needs a restart of the service
-   (`systemctl --user restart xellter`). Never stop the service without the owner's permission.
-4. Verify: the "Why this order?" button on a preset card shows the ranking and every reason
-   behind it; `GET /admin/api/ranking?client=<name>&preset=<preset>` returns the same data.
-
-Tests: `./scripts/ci.sh` (gofmt, vet, tests, JS syntax). Tests never call the network or a paid
-API; kenari is faked with `httptest`.
-
-## How to change a knob the panel does not show
-
-This is the normal path for every hidden knob above. The panel's Config tab is the same file with
-history and rollback, so there are two ways.
-
-**Through the admin API (no restart, applies at once).** The service listens on `127.0.0.1:8480`.
-The `PUT /admin/api/config` endpoint replaces the **whole** config, so always read it first, patch
-one field and send the whole thing back:
-
-```sh
-# 1. read the current config and keep it in a file
-curl -s -H 'X-Xellter: 1' -b cookies.txt http://127.0.0.1:8480/admin/api/config > /tmp/cfg.json
-
-# 2. patch one value (example: prefer free models more) and keep only {config}
-jq '{config: (.config | .rules.free_bonus = 0.2)}' /tmp/cfg.json > /tmp/new.json
-
-# 3. save and apply
-curl -s -H 'X-Xellter: 1' -H 'Content-Type: application/json' -b cookies.txt \
-  -X PUT http://127.0.0.1:8480/admin/api/config --data-binary @/tmp/new.json
+```bash
+./bin/xellter client add -name babu -purpose coding -out data/babu.key
 ```
 
-Two rules that cost time if broken:
-- **Send `{config}` only.** The GET response also carries `yaml`; a body with both is refused
-  (400 "send {config} or {yaml}, not both"), and a body with only `yaml` applies the old text.
-- **Send the whole config, never a fragment.** The endpoint takes the object as the new truth, so
-  a body without `clients` would drop every client. Step 1, patch, step 3 with the full object is
-  the safe pattern.
+Purpose picks the text scoring sources and nothing else:
 
-A YAML edit is simpler to read: edit `xellter.yaml`, run `./bin/xellter check -config xellter.yaml`,
-then restart the service. The file is machine-written, so the comments in it are not preserved.
+| Purpose | Scored on |
+|---|---|
+| General | Arena text |
+| Coding | SWE-bench Verified 50 %, Arena webdev 30 %, Aider polyglot 20 % |
+| Agentic | Arena agent |
+| Vision & documents | Arena vision 50 %, Arena document 50 % |
+| Bulk | cost only; Best Quality is not offered |
 
-**Never** add a control to the panel to make a hidden value changeable. If the owner asks for a
-value that is not in the panel, change it in the config (or through the API above) and say so.
+A purpose reorders the pool; it never changes which models are in it. It applies to the **text**
+preset only.
 
-## What xellter detects by itself (never configure it)
+## Add a kenari key to a client
 
-- Which models a key may call: a probe asks kenari for an unknown model and reads the allow list
-  from the answer. Restricted keys learn their list; unrestricted keys are unrestricted.
-- The kenari account, its plan, its tier and its limits: read from kenari's quota and balance
-  endpoints (needs the account key, `kenari.account_key_env`).
-- The balance above which kenari lifts the free-tier limits: from the public pricing endpoint.
+Panel -> the client -> **Add key**: a name and the key value. A key has a name and nothing else —
+xellter probes kenari to learn which models it may call, and reads account, plan, tier and limits by
+itself. Or:
 
-## Common tasks
+```bash
+echo 'kn-...' | ./bin/xellter key add -client babu -name main
+```
 
-**Make a preset cheaper.** Panel -> the client -> the preset -> "Cheapest". If the cheapest models
-are not good enough, raise `min_quality` in the config file instead of the "Best quality" button
-(the button also drops the benchmark weight, which is not what you want).
+The value goes to `data/secrets.env` (0600); the YAML keeps only `key_env`. Rename moves the secret
+with the name. Replace changes the value without touching the config.
 
-**A model is never used.** Check "Why this order?": it is rejected, with the reason given (a
-missing capability, a sunset, a quality floor, or "outside top 5"). A model with no quality
-evidence is marked "unverified": it still serves, but its quality is a guess.
+Add the optional full-access **account key** on Overview (or `kenari.account_key_env`). It only reads
+plan windows and balance; it never serves a request.
 
-**A client gets no answers.** "Nothing available right now" means no model of that kind is
-callable with the client's keys: the key has no value, is on cooldown, or the catalog has no model
-of that kind for it. The Overview alerts name the client and the key.
+## Create a preset
 
-**Add a client.** Panel -> Clients -> Add client (this prints the xellter key once), then Add key
-with the kenari key value. Presets appear a few seconds after the key is probed.
+Panel -> the client -> **Add preset**: pick a category. It starts empty and Balanced.
 
-**"Make it prefer free models more."** `rules.free_bonus` (config file; default .10). It is a
-score bonus, not a percentage: .20 makes a free model clearly ahead, .30 makes it overwhelming.
+| Category | Preset name | Serves |
+|---|---|---|
+| chat | `text` | `/v1/chat/completions`, `/v1/responses`, `/v1/messages` |
+| images | `image` | `/v1/images/*` |
+| videos | `video` | `/v1/videos` |
+| audio_speech | `tts` | `/v1/audio/speech` |
+| audio_transcription | `stt` | `/v1/audio/transcriptions` |
+| music | `music` | `/v1/music` |
+| systemone | `systemone` | kenari's System One models; no API path is mapped to this category yet, so it cannot serve `/v1/chat/completions` |
 
-**"Stop using a model that is about to be retired."** `rules.avoid_sunset_days` (panel, default 3)
-drops a model that ends within that many days. `rules.upcoming_lookahead_hours` (config, default
-24) is how far ahead a price change is noticed.
+**One preset per category.** The name is fixed by the category, so a second text preset cannot be
+expressed; validation refuses it. "Add preset" only offers the categories the client does not have
+yet.
 
-**"Compress more / less."** `rtk.min_chars` (config, default 2000) is the shortest output that
-gets compressed, `rtk.max_chars` (config, default 12000) the hard cap, `rtk.diff_context`
-(config, default 1) how many context lines survive around a diff change. The on/off switch and
-the five filters are in the panel.
+## Choose an optimization
 
-**"Only accept better models."** Raise `presets.<name>.min_quality` (config; .50 for chat by
-default). Quality is the `benchmark` component: your `benchmarks.<model>` score when set, otherwise
-the Arena leaderboard score, otherwise an estimate from price. There is no LLM judge any more
-(ADR 0016): the score is a deterministic function of the catalog, the request log and the
-leaderboard snapshot.
+| Optimization | Use when | Ordering |
+|---|---|---|
+| Cheapest | cost is the only thing that matters | reference cost ascending; `top_models`/2 free + `top_models`/2 plan-covered (5 + 5 by default), each half by its own cost |
+| Balanced | the default | 50 % cost score, 50 % quality |
+| Best Quality | quality is the only thing that matters | quality only, with a floor at the pool median; models with no evidence are left out |
 
-**"A model's quality looks wrong."** Set `benchmarks.<model>` (0-100) in the config file; it wins
-over the leaderboard for that model. `GET /admin/api/bench` shows which models the leaderboard
-matched and which it did not.
+Notes that save time:
 
-**"Try more models before failing."** `resilience.max_attempts` (config, default 4), with
-`cooldown_base_s`, `cooldown_max_s`, `breaker_failures` and `breaker_open_s` next to it.
+- Cheapest is **cost only**. A cheap model with no quality evidence will win it. That is intended.
+- Best Quality never lists a model below the pool's median, and never lists an `unranked` model. A
+  pool of models with no public score produces an empty list — pick another optimization or other
+  models.
+- Quality is filled for **text** presets only: every purpose maps to chat arenas. On image, video,
+  TTS, STT, music and System One presets every model is `unranked`, so Balanced behaves like cost
+  order and Best Quality serves nothing. Use Cheapest or Balanced there.
+- Balanced is the only one that mixes the two, and it is what a new preset gets.
 
-**"Let the panel sign me out everywhere."** Sidebar -> "Sign me out everywhere".
+## Pick models
 
-**"Show me what models the clients really used."** `GET /v1/usage?range=24h` (or `30d`) with a
-client's xellter key answers in kenari's shape: one row per real model and billing kind, with the
-requests, the tokens, what was paid (`cost_micro_idr`) and the list price (`catalog_micro_idr`),
-plus the totals. The rows come from xellter's own request log, so they name the model xellter
-routed to, not the preset the client asked for. `GET /v1/account/balance` and
-`GET /v1/account/quota` answer the account state xellter already keeps. A client that reads
-kenari's usage can point at xellter and change nothing (ADR 0015).
+Panel -> the preset -> **Choose models**. The picker is grouped by vendor (kenari's `owned_by`), and
+the family checkbox selects every model of that vendor in that category. A row reads:
+
+```
+claude-opus-5        plan   1.0M ctx   text+image   tools   In Rp100k, Out Rp500k, CR Rp40k, CW Rp100k
+```
+
+Name, billing class, context size, modalities, tool calling, and the price line in IDR. Free and
+plan-covered rows show list prices greyed so the pool can be compared; a price kenari does not
+publish is `—`. A model no key of the client may call says so and is not callable.
+
+Rules:
+
+- Everything ticked is in the pool; the optimization only orders it.
+- A model that is not in the pool cannot be called by name either. Being in a pool **is** the allow
+  list.
+- A `:free` twin and its paid sibling are separate ids; both can be in the pool.
+- System One models are their own category and never enter a text pool.
+
+## Read the panel
+
+**Serving now** — the ranked list for the preset, in order: rank, model, billing class, score, and a
+one-line reason ("score 0.612 (cost 532.00, quality 0.83, plan) from text — balanced: 50% cost, 50%
+quality"). The order decides who goes first in the round-robin and who serves after an eviction.
+Every model in the list is used in turn; a session stays on the model it is pinned to.
+
+**Out for now** — models evicted from this preset, with the moment each returns. Three failed attempts
+inside `evict_window_minutes` take a model out of **this preset only** for
+`evict_cooldown_minutes`; a session pinned to it loses its pin and moves on the next request. A
+success clears the record, so the rule is three failures in a row, not three ever. Evictions are in
+memory: a restart forgives a model.
+
+**Left out** — every model in the pool that is not serving, grouped by reason: not in the kenari
+catalog, wrong endpoint, subscriber-only without a plan, sunsets soon, no key may call it, no quality
+evidence, below the pool median, outside the top N.
+
+**Rankings computed X ago** — the last rebuild. Recalculate rebuilds every ranking of every client
+and answers immediately; the "Rankings" line then shows the new moment.
+
+**Look up a session** — paste a session id and see the preset, the live pin per preset, requests,
+errors, tokens and cost. This is the same data `GET /v1/session` returns to the app.
+
+## The `routing` knobs
+
+All seven live in `xellter.yaml` under `routing`. The panel does not edit them (it only displays the
+refresh interval on a client page), so a change is a config edit or a `PUT /admin/api/config`.
+
+| Knob | Default | Change it when |
+|---|---|---|
+| `rank_refresh_minutes` | 5 | the catalog or the leaderboards move faster than the order does. Never set it to 0: validation accepts 0 but the refresh loop panics at start-up with a non-positive interval |
+| `top_models` | 10 | the pool is large and only a few models should serve; lower it to concentrate traffic, raise it to spread it (1..50) |
+| `evict_errors` | 3 | a provider is flaky and you want it out sooner (2) or want more tolerance (5) |
+| `evict_window_minutes` | 60 | the failures are spread over a longer period than an hour |
+| `evict_cooldown_minutes` | 720 | a model should come back sooner than 12 h, or stay out longer |
+| `avoid_sunset_days` | 3 | you want to stop using models that retire earlier (5) or keep them until the end (0) |
+| `sticky_session` | true | almost never. Turning it off makes every request rotate, which loses provider cache warmth |
+
+`retry_once` is not a knob: a retriable failure (5xx, timeout, 429, network) always retries the same
+model once, then moves to the next model.
+
+Apply a change: the panel applies at once; a hand edit needs a restart
+(`systemctl --user restart xellter` — never without the owner's permission).
+
+```bash
+./bin/xellter check -config xellter.yaml     # validate
+./bin/xellter explain -client babu -preset text   # print the ranking and every reason
+```
+
+## Endpoints
+
+| Method and path | Use |
+|---|---|
+| `POST /v1/chat/completions`, `/v1/responses`, `/v1/messages` | chat; no translation, `model` is rewritten and the body forwarded |
+| `POST /v1/images/*`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/videos`, `/v1/music` | media |
+| `GET /v1/videos/{id}` | a video job, always through the key that created it |
+| `GET /v1/models`, `/v1/models/{id}` | the client's presets plus the real models in its pools |
+| `GET /v1/session` | the pinned model, vendor, billing, context, tokens and cost of one session |
+| `GET /v1/usage?range=24h\|30d` | per model and billing kind, in kenari's shape |
+| `GET /v1/usage/keys` | per kenari key name (the key that actually served the request) |
+| `GET /v1/usage/models?preset=` | per preset and model |
+| `GET /v1/account/balance`, `/v1/account/quota` | kenari's own numbers |
+| `GET /healthz` | catalog size, age, degraded |
+
+Auth is `Authorization: Bearer <xellter key>` or `x-api-key: <xellter key>`.
+
+```bash
+# what is this conversation using?
+curl -s "$BASE/v1/session?session=$SID" -H "Authorization: Bearer $XL_KEY"
+
+# where did the traffic go?
+curl -s "$BASE/v1/usage/keys?range=24h" -H "Authorization: Bearer $XL_KEY"
+curl -s "$BASE/v1/usage/models?range=24h&preset=text" -H "Authorization: Bearer $XL_KEY"
+```
+
+Session ids come from `X-Xellter-Session`, `X-Session-Id`, `X-Claude-Code-Session-Id`, the body's
+`prompt_cache_key` or `user`, or a hash of the opening messages. `GET /v1/session` answers 404
+`no_session` until the session has traffic, so a client can tell "not started" from "unknown".
+
+## Migrate an old config
+
+```bash
+./bin/xellter migrate -config xellter.yaml           # print the new file + notes
+./bin/xellter migrate -config xellter.yaml -write    # old file kept as xellter.yaml.pre-rewrite
+```
+
+Keeps server, kenari, clients, keys, hashes and notes; purpose becomes `general`, optimization
+`balanced`, and each preset keeps its name and model list. The notes name every preset left with an
+empty pool and every preset dropped for not being one of the seven fixed names. Secrets are
+untouched.
 
 ## Gotchas
 
-- The xellter key of a client is shown **once**; only its hash is stored. Rotating it stops the old
-  one at once.
-- Preset names are fixed and may not be invented: `text`, `image`, `video`, `tts`, `stt`, `music`.
-  A client has each kind at most once.
-- A deleted preset is not recreated (the `seeded` list remembers), but it can be added back.
+- A config that still carries `rules`, `resilience`, `rtk`, `benchmarks` or a retired preset key
+  (`weights`, `require`, `min_quality`, `max_candidates`, `strategy`, `rr_band`, `mode`,
+  `cost_profile`, `description`) **fails to load** with a message naming ADR 0017. That is not a bug:
+  run `xellter migrate`, or delete the section.
+- `passthrough`, `daily_budget_idr` and `seeded` are silently ignored — they no longer exist.
+- A new client has no presets and nothing to route to until you create one and tick models.
+- RTK is always on and only touches tool outputs. There is no switch and no header.
+- The xellter key of a client is shown once; rotating it stops the old one at once.
 - Keys of one kenari account share its limits, and there is only one account.
 - The request log stores metadata only: never prompts, never responses.
-- xellter never calls a model to score another model. Ranking uses catalog prices, account state,
-  the request log and the public Arena leaderboard only.
+- xellter never asks a model to score another model, and the owner never types a quality number.
+  Quality is downloaded from public leaderboards (`GET /admin/api/bench` shows what matched).
+- Tests never call the network or a paid API; run `./scripts/ci.sh`.

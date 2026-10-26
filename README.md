@@ -1,34 +1,59 @@
 # xellter
 
-A small, fast LLM gateway in front of [kenari.id](https://kenari.id): one OpenAI/Anthropic-compatible
-endpoint that picks the cheapest model that is good enough, fails over between models and keys, and
-shrinks tool output before it is paid for. One static Go binary, no runtime dependencies.
+A small LLM gateway in front of [kenari.id](https://kenari.id). An app asks for a preset name
+(`text`, `image`, …) with its own xellter key; xellter picks a real model from that preset's pool,
+keeps one model per conversation, retries a failure once, and takes a model out of that preset after
+three errors. One static Go binary, SQLite, no runtime dependencies.
 
-> Status: v1 feature-complete (see [docs/plan.md](docs/plan.md)). Built for a personal server; the
-> upstream is kenari, but the code is split so another upstream can be added.
+## The three optimizations
 
-## What it does
+A preset is an **explicit pool of models** (ticked in the panel) plus **one optimization**. Ranking
+only orders the pool; it never adds or removes a model.
 
-- **Clients, keys, presets.** You add a *client* (an app such as Babu or aixell), give it one or more kenari API keys, and xellter generates its **presets** from the models those keys can call, duplicates merged: `text`, `image`, `video`, `tts`, `stt` (and `music`). The app uses a preset name as the model; for every request xellter picks the best model behind it right now.
-- **Auto rules.** Free models, plan-covered models and discounted models are preferred; the five best-scoring models of a preset serve, and image/video/speech presets are ordered by price, free first. Quality is gated by benchmarks you provide, the public Arena leaderboard and measured reliability, and the score is fully deterministic: no model ever grades another.
-- **Routing.** Round-robin or priority across models and keys, session stickiness (keeps provider caches warm), cooldowns and a circuit breaker per key, limits tracked per kenari account.
-- **Real plan numbers.** With an optional full-access account key, plan budgets, reset times and balance come straight from kenari.
-- **RTK.** Compresses large `git diff`, `grep`, `ls` and log output in tool results before sending.
-- **Admin panel.** Clients and their keys, preset controls ("optimise for cheapest / balanced / best quality"), usage per client, preset and model, config editor with history. Login: username + password (scrypt) + TOTP.
+| Optimization | Order | The list |
+|---|---|---|
+| Cheapest | reference cost ascending, nothing else | half free + half plan-covered (5 + 5 at the default `top_models: 10`), each half by its own cost |
+| Balanced | 50 % cost score, 50 % benchmark | top 10 (the default) |
+| Best Quality | benchmark of the category only, floor at the pool median | top 10, models with no evidence excluded |
 
-## Quick start
+Cost is one number: the price of one reference request (for chat, 4 000 input tokens of which 70 %
+are cache reads, plus 600 output tokens), promos included. Text quality comes from public
+leaderboards fetched by xellter — Arena, SWE-bench Verified, Aider polyglot — never typed by the
+owner. A client's purpose (General, Coding, Agentic, Vision & documents, Bulk) chooses the text
+sources and never changes pool membership. Media presets (image, video, TTS, STT, music, System One)
+have no public score wired into the ranking yet, so they order by cost and Best Quality serves
+nothing there.
+
+## Also
+
+- **Routing.** Round-robin over the preset's top 10, session pinning (one model per conversation),
+  retry once on a retriable error, then the next model, and three errors in an hour evict a model
+  from that preset for 12 hours. Rankings rebuild every 5 minutes, after each catalog sync, and from
+  the panel's Recalculate button.
+- **RTK.** Tool output (`git diff`, `grep`, `ls`, logs, oversized text) is compressed before it is
+  sent. Always on, no switch.
+- **Plan numbers.** With an optional full-access account key, plan windows and balance come straight
+  from kenari and sit next to xellter's own accounting.
+- **Panel.** Overview, Clients, Usage, Config file. Login: username + password (scrypt) + TOTP.
+
+## Run
 
 ```bash
-make build                                   # -> bin/xellter (needs Go 1.27+)
+make build                                     # -> bin/xellter (needs Go 1.27+)
 install -d -m 700 data
-./bin/xellter admin init -credentials-out data/FIRST-LOGIN.txt   # username, password, TOTP secret, recovery codes
-./bin/xellter client add -name babu -out data/babu.key           # the xellter key your app will use
-echo 'kn-...' | ./bin/xellter key add -client babu -name main     # a kenari key for that client
-./bin/xellter serve                          # http://127.0.0.1:8480/admin/
+./bin/xellter admin init -credentials-out data/FIRST-LOGIN.txt
+./bin/xellter client add -name babu -out data/babu.key
+echo 'kn-...' | ./bin/xellter key add -client babu -name main
+./bin/xellter serve                            # http://127.0.0.1:8480/admin/
 ```
-Or do the same in the panel: Clients, Add client, Add key. Presets appear a few seconds after the key is checked.
 
-Point a client at it:
+Then open the panel, create the presets this client needs (one per category) and tick their models.
+
+Upgrading an old config:
+
+```bash
+./bin/xellter migrate -config xellter.yaml -write   # old file kept as xellter.yaml.pre-rewrite
+```
 
 ```bash
 curl http://127.0.0.1:8480/v1/chat/completions \
@@ -36,30 +61,38 @@ curl http://127.0.0.1:8480/v1/chat/completions \
   -d '{"model":"text","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-The response header `X-Xellter-Model` tells which real model answered.
+`X-Xellter-Model` names the real model that answered; `X-Xellter-Attempt` the attempt number.
 
-## Supported endpoints
+## Endpoints
 
-`POST /v1/chat/completions`, `/v1/responses`, `/v1/messages` (Anthropic wire), `/v1/images/*`,
-`/v1/audio/speech`, `/v1/audio/transcriptions` (multipart), `/v1/videos/*` (async jobs follow their key),
-`/v1/music/generations`; `GET /v1/models` (lists the client's presets), `GET /healthz`.
+| Method and path | Answers |
+|---|---|
+| `POST /v1/chat/completions`, `/v1/responses`, `/v1/messages` | chat, passed through unchanged (OpenAI chat, OpenAI Responses, Anthropic messages) |
+| `POST /v1/images/*`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/videos`, `/v1/music` | media |
+| `GET /v1/videos/{id}` | a video job, through the key that created it |
+| `GET /v1/models`, `/v1/models/{id}` | the client's presets and the real models in its pools |
+| `GET /v1/session` | the model this session is pinned to, and what it has cost |
+| `GET /v1/usage?range=24h\|30d` | traffic per model and billing kind |
+| `GET /v1/usage/keys`, `/v1/usage/models` | traffic per kenari key name, per preset and model |
+| `GET /v1/account/balance`, `/v1/account/quota` | kenari's balance and plan windows |
+| `GET /healthz` | catalog size, age and degraded flag |
 
 ## Documentation
 
 | File | Contents |
 |---|---|
-| [docs/architecture.md](docs/architecture.md) | components, request flow, ranking maths |
-| [docs/configuration.md](docs/configuration.md) | every config option |
+| [docs/architecture.md](docs/architecture.md) | components, request flow, ranking maths, routing, endpoints, panel |
+| [docs/configuration.md](docs/configuration.md) | every config key, and what is refused |
 | [docs/operations.md](docs/operations.md) | deploy, Tailscale, runbook, security model |
-| [docs/plan.md](docs/plan.md) | phases and deliverables |
+| [docs/plan.md](docs/plan.md) | phase status and what is deliberately not done |
 | [docs/adr/](docs/adr/) | architecture decision records |
-| [skills/xellter/SKILL.md](skills/xellter/SKILL.md) | how to change xellter (for LLM agents) |
+| [skills/xellter/SKILL.md](skills/xellter/SKILL.md) | how to operate xellter (for LLM agents) |
 | [AGENTS.md](AGENTS.md) | rules for AI coding agents working on this repo |
 
 ## Develop
 
 ```bash
-make test        # gofmt, vet, unit + integration tests (kenari is faked; no network, no paid calls)
+./scripts/ci.sh   # gofmt, vet, tests, JS syntax; no network, no paid calls
 ```
 
 ## License

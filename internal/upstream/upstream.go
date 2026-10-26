@@ -21,12 +21,12 @@ import (
 // Key is one upstream API key with its own failure state. Limits that kenari
 // applies per account are on its Account.
 type Key struct {
-	Name   string // unique id: "<client>/<key name>", or "account" for the read-only account key
-	Label  string // the key name inside its client
-	Client string // owner client ("" for the account key)
-	Secret string
+	Name string // unique id: "<client>/<key name>", or "account" for the read-only account key
 
 	mu       sync.Mutex
+	label    string // the key name inside its client
+	client   string // owner client ("" for the account key)
+	secret   string
 	cfg      config.Upstream
 	acct     *Account
 	readOnly bool      // the account key: it reads plan and balance, it never serves requests
@@ -99,18 +99,27 @@ func (p *Pool) Reload(cfg *config.Config, secrets map[string]string, st *store.S
 			accts[DefaultAccount] = a
 		}
 		if isNew && st != nil {
+			// the account's counters are read by request handlers while this runs, so they are seeded under
+			// its lock, like every other write to them
+			var free, rpm []int64
+			var spend []store.TimedCost
 			if t, err := st.FreeTimes(e.id, startOfUTCDay(now)); err == nil {
-				a.free = append(a.free, t...)
+				free = t
 			}
 			if t, err := st.AllTimes(e.id, now.Add(-time.Minute)); err == nil {
-				a.rpm = append(a.rpm, t...)
+				rpm = t
 			}
 			if sp, err := st.PlanSpend(e.id, now.Add(-30*24*time.Hour)); err == nil {
-				a.spend = append(a.spend, sp...)
+				spend = sp
 			}
+			a.mu.Lock()
+			a.free = append(a.free, free...)
+			a.rpm = append(a.rpm, rpm...)
+			a.spend = append(a.spend, spend...)
+			a.mu.Unlock()
 		}
 		k.mu.Lock()
-		k.cfg, k.Secret, k.acct, k.Label, k.Client, k.readOnly = u, secrets[u.KeyEnv], a, u.Name, e.client, e.readOnly
+		k.cfg, k.secret, k.acct, k.label, k.client, k.readOnly = u, secrets[u.KeyEnv], a, u.Name, e.client, e.readOnly
 		k.mu.Unlock()
 		next = append(next, k)
 		by[e.id] = k
@@ -124,7 +133,7 @@ func (p *Pool) ClientKeys(client string) []*Key {
 	defer p.mu.RUnlock()
 	var out []*Key
 	for _, k := range p.keys {
-		if k.Client == client && client != "" {
+		if k.Owner() == client && client != "" {
 			out = append(out, k)
 		}
 	}
@@ -159,6 +168,27 @@ func (p *Pool) Accounts() []*Account {
 
 // Next returns a monotonically increasing counter for round-robin rotation.
 func (p *Pool) Next() uint64 { return p.rr.Add(1) }
+
+// Secret returns the kenari key value ("" when the secret is not configured).
+func (k *Key) Secret() string {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.secret
+}
+
+// Label returns the key's name inside its client.
+func (k *Key) Label() string {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.label
+}
+
+// Owner returns the client the key belongs to ("" for the account key).
+func (k *Key) Owner() string {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.client
+}
 
 // Config returns the key's config.
 func (k *Key) Config() config.Upstream {
@@ -255,15 +285,42 @@ func (k *Key) Check(m *catalog.Model, snap *catalog.Snapshot, now time.Time) str
 	return a.check(m, snap, now)
 }
 
-func (k *Key) check(m *catalog.Model, now time.Time) string {
+// State reports why a key cannot serve anything at all: no secret, cooling down, or its breaker open. It
+// deliberately does not look at models or per-model limits, because the caller asks it when no model could
+// be attempted and needs to know whether the key itself is the problem.
+func (k *Key) State(now time.Time) string {
+	k.mu.Lock()
+	defer k.mu.Unlock()
 	switch {
-	case k.Secret == "":
+	case k.secret == "":
 		return NoSecret
 	case now.Before(k.cooldown):
 		return Cooldown
 	case now.Before(k.breaker):
 		return BreakerOpen
-	case !k.allowed(m.ID):
+	}
+	a := k.acct
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if now.Before(a.cooldown) {
+		return Cooldown
+	}
+	return OK
+}
+
+func (k *Key) check(m *catalog.Model, now time.Time) string {
+	switch {
+	case k.secret == "":
+		return NoSecret
+	case now.Before(k.cooldown):
+		return Cooldown
+	case now.Before(k.breaker):
+		return BreakerOpen
+	}
+	if m == nil { // a state query, not a per-model check
+		return OK
+	}
+	if !k.allowed(m.ID) {
 		return NotAllowed
 	}
 	if until, ok := k.blocked[m.ID]; ok && now.Before(until) {
@@ -373,15 +430,23 @@ type Verdict struct {
 
 var allowedRe = regexp.MustCompile(`(?i)allowed models?:\s*(.+)$`)
 
+// Key health is not configurable: a key that keeps failing is a key that is down, and the numbers below are
+// what makes the gateway stop using it for a while without touching a preset's ranking (ADR 0020).
+const (
+	cooldownBase = 30 * time.Second
+	cooldownMax  = 15 * time.Minute
+	breakerFails = 5
+	breakerOpen  = 2 * time.Minute
+)
+
 // Failure applies the effects of a failed attempt and says whether to retry.
 // Error codes follow https://kenari.id/docs/rate-limits.
-func (k *Key) Failure(model string, status int, body []byte, retryAfter time.Duration, res config.Resilience, now time.Time) Verdict {
+func (k *Key) Failure(model string, status int, body []byte, retryAfter time.Duration, now time.Time) Verdict {
 	code, msg := errorInfo(body)
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	a := k.acct
-	base := time.Duration(res.CooldownBaseSec) * time.Second
-	max := time.Duration(res.CooldownMaxSec) * time.Second
+	base, max := cooldownBase, cooldownMax
 	blockModel := func(d time.Duration) {
 		k.blockN[model]++
 		if d == 0 {
@@ -449,13 +514,20 @@ func (k *Key) Failure(model string, status int, body []byte, retryAfter time.Dur
 			return Verdict{true, "model unavailable on key", 0}
 		}
 		return Verdict{false, "client error", 0}
-	case status == 408 || status >= 500 || status == 0:
-		blockModel(0)
+	case status == 0:
+		// A transport failure says nothing about one model, so it counts towards the key's breaker: after a few
+		// in a row the key is treated as down for everyone.
 		k.fails++
-		if k.fails >= res.BreakerFailures {
-			k.breaker = now.Add(time.Duration(res.BreakerOpenSec) * time.Second)
+		if k.fails >= breakerFails {
+			k.breaker = now.Add(breakerOpen)
 			k.fails = 0
 		}
+		return Verdict{true, "network error", 0}
+	case status == 408 || status >= 500:
+		// A server error is attributable to the model or its provider, so it blocks that model only. The
+		// preset's own eviction rule (three errors in an hour) is what takes a model out of a preset; letting
+		// one bad model trip the key's breaker would take every healthy model down with it (ADR 0020).
+		blockModel(0)
 		return Verdict{true, "upstream error", 0}
 	}
 	return Verdict{false, "client error", 0}
@@ -512,7 +584,7 @@ type Status struct {
 func (k *Key) Status(now time.Time) Status {
 	k.mu.Lock()
 	a := k.acct
-	st := Status{Name: k.Name, Label: k.Label, Client: k.Client, Account: a.Name, Tier: a.tier(now), HasSecret: k.Secret != "", CooldownEnd: k.cooldown, BreakerEnd: k.breaker, LastError: k.lastErr, LastOK: k.lastOK}
+	st := Status{Name: k.Name, Label: k.label, Client: k.client, Account: a.Name, Tier: a.tier(now), HasSecret: k.secret != "", CooldownEnd: k.cooldown, BreakerEnd: k.breaker, LastError: k.lastErr, LastOK: k.lastOK}
 	for m, until := range k.blocked {
 		if now.Before(until) {
 			st.Blocked = append(st.Blocked, m)

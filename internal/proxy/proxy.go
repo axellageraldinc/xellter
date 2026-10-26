@@ -21,7 +21,6 @@ import (
 
 	"github.com/axellageraldinc/xellter/internal/catalog"
 	"github.com/axellageraldinc/xellter/internal/config"
-	"github.com/axellageraldinc/xellter/internal/rank"
 	"github.com/axellageraldinc/xellter/internal/route"
 	"github.com/axellageraldinc/xellter/internal/rtk"
 	"github.com/axellageraldinc/xellter/internal/store"
@@ -149,6 +148,12 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.listModels(w, r, cl, p)
 	case r.Method == http.MethodGet && p == "/v1/usage":
 		s.usage(w, r, cl)
+	case r.Method == http.MethodGet && p == "/v1/usage/keys":
+		s.usageKeys(w, r, cl)
+	case r.Method == http.MethodGet && p == "/v1/usage/models":
+		s.usageModels(w, r, cl)
+	case r.Method == http.MethodGet && p == "/v1/session":
+		s.session(w, r, cl)
 	case r.Method == http.MethodGet && p == "/v1/account/balance":
 		s.balance(w, r)
 	case r.Method == http.MethodGet && p == "/v1/account/quota":
@@ -176,7 +181,8 @@ func (s *Server) listModels(w http.ResponseWriter, r *http.Request, cl *config.C
 	var data []item
 	for _, n := range presets {
 		sh := cl.Presets[n]
-		data = append(data, item{n, "model", s.startedAt.Unix(), "xellter", sh.Modality, sh.Description, true})
+		desc := sh.Optimization + " over " + fmt.Sprint(len(sh.Models)) + " models"
+		data = append(data, item{n, "model", s.startedAt.Unix(), "xellter", sh.Category, desc, true})
 	}
 	snap := s.cat.Snapshot()
 	for _, id := range real {
@@ -252,19 +258,22 @@ func (b *reqBody) encode(model string, streamUsage bool) ([]byte, error) {
 	return json.Marshal(m)
 }
 
+// sessionKey identifies a session: an explicit header wins, then the request body's own keys, then a hash of
+// the opening messages. The returned value is the session id as the caller would recognise it, because it is
+// also what GET /v1/session accepts; the prefix that says where it came from is added separately.
 func sessionKey(r *http.Request, b *reqBody) string {
 	for _, h := range []string{"X-Xellter-Session", "X-Session-Id", "X-Claude-Code-Session-Id"} {
-		if v := r.Header.Get(h); v != "" {
-			return h + v
+		if v := strings.TrimSpace(r.Header.Get(h)); v != "" {
+			return v
 		}
 	}
-	if b.json == nil {
+	if b == nil || b.json == nil {
 		return ""
 	}
 	for _, k := range []string{"prompt_cache_key", "user"} {
 		var v string
 		if json.Unmarshal(b.json[k], &v) == nil && v != "" {
-			return k + v
+			return v
 		}
 	}
 	if raw := b.json["messages"]; len(raw) > 0 {
@@ -287,23 +296,17 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 		writeErr(w, r.URL.Path, rerr.Status, rerr.Code, rerr.Message, 0)
 		return
 	}
-	if cl.DailyBudget > 0 && s.spentToday(cl.Name) >= cl.DailyBudget {
-		writeErr(w, r.URL.Path, 429, "budget_exceeded", fmt.Sprintf("daily budget of Rp%.0f used", cl.DailyBudget), time.Minute)
-		return
-	}
-	plan, perr := s.rt.Plan(cl, body.model, sessionKey(r, body), r.URL.Path, start)
+	session := sessionKey(r, body)
+	plan, perr := s.rt.Plan(cl, body.model, session, r.URL.Path, start)
 	if perr != nil {
 		writeErr(w, r.URL.Path, perr.Status, perr.Code, perr.Message, perr.RetryAfter)
 		return
 	}
 
+	// RTK is always on and has no switch (ADR 0017). It only touches chat tool outputs.
 	rtkSaved := 0
-	rtkOn := cfg.RTK.Enabled
-	if cl.RTK != nil {
-		rtkOn = *cl.RTK
-	}
-	if rtkOn && plan.Modality == "chat" && body.json != nil && r.Header.Get("X-Xellter-RTK") != "off" {
-		rtkSaved = rtk.Process(body.json, cfg.RTK).Saved
+	if plan.Modality == "chat" && body.json != nil {
+		rtkSaved = rtk.Process(body.json).Saved
 		s.RTKSaved.Add(int64(rtkSaved))
 	}
 	var isStream bool
@@ -315,32 +318,60 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 	snap := s.cat.Snapshot()
 	var last *failure
 	attempts := 0
-	for i, at := range plan.Attempts {
-		if why := at.Key.Reserve(at.Model, snap, s.Now()); why != upstream.OK {
+	// The plan lists attempts in ring order, one per (model, key). A model is retried once on a retriable
+	// failure and then abandoned, so its remaining keys are skipped: the retry is a property of the model, not
+	// of the key (requirement 15).
+	dead := map[string]bool{}
+	for _, at := range plan.Attempts {
+		if dead[at.Model.ID] {
 			continue
 		}
-		attempts++
-		payload, err := body.encode(at.Model.ID, streamUsage)
-		if err != nil {
-			writeErr(w, r.URL.Path, 400, "bad_request", "cannot encode request: "+err.Error(), 0)
-			return
-		}
-		res := s.send(r, at, payload, body.ctype, isStream, cfg)
-		row := store.Request{TS: start.UnixMilli(), Client: cl.Name, Preset: plan.Preset, Requested: plan.Requested, Model: at.Model.ID, Upstream: at.Key.Name,
-			Path: r.URL.Path, Stream: isStream, Attempt: i + 1, RTKSaved: rtkSaved}
-		if res.err == nil && res.resp.StatusCode < 300 {
-			s.relay(w, r, cl, plan, at, res, row, body, isStream, start, snap)
-			return
-		}
-		f := s.fail(at, res, cfg)
-		row.Status, row.Err = f.status, f.reason
-		row.LatencyMS = int(s.Now().Sub(start) / time.Millisecond)
-		row.Billing = "payg"
-		s.st.Log(row)
-		last = f
-		s.Logf("attempt %d %s/%s on %s failed: status=%d %s", i+1, plan.Requested, at.Model.ID, at.Key.Name, f.status, f.reason)
-		if !f.retry {
-			break
+		for try := 1; try <= 2; try++ {
+			// The gate is checked once per (model, key): the retry of a model that just failed must not be
+			// refused by the very block that failure created, or requirement 15 could never fire. The key was
+			// already validated and counted for this request.
+			if try == 1 {
+				if why := at.Key.Reserve(at.Model, snap, s.Now()); why != upstream.OK {
+					break // this key cannot take it; the model's next key is the next attempt
+				}
+			}
+			attempts++
+			payload, err := body.encode(at.Model.ID, streamUsage)
+			if err != nil {
+				writeErr(w, r.URL.Path, 400, "bad_request", "cannot encode request: "+err.Error(), 0)
+				return
+			}
+			res := s.send(r, at, payload, body.ctype, isStream, cfg)
+			row := store.Request{TS: start.UnixMilli(), Client: cl.Name, Preset: plan.Preset, Requested: plan.Requested, Model: at.Model.ID, Upstream: at.Key.Name,
+				Path: r.URL.Path, Stream: isStream, Attempt: attempts, RTKSaved: rtkSaved, Session: session, Key: cl.KeyHint}
+			if res.err == nil && res.resp.StatusCode < 300 {
+				s.rt.Succeeded(cl.Name, plan.Preset, at.Model.ID)
+				if plan.Preset != "" {
+					s.rt.Pin(cl.Name, plan.Preset, session, at.Model.ID, s.Now())
+				}
+				s.relay(w, r, cl, plan, at, res, row, body, isStream, start, snap)
+				return
+			}
+			f := s.fail(at, res, cfg)
+			row.Status, row.Err = f.status, f.reason
+			row.LatencyMS = int(s.Now().Sub(start) / time.Millisecond)
+			row.Billing = "payg"
+			s.st.Log(row)
+			last = f
+			s.Logf("attempt %d %s/%s on %s failed (try %d): status=%d %s", attempts, plan.Requested, at.Model.ID, at.Key.Name, try, f.status, f.reason)
+			if plan.Preset != "" && s.rt.Failed(cl.Name, plan.Preset, at.Model.ID, s.Now()) {
+				// Requirement 16: three errors inside the window take the model out of this preset only, and a
+				// session pinned to it moves on (eviction beats stickiness).
+				s.rt.Forget(cl.Name, plan.Preset, session)
+				s.Logf("%s/%s evicted from preset %s", cl.Name, at.Model.ID, plan.Preset)
+			}
+			if !f.retry {
+				dead[at.Model.ID] = true
+				break
+			}
+			if try == 2 {
+				dead[at.Model.ID] = true
+			}
 		}
 	}
 	s.Failed.Add(1)
@@ -397,8 +428,8 @@ func (s *Server) send(r *http.Request, at route.Attempt, payload []byte, ctype s
 	if ctype != "" {
 		req.Header.Set("Content-Type", ctype)
 	}
-	req.Header.Set("Authorization", "Bearer "+at.Key.Secret)
-	req.Header.Set("x-api-key", at.Key.Secret)
+	req.Header.Set("Authorization", "Bearer "+at.Key.Secret())
+	req.Header.Set("x-api-key", at.Key.Secret())
 	req.Header.Set("User-Agent", cfg.Kenari.UserAgent)
 	t0 := s.Now()
 	resp, err := s.hc.Do(req)
@@ -420,13 +451,13 @@ func (s *Server) fail(at route.Attempt, res sendResult, cfg *config.Config) *fai
 	defer res.cancel()
 	now := s.Now()
 	if res.err != nil {
-		v := at.Key.Failure(at.Model.ID, 0, nil, 0, cfg.Resilience, now)
+		v := at.Key.Failure(at.Model.ID, 0, nil, 0, now)
 		return &failure{status: 0, reason: "network: " + trimErr(res.err), retry: v.Retry}
 	}
 	defer res.resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(res.resp.Body, 256<<10))
 	ra := parseRetryAfter(res.resp.Header.Get("Retry-After"))
-	v := at.Key.Failure(at.Model.ID, res.resp.StatusCode, body, ra, cfg.Resilience, now)
+	v := at.Key.Failure(at.Model.ID, res.resp.StatusCode, body, ra, now)
 	h := http.Header{}
 	for _, k := range []string{"Content-Type", "Retry-After"} {
 		if x := res.resp.Header.Get(k); x != "" {
@@ -524,9 +555,6 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, cl *config.Client
 		if row.Billing == "plan" {
 			at.Key.RecordSpend(now, row.CatalogCost)
 		}
-		if plan.Preset != "" {
-			s.rt.Remember(cl.Name, plan.Preset, sessionKey(r, body), at.Model.ID, at.Key.Name, now)
-		}
 		s.addSpend(cl.Name, row.CatalogCost)
 		if strings.HasPrefix(r.URL.Path, "/v1/videos") && total <= 16<<10 { // the whole job JSON is in the tail buffer
 			var j struct {
@@ -546,36 +574,94 @@ func (s *Server) cost(cl *config.Client, at route.Attempt, plan *route.Plan, b *
 	if m.Free {
 		return 0
 	}
-	if m.Endpoint == "chat" {
-		return rank.UsageCost(m, u.in, u.out, u.cached, at.Key.FreeCache(m, snap, now), now)
+	if m.Endpoint == "chat" || m.Endpoint == "systemone" {
+		return usageCost(m, u.in, u.out, u.cached, at.Key.FreeCache(m, snap, now), now)
 	}
-	prof := config.CostProfile{}
-	if sh, ok := cl.Presets[plan.Preset]; ok {
-		prof = sh.Cost
-	}
+	// Media is priced per unit, and the request says how many units it asked for.
+	var n float64
+	var str string
 	if b.json != nil {
-		var n float64
-		var str string
 		switch m.Endpoint {
 		case "images":
-			if json.Unmarshal(b.json["n"], &n) == nil && n > 0 {
-				prof.Images = n
+			if json.Unmarshal(b.json["n"], &n) != nil || n <= 0 {
+				n = 1
 			}
 		case "audio_speech":
 			if json.Unmarshal(b.json["input"], &str) == nil {
-				prof.Chars = float64(len([]rune(str)))
+				n = float64(len([]rune(str)))
 			}
 		case "videos":
-			if json.Unmarshal(b.json["duration"], &n) == nil && n > 0 {
-				prof.Seconds = n
+			if json.Unmarshal(b.json["duration"], &n) != nil || n <= 0 {
+				n = 5
 			}
 			if json.Unmarshal(b.json["resolution"], &str) == nil {
-				prof.Variant = str
+				return mediaCost(m, "second", str, n)
 			}
+		case "audio_transcription":
+			n = 60
+		case "music":
+			n = 1
 		}
 	}
-	c, _ := rank.RefCost(m, prof, now, 0)
-	return c
+	return mediaCost(m, unitOf(m.Endpoint), "", n)
+}
+
+// usageCost is the catalog price of a finished chat request.
+func usageCost(m *catalog.Model, inTok, outTok, cachedTok int, freeCache bool, now time.Time) float64 {
+	if m.Free {
+		return 0
+	}
+	in, out, cached := m.Effective(now, 0)
+	if cachedTok > inTok {
+		cachedTok = inTok
+	}
+	cp := cached
+	if freeCache {
+		cp = 0
+	}
+	return (float64(inTok-cachedTok)*in + float64(cachedTok)*cp + float64(outTok)*out) / 1e6
+}
+
+// unitOf is the catalog price unit a media category is billed in.
+func unitOf(category string) string {
+	switch category {
+	case "images":
+		return "image"
+	case "videos":
+		return "second"
+	case "audio_speech":
+		return "1k_chars"
+	case "audio_transcription":
+		return "second"
+	case "music":
+		return "song"
+	}
+	return ""
+}
+
+// mediaCost prices n units of a media model at catalog rates (the cheapest line of the unit, or the named
+// variant when the request asked for one).
+func mediaCost(m *catalog.Model, unit, variant string, n float64) float64 {
+	var best *catalog.Line
+	for i := range m.Lines {
+		l := &m.Lines[i]
+		if l.Unit != unit {
+			continue
+		}
+		if variant != "" && l.Variant == variant {
+			return l.IDR * n
+		}
+		if best == nil || l.IDR < best.IDR {
+			best = l
+		}
+	}
+	if best == nil {
+		return 0
+	}
+	if unit == "1k_chars" {
+		return best.IDR * n / 1000
+	}
+	return best.IDR * n
 }
 
 // ---- video jobs ----
@@ -595,7 +681,7 @@ func (s *Server) job(w http.ResponseWriter, r *http.Request, cl *config.Client, 
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, cfg.Kenari.BaseURL+r.URL.Path, nil)
-	req.Header.Set("Authorization", "Bearer "+key.Secret)
+	req.Header.Set("Authorization", "Bearer "+key.Secret())
 	req.Header.Set("User-Agent", cfg.Kenari.UserAgent)
 	resp, err := s.hc.Do(req)
 	if err != nil {

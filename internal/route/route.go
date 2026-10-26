@@ -1,6 +1,11 @@
-// Package route turns a request (client + model name) into an ordered list of
-// attempts (model x upstream key), applying preset rankings, round-robin
-// rotation and session stickiness.
+// Package route turns a request (client + preset name) into the attempts that
+// should be tried, in order. It owns three pieces of state: the cached rankings,
+// the round-robin ring per preset, and the session pin.
+//
+// The rules are the ones in docs/rewrite-plan.md: every model in a preset's top
+// list is used in turn, a session keeps one model for its whole life, a
+// retriable failure retries the same model once, and a third error inside the
+// window takes a model out of that preset only (ADR 0020).
 package route
 
 import (
@@ -36,36 +41,49 @@ func (e *Error) Error() string { return e.Message }
 
 // Plan is the outcome of routing one request.
 type Plan struct {
-	Preset      string // empty for passthrough
-	Requested   string
-	Attempts    []Attempt
-	Passthrough bool
-	Modality    string
+	Preset    string
+	Requested string
+	Modality  string
+	Session   string
+	// Model is the model this request is pinned to (the session's model, or the ring's next one). It is set
+	// even when the attempts below start with a different model, because the proxy reports it to the client.
+	Model    string
+	Attempts []Attempt
+	Retried  bool // the first attempt is the same model as the session's pin
 }
 
-// Router holds rankings and stickiness state.
+// Router holds rankings, the round-robin ring, the session pin and evictions.
 type Router struct {
 	cfg      atomic.Pointer[config.Config]
 	cat      *catalog.Catalog
 	pool     *upstream.Pool
 	st       *store.Store
 	rankings atomic.Pointer[map[string]*rank.Ranking]
-
-	smu    sync.Mutex
-	sticky map[string]stickyEntry
+	computed atomic.Int64 // unix ms of the last Recompute
 
 	rrMu sync.Mutex
-	rr   map[string]uint64 // per-preset rotation counters (kept apart from key rotation)
+	rr   map[string]uint64 // per client+preset rotation counter
+
+	smu   sync.Mutex
+	pins  map[string]pin // session key -> model
+	evict map[string]*eviction
 }
 
-type stickyEntry struct {
-	model, key string
-	exp        time.Time
+type pin struct {
+	model string
+	at    time.Time
+}
+
+// eviction is the failure record of one model inside one preset.
+type eviction struct {
+	fails    []time.Time
+	until    time.Time
+	replaced bool
 }
 
 // New builds a router.
 func New(cfg *config.Config, cat *catalog.Catalog, pool *upstream.Pool, st *store.Store) *Router {
-	r := &Router{cat: cat, pool: pool, st: st, sticky: map[string]stickyEntry{}, rr: map[string]uint64{}}
+	r := &Router{cat: cat, pool: pool, st: st, rr: map[string]uint64{}, pins: map[string]pin{}, evict: map[string]*eviction{}}
 	r.cfg.Store(cfg)
 	return r
 }
@@ -76,20 +94,20 @@ func (r *Router) SetConfig(c *config.Config) {
 	r.Recompute(time.Now())
 }
 
-// Recompute rebuilds every preset ranking from current state.
+// Recompute rebuilds every preset ranking from current state. Eviction state is kept: a model that failed is
+// still out, and the ranking simply moves on to the next candidate.
 func (r *Router) Recompute(now time.Time) {
 	snap := r.cat.Snapshot()
 	if snap == nil {
 		return
 	}
-	cfg := r.cfg.Load()
-	in := rank.Inputs{Cfg: cfg, Snap: snap, Pool: r.pool, Now: now}
+	in := rank.Inputs{Cfg: r.cfg.Load(), Snap: snap, Pool: r.pool, Now: now}
 	if r.st != nil {
-		in.Stats, _ = r.st.Stats(now.Add(-time.Duration(cfg.Rules.StatsWindowHours) * time.Hour))
 		in.Bench, _ = r.st.Bench()
 	}
 	m := rank.All(in)
 	r.rankings.Store(&m)
+	r.computed.Store(now.UnixMilli())
 }
 
 // Rankings returns the latest rankings.
@@ -100,23 +118,42 @@ func (r *Router) Rankings() map[string]*rank.Ranking {
 	return nil
 }
 
-// Models returns the model ids a client may list: its presets plus passthrough models.
+// Computed is when the rankings were last rebuilt.
+func (r *Router) Computed() time.Time {
+	ms := r.computed.Load()
+	if ms == 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(ms)
+}
+
+// Models lists the model names a client may ask for: its presets, plus the real catalog models it may call.
 func (r *Router) Models(cl *config.Client) (presets []string, real []string) {
 	for name := range cl.Presets {
 		presets = append(presets, name)
 	}
 	sort.Strings(presets)
-	if snap := r.cat.Snapshot(); snap != nil && len(cl.Passthrough) > 0 {
-		for _, id := range snap.IDs() {
-			if config.MatchAny(cl.Passthrough, id) {
-				real = append(real, id)
-			}
+	snap := r.cat.Snapshot()
+	if snap == nil {
+		return
+	}
+	// A client may always name a model that is in one of its own preset pools: that is how a caller pins a
+	// concrete model without a separate allow list.
+	own := map[string]bool{}
+	for _, sh := range cl.Presets {
+		for _, id := range sh.Models {
+			own[id] = true
+		}
+	}
+	for _, id := range snap.IDs() {
+		if own[id] {
+			real = append(real, id)
 		}
 	}
 	return
 }
 
-// Plan resolves the model name for the client into attempts.
+// Plan resolves the requested name for the client into the attempts to try, in order.
 func (r *Router) Plan(cl *config.Client, requested, session, path string, now time.Time) (*Plan, *Error) {
 	cfg := r.cfg.Load()
 	snap := r.cat.Snapshot()
@@ -126,107 +163,121 @@ func (r *Router) Plan(cl *config.Client, requested, session, path string, now ti
 	if requested == "" {
 		return nil, &Error{400, "bad_request", "missing model", 0}
 	}
-	p := &Plan{Requested: requested}
-	reasons := map[string]string{}
-
-	var order []orderItem
-	if sh, ok := cl.Presets[requested]; ok {
-		if want := modalityOfPath(path); want != "" && want != sh.Modality {
-			return nil, &Error{400, "bad_request", fmt.Sprintf("%s is a %s model; this endpoint serves %s", requested, sh.Modality, want), 0}
-		}
-		p.Preset, p.Modality = requested, sh.Modality
-		rk := r.Rankings()[rank.Key(cl.Name, requested)]
-		if rk == nil || len(rk.Candidates) == 0 {
-			return nil, &Error{503, "no_candidates", fmt.Sprintf("no eligible model for %q right now", requested), 30 * time.Second}
-		}
-		order = r.order(cfg, cl, rk, sh, session, now)
-	} else {
-		m := snap.Models[requested]
-		if m == nil {
-			return nil, &Error{404, "model_not_found", fmt.Sprintf("unknown model %q", requested), 0}
-		}
-		if !config.MatchAny(cl.Passthrough, requested) {
-			return nil, &Error{403, "model_not_allowed", fmt.Sprintf("client %q may not call %q directly; use one of its presets", cl.Name, requested), 0}
-		}
-		p.Passthrough, p.Modality = true, m.Endpoint
-		order = []orderItem{{model: m}}
+	sh, isPreset := cl.Presets[requested]
+	if !isPreset {
+		return r.pinModel(cl, requested, session, now)
 	}
-
-	max := cfg.Resilience.MaxAttempts
-	for _, it := range order {
-		m := snap.Models[it.model.ID]
+	if want := modalityOfPath(path); want != "" && !servesCategory(want, sh.Category) {
+		return nil, &Error{400, "bad_request", fmt.Sprintf("%s is a %s preset; this endpoint serves %s", requested, sh.Category, want), 0}
+	}
+	rk := r.Rankings()[rank.Key(cl.Name, requested)]
+	if rk == nil || len(rk.Candidates) == 0 {
+		return nil, &Error{503, "no_candidates", fmt.Sprintf("preset %q has no usable model right now", requested), 30 * time.Second}
+	}
+	p := &Plan{Preset: requested, Requested: requested, Modality: sh.Category, Session: session}
+	order := r.order(cfg, cl, rk, session, now)
+	if len(order) == 0 {
+		return nil, &Error{503, "all_evicted", fmt.Sprintf("every model of preset %q is cooling down after errors", requested), 60 * time.Second}
+	}
+	p.Model = order[0]
+	// Sticky first, then the rest of the ring. A retriable failure retries the same model once before the
+	// next one is tried, which the proxy does by looking at the plan's per-model attempt count.
+	reasons := map[string]int{}
+	for _, id := range order {
+		m := snap.Models[id]
 		if m == nil {
 			continue
 		}
-		keys := r.keysFor(cl, m, snap, now, reasons, it.key)
-		perModel := 0
-		for _, k := range keys {
-			if len(p.Attempts) >= max || perModel >= 2 {
-				break
-			}
+		for _, k := range r.keysFor(cl, m, snap, now, reasons) {
 			p.Attempts = append(p.Attempts, Attempt{Model: m, Key: k})
-			perModel++
-		}
-		if len(p.Attempts) >= max {
-			break
 		}
 	}
 	if len(p.Attempts) == 0 {
-		return nil, noCapacity(reasons)
+		return nil, noCapacity(r, cl, snap, now, reasons)
 	}
 	return p, nil
 }
 
-type orderItem struct {
-	model *catalog.Model
-	key   string // preferred key (sticky)
-}
-
-func (r *Router) order(cfg *config.Config, cl *config.Client, rk *rank.Ranking, sh config.Preset, session string, now time.Time) []orderItem {
+// pinModel handles a request that names a real model instead of a preset.
+func (r *Router) pinModel(cl *config.Client, id, session string, now time.Time) (*Plan, *Error) {
 	snap := r.cat.Snapshot()
-	var out []orderItem
-	seen := map[string]bool{}
-	add := func(id, key string) {
-		if m := snap.Models[id]; m != nil && !seen[id] {
-			seen[id] = true
-			out = append(out, orderItem{model: m, key: key})
-		}
+	m := snap.Models[id]
+	if m == nil {
+		return nil, &Error{404, "model_not_found", fmt.Sprintf("unknown model %q", id), 0}
 	}
-	// stickiness keeps one session on one model/key so provider caches stay warm
-	if session != "" && cfg.Rules.StickyMinutes > 0 && sh.Modality == "chat" {
-		if e, ok := r.stickyGet(cl.Name+"|"+rk.Preset+"|"+session, now); ok {
-			for _, c := range rk.Candidates {
-				if c.Model == e.model {
-					add(e.model, e.key)
-				}
+	allowed := false
+	for _, sh := range cl.Presets {
+		for _, mid := range sh.Models {
+			if mid == id {
+				allowed = true
 			}
 		}
 	}
-	front := rk.Front
-	if front > len(rk.Candidates) {
-		front = len(rk.Candidates)
+	if !allowed {
+		return nil, &Error{403, "model_not_allowed", fmt.Sprintf("client %q may not call %q; add it to one of its presets or use the preset name", cl.Name, id), 0}
 	}
-	if front > 1 {
-		off := int(r.rotation(rk.Client+"/"+rk.Preset) % uint64(front))
-		for i := 0; i < front; i++ {
-			add(rk.Candidates[(i+off)%front].Model, "")
+	p := &Plan{Requested: id, Modality: m.Endpoint, Session: session, Model: id}
+	reasons := map[string]int{}
+	for _, k := range r.keysFor(cl, m, snap, now, reasons) {
+		p.Attempts = append(p.Attempts, Attempt{Model: m, Key: k})
+	}
+	if len(p.Attempts) == 0 {
+		return nil, noCapacity(r, cl, snap, now, reasons)
+	}
+	return p, nil
+}
+
+// order returns the models to try, best first: the session's pinned model, then the round-robin ring over the
+// top list starting where the counter is, then the rest of the list. Evicted models are skipped.
+func (r *Router) order(cfg *config.Config, cl *config.Client, rk *rank.Ranking, session string, now time.Time) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(id string) {
+		if id == "" || seen[id] {
+			return
+		}
+		if r.evicted(cl.Name, rk.Preset, id, now) {
+			return
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	if cfg.Routing.StickySession && session != "" {
+		if id := r.pinned(cl.Name, rk.Preset, session); id != "" {
+			add(id)
 		}
 	}
-	for _, c := range rk.Candidates {
-		add(c.Model, "")
+	ids := make([]string, len(rk.Candidates))
+	for i, c := range rk.Candidates {
+		ids[i] = c.Model
+	}
+	// A model outside the list is a reserve: it only serves when one above it is evicted, so it joins the end of
+	// the ring instead of being dropped (ADR 0020).
+	for _, c := range rk.Reserve {
+		ids = append(ids, c.Model)
+	}
+	if len(ids) > 0 {
+		off := int(r.next(cl.Name, rk.Preset) % uint64(len(ids)))
+		for i := range len(ids) {
+			add(ids[(i+off)%len(ids)])
+		}
 	}
 	return out
 }
 
-func (r *Router) rotation(name string) uint64 {
+// next advances the round-robin counter of one preset and returns the previous value.
+func (r *Router) next(client, preset string) uint64 {
 	r.rrMu.Lock()
 	defer r.rrMu.Unlock()
-	r.rr[name]++
-	return r.rr[name]
+	k := client + "/" + preset
+	v := r.rr[k]
+	r.rr[k] = v + 1
+	return v
 }
 
-// keysFor returns usable keys for the model, best first (plan-covered / free, then rotated).
-func (r *Router) keysFor(cl *config.Client, m *catalog.Model, snap *catalog.Snapshot, now time.Time, reasons map[string]string, prefer string) []*upstream.Key {
+// keysFor returns the usable keys for a model, best first: free or plan-covered before pay-as-you-go, and
+// equal keys rotated so they share the load.
+func (r *Router) keysFor(cl *config.Client, m *catalog.Model, snap *catalog.Snapshot, now time.Time, reasons map[string]int) []*upstream.Key {
 	type kc struct {
 		k    *upstream.Key
 		tier int
@@ -234,20 +285,18 @@ func (r *Router) keysFor(cl *config.Client, m *catalog.Model, snap *catalog.Snap
 	var ks []kc
 	for _, k := range r.pool.ClientKeys(cl.Name) {
 		if why := k.Check(m, snap, now); why != upstream.OK {
-			reasons[k.Name+"/"+m.ID] = why
+			if reasons != nil {
+				reasons[why]++
+			}
 			continue
 		}
 		tier := 2
-		switch {
-		case k.Name == prefer:
-			tier = 0
-		case m.Free || k.Covered(m, snap, now):
+		if m.Free || k.Covered(m, snap, now) {
 			tier = 1
 		}
 		ks = append(ks, kc{k, tier})
 	}
 	sort.SliceStable(ks, func(i, j int) bool { return ks[i].tier < ks[j].tier })
-	// rotate inside the best tier so equal keys share load
 	if len(ks) > 1 {
 		n := 0
 		for n < len(ks) && ks[n].tier == ks[0].tier {
@@ -266,68 +315,155 @@ func (r *Router) keysFor(cl *config.Client, m *catalog.Model, snap *catalog.Snap
 	return out
 }
 
-// Remember stores the successful model/key for a session.
-func (r *Router) Remember(cl, preset, session, model, key string, now time.Time) {
+// Pin remembers the model a session is using, so every later request of that session goes there.
+func (r *Router) Pin(client, preset, session, model string, now time.Time) {
 	cfg := r.cfg.Load()
-	if session == "" || cfg.Rules.StickyMinutes <= 0 {
+	if !cfg.Routing.StickySession || session == "" {
 		return
 	}
 	r.smu.Lock()
 	defer r.smu.Unlock()
-	if len(r.sticky) > 20000 {
-		for k, e := range r.sticky {
-			if now.After(e.exp) {
-				delete(r.sticky, k)
+	if len(r.pins) > 20000 {
+		for k, p := range r.pins { // a pin older than a day is a session nobody came back to
+			if now.Sub(p.at) > 24*time.Hour {
+				delete(r.pins, k)
 			}
 		}
 	}
-	r.sticky[cl+"|"+preset+"|"+session] = stickyEntry{model, key, now.Add(time.Duration(cfg.Rules.StickyMinutes) * time.Minute)}
+	r.pins[pinKey(client, preset, session)] = pin{model: model, at: now}
 }
 
-func (r *Router) stickyGet(k string, now time.Time) (stickyEntry, bool) {
+// PinOf reports the model a session is pinned to ("" when it is not).
+func (r *Router) PinOf(client, preset, session string) (string, time.Time) {
 	r.smu.Lock()
 	defer r.smu.Unlock()
-	e, ok := r.sticky[k]
-	if !ok || now.After(e.exp) {
-		delete(r.sticky, k)
-		return e, false
+	if p, ok := r.pins[pinKey(client, preset, session)]; ok {
+		return p.model, p.at
 	}
-	return e, true
+	return "", time.Time{}
 }
 
-func noCapacity(reasons map[string]string) *Error {
-	if len(reasons) == 0 {
-		return &Error{503, "no_upstream", "no upstream key is configured for this client", 30 * time.Second}
-	}
-	counts := map[string]int{}
-	for _, why := range reasons {
-		counts[why]++
-	}
-	var parts []string
-	for why, n := range counts {
-		parts = append(parts, fmt.Sprintf("%s x%d", why, n))
-	}
-	sort.Strings(parts)
-	status := 503
-	retry := 30 * time.Second
-	for why := range counts {
-		if why == upstream.RPMLimit || why == upstream.Cooldown {
-			status, retry = 429, 10*time.Second
-		}
-	}
-	return &Error{status, "no_capacity", "no upstream can take the request now: " + strings.Join(parts, ", "), retry}
+func (r *Router) pinned(client, preset, session string) string {
+	id, _ := r.PinOf(client, preset, session)
+	return id
 }
 
-func containsStr(l []string, s string) bool {
-	for _, v := range l {
-		if v == s {
-			return true
+// Forget drops a session's pin, used when the pinned model was evicted.
+func (r *Router) Forget(client, preset, session string) {
+	r.smu.Lock()
+	defer r.smu.Unlock()
+	delete(r.pins, pinKey(client, preset, session))
+}
+
+func pinKey(client, preset, session string) string { return client + "|" + preset + "|" + session }
+
+// Failed records a failure of one model inside one preset. The third failure inside the window evicts it for
+// the cooldown, and the preset's ranking simply moves on to the next model. It reports whether this failure
+// evicted the model.
+func (r *Router) Failed(client, preset, model string, now time.Time) bool {
+	cfg := r.cfg.Load()
+	window := time.Duration(cfg.Routing.EvictWindowMin) * time.Minute
+	key := evictKey(client, preset, model)
+	r.smu.Lock()
+	defer r.smu.Unlock()
+	e := r.evict[key]
+	if e == nil {
+		e = &eviction{}
+		r.evict[key] = e
+	}
+	keep := e.fails[:0]
+	for _, t := range e.fails {
+		if now.Sub(t) <= window {
+			keep = append(keep, t)
 		}
+	}
+	e.fails = append(keep, now)
+	if len(e.fails) >= cfg.Routing.EvictErrors {
+		e.until = now.Add(time.Duration(cfg.Routing.EvictCooldownMin) * time.Minute)
+		e.fails = nil
+		e.replaced = true
+		return true
 	}
 	return false
 }
 
-// modalityOfPath maps an API path to the model modality it serves ("" = unknown).
+// Succeeded clears the failure record of a model in a preset: three errors in a row, not three ever.
+func (r *Router) Succeeded(client, preset, model string) {
+	key := evictKey(client, preset, model)
+	r.smu.Lock()
+	defer r.smu.Unlock()
+	if e := r.evict[key]; e != nil {
+		e.fails = nil
+	}
+}
+
+// evicted reports whether a model is cooling down in this preset.
+func (r *Router) evicted(client, preset, model string, now time.Time) bool {
+	r.smu.Lock()
+	defer r.smu.Unlock()
+	e := r.evict[evictKey(client, preset, model)]
+	return e != nil && now.Before(e.until)
+}
+
+// Evictions lists the models currently out of one preset, with the moment they come back.
+func (r *Router) Evictions(client, preset string, now time.Time) map[string]time.Time {
+	r.smu.Lock()
+	defer r.smu.Unlock()
+	out := map[string]time.Time{}
+	prefix := client + "|" + preset + "|"
+	for k, e := range r.evict {
+		if strings.HasPrefix(k, prefix) && now.Before(e.until) {
+			out[strings.TrimPrefix(k, prefix)] = e.until
+		}
+	}
+	return out
+}
+
+func evictKey(client, preset, model string) string { return client + "|" + preset + "|" + model }
+
+// servesCategory reports whether a path that serves one category can also serve another. Only the chat-shaped
+// paths are shared: System One models are reached through the OpenAI endpoint.
+func servesCategory(pathCategory, presetCategory string) bool {
+	if pathCategory == presetCategory {
+		return true
+	}
+	return pathCategory == "chat" && presetCategory == "systemone"
+}
+
+// noCapacity explains why nothing could be attempted, and whether the caller should retry soon. The per-model
+// reasons come from the key checks; when they are empty the key itself is the problem.
+func noCapacity(r *Router, cl *config.Client, snap *catalog.Snapshot, now time.Time, reasons map[string]int) *Error {
+	keys := r.pool.ClientKeys(cl.Name)
+	if len(keys) == 0 {
+		return &Error{503, "no_upstream", "no kenari key is configured for this client", 30 * time.Second}
+	}
+	if len(reasons) == 0 {
+		reasons = map[string]int{}
+		for _, k := range keys {
+			reasons[k.State(now)]++
+		}
+	}
+	status, retry := 503, 30*time.Second
+	var parts []string
+	for why, n := range reasons {
+		if why == "" {
+			why = "no usable key"
+		}
+		parts = append(parts, fmt.Sprintf("%s x%d", why, n))
+		switch why {
+		case upstream.RPMLimit, upstream.Cooldown, upstream.BreakerOpen, upstream.NoSecret, upstream.PlanLimit:
+			status, retry = 429, 10*time.Second
+		}
+	}
+	sort.Strings(parts)
+	return &Error{status, "no_capacity", "no kenari key can take the request now: " + strings.Join(parts, ", "), retry}
+}
+
+// modalityOfPath maps an API path to the preset category it serves ("" = unknown).
+//
+// A chat-shaped path serves both `chat` and `systemone`: kenari serves System One models through the same
+// OpenAI-shaped endpoint, they are only listed separately. So the path alone cannot tell the two categories
+// apart, and Plan accepts either on those paths.
 func modalityOfPath(p string) string {
 	switch {
 	case strings.HasPrefix(p, "/v1/chat/completions"), strings.HasPrefix(p, "/v1/responses"), strings.HasPrefix(p, "/v1/messages"):

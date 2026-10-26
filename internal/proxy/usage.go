@@ -2,11 +2,13 @@ package proxy
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/axellageraldinc/xellter/internal/catalog"
 	"github.com/axellageraldinc/xellter/internal/config"
 	"github.com/axellageraldinc/xellter/internal/upstream"
 )
@@ -172,4 +174,168 @@ func (s *Server) accountStatus() upstream.AccountStatus {
 		return upstream.AccountStatus{}
 	}
 	return accts[0].Status(snap, now)
+}
+
+// ---- session introspection (requirement 12) ----
+
+// sessionInfo is what a caller needs to know about the model its session is using.
+type sessionInfo struct {
+	Object     string   `json:"object"`
+	Session    string   `json:"session"`
+	Client     string   `json:"client"`
+	Preset     string   `json:"preset"`
+	Model      string   `json:"model"`   // the real kenari model this session is pinned to
+	Vendor     string   `json:"vendor"`  // the model's owner at kenari
+	Billing    string   `json:"billing"` // free | plan | balance
+	Context    int      `json:"context_window"`
+	Modalities string   `json:"modalities"`
+	ToolCall   bool     `json:"tool_call"`
+	PinnedAt   int64    `json:"pinned_at"`
+	Requests   int      `json:"requests"`
+	Errors     int      `json:"errors"`
+	InTok      int64    `json:"in_tok"`
+	OutTok     int64    `json:"out_tok"`
+	CachedTok  int64    `json:"cached_tok"`
+	CostIDR    float64  `json:"cost_idr"`
+	LastModel  string   `json:"last_model"`
+	Models     []string `json:"models"` // every model this session has used, oldest first
+}
+
+// session answers GET /v1/session: which real model this session is using right now, and what it has cost.
+// The session is taken from the same headers a normal request uses, or from a session= query parameter.
+func (s *Server) session(w http.ResponseWriter, r *http.Request, cl *config.Client) {
+	id := r.URL.Query().Get("session")
+	if id == "" {
+		id = sessionKey(r, &reqBody{})
+	}
+	if id == "" {
+		writeErr(w, r.URL.Path, 400, "bad_request", "no session: send X-Session-Id or ?session=", 0)
+		return
+	}
+	u, err := s.st.Session(cl.Name, id)
+	if err != nil {
+		writeErr(w, r.URL.Path, 500, "internal_error", "cannot read the request log", 0)
+		return
+	}
+	if u == nil {
+		writeErr(w, r.URL.Path, 404, "no_session", "this session has no traffic yet", 0)
+		return
+	}
+	out := sessionInfo{
+		Object: "session", Session: id, Client: cl.Name, Preset: u.Preset,
+		Requests: u.Requests, Errors: u.Errors, InTok: u.InTok, OutTok: u.OutTok, CachedTok: u.Cached,
+		CostIDR: math.Round(u.Cost*10000) / 10000, LastModel: u.LastModel, Models: u.Models,
+	}
+	// The pin is the live answer; the log is the history. Prefer the pin, fall back to the last logged model.
+	model := u.LastModel
+	if u.Preset != "" {
+		if pinned, at := s.rt.PinOf(cl.Name, u.Preset, id); pinned != "" {
+			model, out.PinnedAt = pinned, at.Unix()
+		}
+	}
+	out.Model = model
+	if snap := s.cat.Snapshot(); snap != nil && model != "" {
+		if m := snap.Models[model]; m != nil {
+			out.Vendor, out.Context, out.ToolCall = m.Owner, m.Context, m.ToolCall
+			out.Modalities = modalities(m)
+			out.Billing = billingClass(s, cl, m, snap, s.Now())
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+// modalities renders a model's input kinds as "text+image".
+func modalities(m *catalog.Model) string {
+	out := []string{"text"}
+	if m.Vision {
+		out = append(out, "image")
+	}
+	if m.Endpoint != "chat" && m.Endpoint != "systemone" {
+		out = []string{m.Endpoint}
+	}
+	return strings.Join(out, "+")
+}
+
+// billingClass is how this client pays for a model right now.
+func billingClass(s *Server, cl *config.Client, m *catalog.Model, snap *catalog.Snapshot, now time.Time) string {
+	if m.Free {
+		return "free"
+	}
+	for _, k := range s.pool.ClientKeys(cl.Name) {
+		if k.Secret() != "" && k.AllowedModel(m.ID) && k.Covered(m, snap, now) {
+			return "plan"
+		}
+	}
+	return "balance"
+}
+
+// ---- per-key and per-model usage (requirement 18) ----
+
+// keyUsage is one xellter API key's traffic.
+type keyUsage struct {
+	APIKey   string  `json:"api_key"` // the hint, never the key itself
+	Client   string  `json:"client"`
+	Requests int     `json:"requests"`
+	Errors   int     `json:"errors"`
+	InTok    int64   `json:"in_tok"`
+	OutTok   int64   `json:"out_tok"`
+	Cached   int64   `json:"cached_tok"`
+	RTKSaved int64   `json:"rtk_saved"`
+	CostIDR  float64 `json:"cost_idr"`
+}
+
+// usageKeys answers GET /v1/usage/keys: this client's traffic split by the key that served it.
+func (s *Server) usageKeys(w http.ResponseWriter, r *http.Request, cl *config.Client) {
+	now := s.Now()
+	win, ok := parseRange(r.URL.Query().Get("range"), now)
+	if !ok {
+		writeErr(w, r.URL.Path, 400, "bad_request", "range must be 24h or 30d", 0)
+		return
+	}
+	rows, err := s.st.Usage("key", win.since, cl.Name, "")
+	if err != nil {
+		writeErr(w, r.URL.Path, 500, "internal_error", "cannot read the request log", 0)
+		return
+	}
+	out := make([]keyUsage, 0, len(rows))
+	for _, u := range rows {
+		out = append(out, keyUsage{APIKey: u.APIKey, Client: cl.Name, Requests: u.Requests, Errors: u.Errors,
+			InTok: u.InTok, OutTok: u.OutTok, Cached: u.Cached, RTKSaved: u.RTKSaved, CostIDR: u.Cost})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"object": "usage.keys", "start": win.since.Unix(), "end": win.until.Unix(), "data": out})
+}
+
+// usageModels answers GET /v1/usage/models?preset=text: this client's traffic per preset and model.
+func (s *Server) usageModels(w http.ResponseWriter, r *http.Request, cl *config.Client) {
+	now := s.Now()
+	win, ok := parseRange(r.URL.Query().Get("range"), now)
+	if !ok {
+		writeErr(w, r.URL.Path, 400, "bad_request", "range must be 24h or 30d", 0)
+		return
+	}
+	rows, err := s.st.Usage("preset_model", win.since, cl.Name, r.URL.Query().Get("preset"))
+	if err != nil {
+		writeErr(w, r.URL.Path, 500, "internal_error", "cannot read the request log", 0)
+		return
+	}
+	type modelUsage struct {
+		Preset   string  `json:"preset"`
+		Model    string  `json:"model"`
+		Requests int     `json:"requests"`
+		Errors   int     `json:"errors"`
+		InTok    int64   `json:"in_tok"`
+		OutTok   int64   `json:"out_tok"`
+		Cached   int64   `json:"cached_tok"`
+		RTKSaved int64   `json:"rtk_saved"`
+		CostIDR  float64 `json:"cost_idr"`
+	}
+	out := make([]modelUsage, 0, len(rows))
+	for _, u := range rows {
+		out = append(out, modelUsage{Preset: u.Preset, Model: u.Model, Requests: u.Requests, Errors: u.Errors,
+			InTok: u.InTok, OutTok: u.OutTok, Cached: u.Cached, RTKSaved: u.RTKSaved, CostIDR: u.Cost})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"object": "usage.models", "start": win.since.Unix(), "end": win.until.Unix(), "data": out})
 }

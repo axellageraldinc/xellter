@@ -2,9 +2,9 @@
 'use strict';
 
 const $ = (s, e = document) => e.querySelector(s);
-const S = { cfg: null, yaml: '', history: [], dirty: false, timer: null, rendering: false, saving: false };
-const NAV = [['overview', 'Overview', 'layout-dashboard'], ['clients', 'Clients', 'users'], ['usage', 'Usage', 'chart-bar'], ['settings', 'Settings', 'settings'], ['config', 'Config file', 'file-code']];
-const KIND = { chat: ['Text', 'message'], images: ['Image', 'photo'], videos: ['Video', 'video'], audio_speech: ['Text to speech', 'volume'], audio_transcription: ['Speech to text', 'microphone'], music: ['Music', 'music'] };
+const S = { cfg: null, yaml: '', history: [], purposes: [], dirty: false, timer: null, rendering: false, saving: false };
+const NAV = [['overview', 'Overview', 'layout-dashboard'], ['clients', 'Clients', 'users'], ['usage', 'Usage', 'chart-bar'], ['config', 'Config file', 'file-code']];
+const KIND = { chat: ['Text', 'message'], images: ['Image', 'photo'], videos: ['Video', 'video'], audio_speech: ['Text to speech', 'volume'], audio_transcription: ['Speech to text', 'microphone'], music: ['Music', 'music'], systemone: ['System One', 'bolt'] };
 
 // ---------- DOM + API helpers ----------
 function h(tag, attrs, ...kids) {
@@ -130,7 +130,7 @@ function field(obj, key, o = {}) {
 async function loadCfg() {
   const j = await api('config');
   S.cfg = j.config; S.yaml = j.yaml; S.history = j.history || []; S.dirty = false; $('#savebar').hidden = true;
-  S.cfg.clients ||= []; S.cfg.benchmarks ||= {};
+  S.cfg.clients ||= [];
   S.cfg.clients.forEach(c => { c.keys ||= []; c.presets ||= {}; });
 }
 async function ensureCfg() { if (!S.cfg || !S.dirty) await loadCfg(); }
@@ -178,14 +178,14 @@ views.overview = async function () {
   const view = h('div', {},
     h('div', { class: `alert alert-${color} mb-3` }, h('div', { class: 'd-flex align-items-center' }, dot(o.status === 'bad' ? 'red' : o.status === 'warn' ? 'orange' : 'green'),
       h('strong', {}, o.status === 'ok' ? 'Everything is running normally' : o.status === 'bad' ? 'Something needs your attention' : 'Running, with warnings')),
-      (o.alerts || []).map(a => h('div', { class: 'alert-row' }, icon(lvl[a.level][0], 'text-' + lvl[a.level][1]), h('div', { class: 'me-auto' }, a.text), a.client && h('a', { class: 'clickable text-nowrap', onclick: () => go('clients/' + a.client) }, 'Open')))),
+      (o.alerts || []).map(a => h('div', { class: 'alert-row' }, icon(lvl[a.level][0], 'text-' + lvl[a.level][1]), h('div', { class: 'me-auto' }, a.text), a.client && h('a', { class: 'clickable text-nowrap', onclick: () => go('clients/' + encodeURIComponent(a.client)) }, 'Open')))),
     statRow([
       ['bolt', 'blue', num(t.req), 'requests in 24 h'], ['alert-triangle', t.err ? 'orange' : 'green', t.req ? (t.err / t.req * 100).toFixed(1) + '%' : '0%', 'failed in 24 h'],
       ['coin', 'azure', 'Rp ' + idr(t.cost), 'at list price, 24 h'], ['wallet', 'green', num(Math.round(t.rtk / 1000)) + ' k', 'saved by RTK, 24 h']]),
     h('div', { class: 'row row-cards' },
       h('div', { class: 'col-lg-5' }, card('Kenari plan & balance', planCard(o), { class: 'h-100' })),
       h('div', { class: 'col-lg-7' }, h('div', { class: 'mb-3' }, card('Requests in the last 24 hours', chart(hours, 24))),
-        card('By client', (o.clients || []).length ? h('div', { class: 'table-responsive' }, h('table', { class: 'table table-vcenter card-table table-hover' }, h('tbody', {}, o.clients.map(c => h('tr', { class: 'clickable', onclick: () => go('clients/' + c.name) },
+        card('By client', (o.clients || []).length ? h('div', { class: 'table-responsive' }, h('table', { class: 'table table-vcenter card-table table-hover' }, h('tbody', {}, o.clients.map(c => h('tr', { class: 'clickable', onclick: () => go('clients/' + encodeURIComponent(c.name)) },
           h('td', {}, h('strong', {}, c.name)), h('td', { class: 'text-secondary' }, `${pl(c.keys.length, 'key')} · ${pl(c.presets.length, 'preset')}`), h('td', { class: 'text-end' }, `${num(c.requests_24h)} requests`),
           h('td', { class: 'text-end text-secondary' }, 'Rp ' + idr(c.cost_24h))))))) : empty('No clients yet.'), { flush: (o.clients || []).length > 0 }))));
   return { node: view, refresh: 10000 };
@@ -411,63 +411,110 @@ function drawChart(ctl) {
 window.addEventListener('resize', () => { for (const c of CHARTS) drawChart(c); });
 
 // ---------- Clients ----------
+// The list is one row per client: name, purpose, enabled, how many kenari keys
+// and presets it has, and what it did in the last 24 hours.
 views.clients = async function () {
   const o = await api('overview');
-  setHead({ title: 'Clients', sub: 'The apps that call xellter. Each one has its own kenari keys and its own presets.', actions: btn('Add client', 'btn-primary', addClient, 'plus') });
+  S.purposes = o.purposes || S.purposes;
+  setHead({ title: 'Clients', sub: 'The apps that call xellter. Each one has its own kenari keys, one purpose and its own presets.', actions: btn('New client', 'btn-primary', addClient, 'plus') });
   const rows = o.clients || [];
   return h('div', {}, card(null, rows.length ? h('div', { class: 'table-responsive' }, h('table', { class: 'table table-vcenter card-table table-hover' },
-    h('thead', {}, h('tr', {}, ['Client', 'Kenari keys', 'Presets', 'Last 24 h', ''].map(x => h('th', {}, x)))),
-    h('tbody', {}, rows.map(c => h('tr', { class: 'clickable', onclick: () => go('clients/' + c.name) },
-      h('td', {}, dot(!c.enabled ? 'secondary' : c.keys.length ? 'green' : 'orange'), h('strong', {}, c.name), ' ', !c.enabled && badge('disabled')),
-      h('td', {}, c.keys.length ? c.keys.map(k => h('span', { class: 'me-2 nowrap' }, k.label)) : h('span', { class: 'text-orange' }, 'none yet')),
-      h('td', {}, c.presets.length ? c.presets.map(p => h('span', { class: 'me-3 nowrap', title: p.name }, icon(KIND[p.modality]?.[1] || 'message', 'me-1'), p.name)) : h('span', { class: 'text-secondary' }, 'appear once a key is added')),
+    h('thead', {}, h('tr', {}, ['Client', 'Purpose', 'Kenari keys', 'Presets', 'Last 24 h', ''].map(x => h('th', {}, x)))),
+    h('tbody', {}, rows.map(c => h('tr', { class: 'clickable', onclick: () => go('clients/' + encodeURIComponent(c.name)) },
+      h('td', {}, dot(!c.enabled ? 'secondary' : c.keys.some(k => k.state === 'ready') ? 'green' : 'orange'), h('strong', {}, c.name), ' ', !c.enabled && badge('disabled', 'red')),
+      h('td', {}, badge(c.purpose_label || c.purpose, 'azure')),
+      h('td', {}, c.keys.length ? c.keys.map(k => h('span', { class: 'me-2 nowrap', title: k.state }, k.name)) : h('span', { class: 'text-orange' }, 'none yet')),
+      h('td', {}, c.presets.length ? c.presets.map(p => h('span', { class: 'me-3 nowrap', title: `${p.label} · ${p.optimization_label}` }, icon(KIND[p.category]?.[1] || 'message', 'me-1'), p.name)) : h('span', { class: 'text-secondary' }, 'none yet')),
       h('td', { class: 'text-secondary nowrap' }, `${num(c.requests_24h)} requests · Rp ${idr(c.cost_24h)}`),
       h('td', { class: 'text-end' }, icon('chevron-right', 'text-secondary'))))))) : empty('No clients yet. Add the first one.'), { flush: rows.length > 0 }));
 };
 
 function addClient() {
-  const f = { name: '' };
-  dialog(h('h3', {}, 'Add a client'), h('p', { class: 'text-secondary' }, 'A client is one app, for example "babu" or "aixell". You get an xellter key for it next; then give it one or more kenari keys.'),
+  const f = { name: '', purpose: 'general', key: '' };
+  dialog(h('h3', {}, 'New client'), h('p', { class: 'text-secondary' }, 'A client is one app, for example "babu" or "aixell". You get an xellter key for it next.'),
     h('div', { class: 'mb-3' }, h('label', { class: 'form-label' }, 'Name'), h('input', { class: 'form-control', placeholder: 'e.g. babu', oninput: e => f.name = e.target.value })),
-    dialogButtons(btn('Create', 'btn-primary', async () => { try { const r = await api('clients', { method: 'POST', body: { action: 'create', name: f.name } }); S.cfg = null; showKey(f.name.trim().replace(/\s+/g, '-'), r.key, true); } catch (e) { fail(e); } })));
+    h('div', { class: 'mb-3' }, h('label', { class: 'form-label' }, 'Purpose'), h('select', { class: 'form-select', onchange: e => f.purpose = e.target.value },
+      (S.purposes || []).map(p => h('option', { value: p.value, selected: p.value === f.purpose }, p.label))),
+      h('div', { class: 'form-hint' }, 'How this client\'s text preset is scored. It reorders the pool, it never changes which models are in it.')),
+    h('div', { class: 'mb-3' }, h('label', { class: 'form-label' }, 'Kenari key (optional)'), h('input', { class: 'form-control', type: 'password', placeholder: 'kn-…', autocomplete: 'off', oninput: e => f.key = e.target.value }),
+      h('div', { class: 'form-hint' }, 'Stored on this server only. You can add more keys later on the client page.')),
+    dialogButtons(btn('Create', 'btn-primary', async () => {
+      try {
+        const r = await api('clients', { method: 'POST', body: { action: 'create', name: f.name, purpose: f.purpose, key: f.key } });
+        closeDialog();
+        showKey(f.name.trim().replace(/\s+/g, '-'), r.key, true);
+      } catch (e) { fail(e); }
+    })));
 }
 
 function showKey(name, key, thenOpen) {
   dialog(h('h3', {}, `xellter key for ${name}`), h('p', { class: 'text-secondary' }, `Copy it now; it is not stored and cannot be shown again. The app uses it as its API key (bearer token or x-api-key) with base URL ${location.origin}/v1`),
     h('div', { class: 'keybox mono' }, key), h('div', { class: 'd-flex gap-2 justify-content-end mt-3' }, btn('Copy', 'btn-outline-secondary', () => navigator.clipboard?.writeText(key).then(() => toast('Copied'), () => toast('Select the key and copy it', true)), 'copy'),
-      btn(thenOpen ? 'Continue' : 'Done', 'btn-primary', () => { closeDialog(); thenOpen ? go('clients/' + name) : render(); })));
+      btn(thenOpen ? 'Continue' : 'Done', 'btn-primary', () => { closeDialog(); thenOpen ? go('clients/' + encodeURIComponent(name)) : render(); })));
 }
 
 // ---------- One client ----------
-const presetSort = (p, n) => { const i = Object.keys(KIND).indexOf(p.modality); return (i < 0 ? 9 : i) + (n === ({ chat: 'text', images: 'image', videos: 'video', audio_speech: 'tts', audio_transcription: 'stt', music: 'music' })[p.modality] ? '0' : '1' + n); };
-
+// The whole configuration of one client on one page: purpose, kenari keys, and
+// one card per preset with its optimization, its model picker and what it
+// serves right now.
 views.client = async function (name) {
-  await ensureCfg();
-  const cl = S.cfg.clients.find(c => c.name === name);
-  if (!cl) { setHead({ title: 'Client not found' }); return empty('This client does not exist.'); }
-  const [o, rk] = await Promise.all([api('overview'), api('ranking?client=' + encodeURIComponent(name))]);
-  const row = (o.clients || []).find(c => c.name === name) || { keys: [], presets: [] };
-  setHead({ crumbs: [h('a', { class: 'clickable', onclick: () => go('clients') }, 'Clients'), ' / ', name], title: [name, ' ', !cl.enabled && badge('disabled', 'red')],
-    sub: `${pl(row.keys.length, 'kenari key')} · ${pl(Object.keys(cl.presets).length, 'preset')} · xellter key ${cl.key_hint || ''}`,
-    actions: [btn('Usage', 'btn-outline-secondary', () => go('usage?client=' + encodeURIComponent(name)), 'chart-bar'), btn('New xellter key', 'btn-outline-secondary', () => { if (confirm(`Create a new key for ${name}? The old key stops working at once.`)) rotateKey(name); }, 'refresh'),
-      iconBtn('Delete client', 'trash', () => { if (confirm(`Delete client ${name} and its kenari keys from xellter?`)) act(api('clients', { method: 'POST', body: { action: 'delete', name } }).then(() => { location.hash = '#/clients'; }), 'Client deleted'); }, { cls: 'btn-outline-danger' })] });
+  const d = await api('client?name=' + encodeURIComponent(name));
+  const cl = d.client;
+  S.purposes = d.purposes;
+  setHead({ crumbs: [h('a', { class: 'clickable', onclick: () => go('clients') }, 'Clients'), ' / ', cl.name],
+    title: [cl.name, ' ', !cl.enabled && badge('disabled', 'red')],
+    sub: `${pl(d.keys.length, 'kenari key')} · ${pl(d.presets.length, 'preset')} · xellter key ${cl.key_hint || 'none'}`,
+    actions: [
+      btn('Usage', 'btn-outline-secondary', () => go('usage?client=' + encodeURIComponent(cl.name)), 'chart-bar'),
+      btn('Look up a session', 'btn-outline-secondary', () => sessionLookup(cl.name), 'clock'),
+      btn('New xellter key', 'btn-outline-secondary', () => { if (confirm(`Create a new key for ${cl.name}? The old key stops working at once.`)) rotateKey(cl.name); }, 'refresh'),
+      btn('Recalculate', 'btn-outline-secondary', () => act(api('recompute?client=' + encodeURIComponent(cl.name), { method: 'POST' }).then(() => { S.cfg = null; }), 'Rankings recalculated'), 'adjustments-horizontal'),
+      iconBtn('Delete client', 'trash', () => { if (confirm(`Delete client ${cl.name} and its kenari keys from xellter?`)) act(api('clients', { method: 'POST', body: { action: 'delete', name: cl.name } }).then(() => { location.hash = '#/clients'; }), 'Client deleted'); }, { cls: 'btn-outline-danger' }),
+    ] });
 
-  const keyRows = row.keys.map(k => {
-    const paused = (!zero(k.cooldown_until) && left(k.cooldown_until)) || (!zero(k.breaker_until) && left(k.breaker_until));
-    const st = !k.has_secret ? ['red', 'No key value'] : paused ? ['orange', 'Paused ' + paused] : ['green', 'Ready'];
-    return h('tr', {}, h('td', {}, h('strong', {}, k.label), k.last_error && h('div', { class: 'text-danger small' }, k.last_error)),
-      h('td', {}, dot(st[0]), st[1]), h('td', {}, k.learned_allow?.length ? h('span', { title: k.learned_allow.join(', ') }, `${k.learned_allow.length} model${k.learned_allow.length === 1 ? '' : 's'}`) : 'All models'),
-      h('td', { class: 'text-end nowrap' }, iconBtn('Rename key', 'pencil', () => renameKey(name, k.label), { sm: true }), iconBtn('Replace key', 'key', () => replaceKey(name, k.label), { sm: true }),
-        iconBtn('Remove key', 'trash', () => { if (confirm(`Remove key "${k.label}" from ${name}? It stays valid at kenari.`)) act(api('keys', { method: 'POST', body: { client: name, action: 'remove', name: k.label } }), 'Key removed'); }, { sm: true, cls: 'btn-ghost-danger' })));
+  const purpose = h('select', { class: 'form-select form-select-sm', style: 'width:auto', onchange: e => act(api('clients', { method: 'POST', body: { action: 'update', name: cl.name, purpose: e.target.value, enabled: cl.enabled, note: cl.note } }), 'Purpose saved') },
+    d.purposes.map(p => h('option', { value: p.value, selected: p.value === cl.purpose }, p.label)));
+  const enabled = h('input', { class: 'form-check-input', type: 'checkbox', onchange: e => act(api('clients', { method: 'POST', body: { action: 'update', name: cl.name, purpose: cl.purpose, enabled: e.target.checked, note: cl.note } }), e.target.checked ? 'Client enabled' : 'Client disabled') });
+  enabled.checked = cl.enabled;
+
+  const settings = card('Settings', h('div', { class: 'row g-3' },
+    h('div', { class: 'col-md-4' }, h('label', { class: 'form-label' }, 'Purpose'), purpose),
+    h('div', { class: 'col-md-4' }, h('label', { class: 'form-label d-block' }, 'Serving'), h('label', { class: 'form-check form-switch' }, enabled, h('span', { class: 'form-check-label' }, cl.enabled ? 'Enabled' : 'Disabled'))),
+    h('div', { class: 'col-md-4' }, h('label', { class: 'form-label' }, 'Rankings'), h('div', { class: 'text-secondary small pt-2' }, zero(d.computed_at) ? 'not computed yet' : 'computed ' + ago(d.computed_at) + ' ago'),
+      h('div', { class: 'form-hint' }, `Refreshed every ${d.routing.rank_refresh_minutes || '—'} min, after every catalog sync, and by Recalculate.`))));
+
+  const keyRows = d.keys.map(k => {
+    const st = k.state === 'ready' ? ['green', 'Ready'] : k.state === 'paused' ? ['orange', 'Paused ' + (left(k.cooldown_until) || left(k.breaker_until) || 'a moment')] : k.state === 'unchecked' ? ['azure', 'Not checked yet'] : ['red', 'No key value'];
+    return h('tr', {},
+      h('td', {}, h('strong', {}, k.name), k.last_error && h('div', { class: 'text-danger small' }, k.last_error)),
+      h('td', { class: 'mono text-secondary' }, k.hint || '—'),
+      h('td', {}, dot(st[0]), st[1]),
+      h('td', {}, k.unrestricted ? 'All models' : k.allowed ? `${num(k.allowed)} models` : k.probed ? 'none' : '—',
+        k.blocked > 0 && h('span', { class: 'text-orange small ms-2' }, `${k.blocked} blocked now`)),
+      h('td', { class: 'text-end nowrap' },
+        iconBtn('Rename key', 'pencil', () => renameKey(cl.name, k.name), { sm: true }),
+        iconBtn('Replace key', 'key', () => replaceKey(cl.name, k.name), { sm: true }),
+        iconBtn('Remove key', 'trash', () => { if (confirm(`Remove key "${k.name}" from ${cl.name}? It stays valid at kenari.`)) act(api('keys', { method: 'POST', body: { client: cl.name, action: 'remove', name: k.name } }), 'Key removed'); }, { sm: true, cls: 'btn-ghost-danger' })));
   });
-  const presets = Object.keys(cl.presets).sort((a, b) => presetSort(cl.presets[a], a).localeCompare(presetSort(cl.presets[b], b)));
+
+  const keys = card('Kenari API keys', d.keys.length
+    ? h('div', { class: 'table-responsive' }, h('table', { class: 'table table-vcenter card-table' },
+      h('thead', {}, h('tr', {}, ['Key', 'Hint', 'Probe', 'Can use', ''].map(x => h('th', {}, x)))), h('tbody', {}, keyRows)))
+    : h('div', { class: 'p-3' }, empty('No kenari key yet. Add one; xellter asks kenari which models it may call.')),
+    { flush: true, actions: btn('Add key', 'btn-primary btn-sm', () => addKey(cl.name), 'plus') });
+
+  const have = new Set(d.presets.map(p => p.category));
+  const missing = d.categories.filter(c => !have.has(c.category));
   return h('div', {},
-    h('div', { class: 'mb-3' }, card('Kenari API keys', row.keys.length ? h('div', { class: 'table-responsive' }, h('table', { class: 'table table-vcenter card-table' }, h('thead', {}, h('tr', {}, ['Key', 'State', 'Can use', ''].map(x => h('th', {}, x)))), h('tbody', {}, keyRows)))
-      : h('div', { class: 'p-3' }, empty('No kenari key yet. Add one and xellter creates this client\'s presets from the models it can use.')),
-      { flush: true, actions: btn('Add key', 'btn-primary btn-sm', () => addKey(name), 'plus') })),
-    h('div', { class: 'd-flex align-items-center mb-1' }, h('h3', { class: 'mb-0 me-auto' }, 'Presets'), btn('Add preset', 'btn-outline-primary btn-sm', () => addPreset(cl), 'plus')),
-    h('p', { class: 'text-secondary' }, 'Created automatically from the models this client\'s keys can call, duplicates merged. The app uses a preset name as the model, for example "text"; for every request xellter picks the best model behind it right now.'),
-    presets.length ? h('div', { class: 'row row-cards mb-3' }, presets.map(n => h('div', { class: 'col-lg-6' }, presetCard(name, n, cl.presets[n], rk[n])))) : empty('Presets appear here once a key has been added and checked.'));
+    h('div', { class: 'row row-cards mb-3' },
+      h('div', { class: 'col-lg-7' }, h('div', { class: 'h-100' }, keys)),
+      h('div', { class: 'col-lg-5' }, h('div', { class: 'h-100' }, settings))),
+    h('div', { class: 'd-flex align-items-center mb-1' }, h('h3', { class: 'mb-0 me-auto' }, 'Presets'),
+      missing.length > 0 && btn('Add preset', 'btn-outline-primary btn-sm', () => addPreset(cl.name, missing), 'plus')),
+    h('p', { class: 'text-secondary' }, 'A preset is the model name an app asks for, for example "text". Behind it is the pool you pick here, ordered by the optimization you choose.'),
+    d.presets.length
+      ? h('div', { class: 'row row-cards mb-3' }, d.presets.map(p => h('div', { class: 'col-xl-6' }, presetCard(cl, p))))
+      : empty('No presets yet. Add one for each category this client uses.'));
 };
 
 async function rotateKey(name) {
@@ -475,10 +522,10 @@ async function rotateKey(name) {
 }
 function addKey(client) {
   const f = { name: '', key: '' };
-  dialog(h('h3', {}, `Add a kenari key to ${client}`), h('p', { class: 'text-secondary' }, 'Paste a key from the kenari dashboard. It is stored on this server only, never in the config file or the repo. xellter checks which models the key may use and creates presets from them.'),
+  dialog(h('h3', {}, `Add a kenari key to ${client}`), h('p', { class: 'text-secondary' }, 'Paste a key from the kenari dashboard. It is stored on this server only, never in the config file or the repo. xellter then asks kenari which models the key may use.'),
     h('div', { class: 'row g-3' }, h('div', { class: 'col-md-4' }, h('label', { class: 'form-label' }, 'Name'), h('input', { class: 'form-control', placeholder: 'main', oninput: e => f.name = e.target.value })),
       h('div', { class: 'col-md-8' }, h('label', { class: 'form-label' }, 'API key'), h('input', { class: 'form-control', type: 'password', placeholder: 'kn-…', autocomplete: 'off', oninput: e => f.key = e.target.value }))),
-    dialogButtons(btn('Add key', 'btn-primary', async () => { try { await api('keys', { method: 'POST', body: { client, action: 'add', name: f.name || 'main', key: f.key } }); closeDialog(); toast('Key added; checking which models it can use…'); S.cfg = null; render(); setTimeout(() => { S.cfg = null; render(); }, 4000); } catch (e) { fail(e); } })));
+    dialogButtons(btn('Add key', 'btn-primary', async () => { try { await api('keys', { method: 'POST', body: { client, action: 'add', name: f.name || 'main', key: f.key } }); closeDialog(); toast('Key added; asking kenari which models it can use…'); S.cfg = null; render(); setTimeout(render, 4000); } catch (e) { fail(e); } })));
 }
 function replaceKey(client, name) {
   const f = { key: '' };
@@ -491,146 +538,305 @@ function renameKey(client, name) {
   dialog(h('h3', {}, `Rename key "${name}"`), h('p', { class: 'text-secondary' }, 'The name is how you recognise the key here. xellter detects everything else (account, plan, limits) by itself.'),
     h('div', { class: 'mb-3' }, h('label', { class: 'form-label' }, 'Name'), h('input', { class: 'form-control', value: name, oninput: e => f.name = e.target.value })),
     dialogButtons(btn('Save', 'btn-primary', async () => {
-      try {
-        await api('keys', { method: 'POST', body: { client, action: 'rename', name, new_name: f.name } });
-        closeDialog(); toast('Key renamed'); S.cfg = null; render();
-      } catch (e) { fail(e); }
+      try { await api('keys', { method: 'POST', body: { client, action: 'rename', name, new_name: f.name } }); closeDialog(); toast('Key renamed'); render(); } catch (e) { fail(e); }
     })));
+}
+
+// sessionLookup answers "what is this conversation using right now?" without
+// asking the client: it reads the same pin the router uses.
+function sessionLookup(client) {
+  const f = { id: '' };
+  const out = h('div', { class: 'mt-3' });
+  dialog(h('h3', {}, `Session of ${client}`), h('p', { class: 'text-secondary' }, 'Paste a session id (X-Xellter-Session, X-Session-Id, prompt_cache_key, or the id the app sends).'),
+    h('div', { class: 'd-flex gap-2' }, h('input', { class: 'form-control mono', placeholder: 'session id', oninput: e => f.id = e.target.value }),
+      btn('Look up', 'btn-primary', async () => {
+        try {
+          const s = await api(`session?client=${encodeURIComponent(client)}&id=${encodeURIComponent(f.id)}`);
+          const u = s.session, pins = Object.entries(s.pins || {});
+          out.replaceChildren(
+            h('div', { class: 'mb-2' }, h('span', { class: 'text-secondary' }, 'Preset '), h('strong', {}, u.preset || '—'), ' ', badge(`${num(u.requests)} requests`, 'azure'), u.errors ? badge(`${num(u.errors)} errors`, 'red') : null),
+            pins.length ? pins.map(([preset, p]) => h('div', { class: 'model-line' }, icon('key', 'text-secondary'), h('span', { class: 'mono' }, p.model), badge(`pinned to ${preset}`, 'blue'), h('span', { class: 'text-secondary small ms-auto' }, 'for ' + human(p.live_for_s)))) : empty('No live pin: the session has not been routed yet.'),
+            h('div', { class: 'text-secondary small mt-2' }, `${num(u.in_tok)} in / ${num(u.out_tok)} out tokens · ${num(u.cached_tok)} cached · Rp ${idr(u.cost_idr)} · models ${(u.models || []).join(', ') || '—'}`));
+        } catch (e) { out.replaceChildren(h('div', { class: 'text-danger' }, e.message)); }
+      })),
+    out, dialogButtons());
 }
 
 // ---------- Presets ----------
-const OBJECTIVES = {
-  cheapest: { label: 'Cheapest', w: { cost: 60, benchmark: 10, reliability: 15, context: 5 }, q: 0.35 },
-  balanced: { label: 'Balanced', w: { cost: 25, benchmark: 35, reliability: 15, context: 5 }, q: 0.50 },
-  quality: { label: 'Best quality', w: { cost: 2, benchmark: 55, reliability: 15, context: 3 }, q: 0.64 },
+const OPTIMIZATIONS = [['cheapest', 'Cheapest'], ['balanced', 'Balanced'], ['best_quality', 'Best Quality']];
+const OPT_HELP = {
+  cheapest: 'Price only: input, output, cache and promos. Five free and five plan-covered models, so the two never compete.',
+  balanced: 'Half price, half quality from public benchmarks.',
+  best_quality: 'Benchmark of this category only. Models with no evidence are left out.',
 };
-// Image, video and audio presets have no context size to weigh: three objectives on cost, quality and reliability.
-const MEDIA_OBJECTIVES = {
-  cheapest: { label: 'Cheapest', w: { cost: 70, benchmark: 10, reliability: 20, context: 0 }, q: 0 },
-  balanced: { label: 'Balanced', w: { cost: 40, benchmark: 40, reliability: 20, context: 0 }, q: 0 },
-  quality: { label: 'Best quality', w: { cost: 10, benchmark: 70, reliability: 20, context: 0 }, q: 0 },
+const BILLING = { free: 'green', plan: 'blue', balance: 'secondary' };
+const BILLING_TEXT = { free: 'free', plan: 'plan', balance: 'balance' };
+
+// rp formats a catalog price per 1M tokens the way the owner reads it: Rp100k,
+// Rp1.2M, Rp500. The catalog publishes whole rupiah per million tokens.
+const rp = n => {
+  if (n == null) return '—';
+  if (n === 0) return 'Rp0';
+  if (n >= 1e6) return 'Rp' + (n / 1e6).toFixed(n % 1e6 ? 1 : 0) + 'M';
+  if (n >= 1e3) return 'Rp' + Math.round(n / 1e3) + 'k';
+  return 'Rp' + idr(n);
 };
-const objectivesFor = p => p.modality === 'chat' ? OBJECTIVES : MEDIA_OBJECTIVES;
-const objectiveOf = p => Object.entries(objectivesFor(p)).find(([, o]) => Object.entries(o.w).every(([k, v]) => (p.weights || {})[k] === v))?.[0] || 'custom';
-const PRESET_NAME = { chat: 'text', images: 'image', videos: 'video', audio_speech: 'tts', audio_transcription: 'stt', music: 'music' };
-const MODALITIES = { chat: 'Text', images: 'Image', videos: 'Video', audio_speech: 'Text to speech', audio_transcription: 'Speech to text', music: 'Music' };
+// ctx is the context window in the compact form the picker uses: 1.0M, 512k, 0.
+const ctx = n => !n ? '—' : n >= 1e6 ? (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M' : Math.round(n / 1e3) + 'k';
+// unitLine is the per-unit price of an image, video, speech or music model,
+// which has no token prices at all.
+const unitLine = r => (r.lines || []).map(l => `${rp(l.idr)} / ${l.unit}${l.variant ? ' ' + l.variant : ''}`).join(' · ');
+// priceLine is the exact line the owner asked for: In, Out, cache read, cache
+// write, in IDR. A price the catalog does not publish is a dash, not a zero; a
+// free model publishes Rp0 for the token prices it does have. A model sold per
+// image, second, character or song has no token price at all, so its unit price
+// takes the line instead.
+const priceLine = r => {
+  const unit = unitLine(r);
+  if (!r.free && !r.in_idr && !r.out_idr && unit) return unit;
+  const p = v => v > 0 ? rp(v) : r.free ? 'Rp0' : '—';
+  const cw = r.has_cache_write ? rp(r.cache_write_idr) : '—';
+  return `In ${p(r.in_idr)}, Out ${p(r.out_idr)}, CR ${p(r.cache_read_idr)}, CW ${cw}`;
+};
 
-function presetCard(client, name, p, r) {
-  p.require ||= {}; p.weights ||= {}; p.cost_profile ||= {};
-  const isChat = p.modality === 'chat', obj = objectiveOf(p), [kind, ic] = KIND[p.modality] || ['', 'message'];
-  // "Serving now" lists every model this preset can use right now: the main
-  // list. The ones left out are counted, and the "Why this order?" button
-  // explains each of them.
-  const main = r?.candidates || [];
-  const out = (r?.rejected?.length || 0) + (r?.unavailable?.length || 0);
-  const body = h('div', {},
-    p.description && h('div', { class: 'text-secondary mb-3' }, p.description),
-    h('div', { class: 'mb-3' }, h('div', { class: 'subheader' }, 'Serving now'),
-      main.length ? main.map((c, i) => h('div', { class: 'model-line' }, h('span', { class: 'model-rank' }, i + 1), h('span', { class: 'mono ' + (i ? 'text-secondary' : 'fw-bold') }, c.model), flags(c.flags), c.score != null && h('span', { class: 'text-secondary small ms-auto' }, 'score ' + c.score.toFixed(2)))) : h('span', { class: 'text-danger' }, 'Nothing available right now'),
-      out ? h('div', { class: 'form-hint' }, `${out} more model${out === 1 ? '' : 's'} left out; "Why this order?" says why.`) : null),
-    h('div', { class: 'mb-3' }, h('div', { class: 'subheader' }, 'Optimise for'),
-      h('div', { class: 'btn-group w-100' }, Object.entries(objectivesFor(p)).map(([k, o]) => h('button', { class: 'btn btn-sm ' + (obj === k ? 'btn-primary' : 'btn-outline-primary'), onclick: () => { p.weights = { ...o.w }; p.min_quality = o.q; markDirty(); render(); } }, o.label)), obj === 'custom' && h('button', { class: 'btn btn-sm btn-primary', disabled: true }, 'Custom')),
-      h('div', { class: 'form-hint' }, obj === 'custom' ? 'Tuned by hand. Pick an option to reset it.' : isChat ? 'Cheapest: lowest price among models that are good enough. Balanced: best quality for the price. Best quality: the strongest model, price matters little.' : 'Quality comes from the Arena leaderboard when the model is listed there, otherwise it is estimated from price.')),
-    h('div', { class: 'mb-3' }, h('div', { class: 'subheader' }, 'When several models are equally good'),
-      h('select', { class: 'form-select form-select-sm', onchange: e => { p.strategy = e.target.value; markDirty(); } }, h('option', { value: 'priority', selected: p.strategy === 'priority' }, 'Always use the best one'), h('option', { value: 'round_robin', selected: p.strategy === 'round_robin' }, 'Take turns between them'))),
-    isChat && h('div', { class: 'mb-2' }, h('div', { class: 'subheader' }, 'The model must support'),
-      field(p.require, 'tool_call', { type: 'switch', label: 'Tool calling (agents, function calls)' }), field(p.require, 'vision', { type: 'switch', label: 'Image input' })));
-  return card(h('span', { class: 'd-flex align-items-center gap-2' }, h('span', { class: 'kind-icon' }, icon(ic)), h('span', {}, name, h('div', { class: 'text-secondary small fw-normal' }, `${kind} · ${r ? r.callable : 0} model${r?.callable === 1 ? '' : 's'} available`))), body,
-    { actions: h('div', { class: 'd-flex gap-1 align-items-center' }, btn('Why this order?', 'btn-sm btn-ghost-secondary', () => showRanking(client, name)), iconBtn('Delete preset', 'trash', () => { const cl = S.cfg.clients.find(c => c.name === client); if (confirm(`Delete preset "${name}" of ${client}? Apps calling it will get an error until you add it again with "Add preset".`)) { delete cl.presets[name]; markDirty(); render(); } }, { sm: true, cls: 'btn-ghost-danger' })), class: 'h-100' });
-}
+function presetCard(cl, p) {
+  const [kind, ic] = KIND[p.category] || ['', 'message'];
+  const r = p.ranking || { candidates: [], rejected: [], unranked: [] };
+  // The card edits a draft and posts it in one call, so a half-picked family
+  // never reaches the router.
+  const draft = { optimization: p.optimization, models: [...(p.models || [])] };
+  const same = (a, b) => a.length === b.length && [...a].sort().join('\n') === [...b].sort().join('\n');
+  const dirty = () => draft.optimization !== p.optimization || !same(draft.models, p.models || []);
 
-function addPreset(cl) {
-  // Presets are predefined (text, image, ...) and a client has each at most once, so only the missing ones are offered.
-  const missing = Object.keys(MODALITIES).filter(k => !cl.presets[PRESET_NAME[k]]);
-  if (!missing.length) return toast('This client already has every preset', true);
-  const f = { kind: missing[0] };
-  dialog(h('h3', {}, 'Add a preset'), h('p', { class: 'text-secondary' }, 'Presets are predefined, one of each kind. Pick one that was deleted or not created yet; it starts from the defaults.'),
-    h('div', { class: 'mb-3' }, h('label', { class: 'form-label' }, 'Preset'), h('select', { class: 'form-select', onchange: e => f.kind = e.target.value },
-      missing.map(k => h('option', { value: k }, `${PRESET_NAME[k]} (${MODALITIES[k].toLowerCase()})`)))),
-    dialogButtons(btn('Add', 'btn-primary', () => {
-      cl.presets[PRESET_NAME[f.kind]] = newDefault(f.kind);
-      markDirty(); closeDialog(); render();
-    })));
-}
-function newDefault(kind) {
-  const media = { cost: 70, benchmark: 10, reliability: 20, context: 0 };
-  if (kind === 'chat') return { description: '', modality: 'chat', mode: 'auto', require: { tool_call: true }, min_quality: 0.50, max_candidates: 5, strategy: 'round_robin', rr_band: 0.04, weights: { ...OBJECTIVES.balanced.w }, cost_profile: { input_tokens: 4000, output_tokens: 600, cached_ratio: 0.7 } };
-  return { description: '', modality: kind, mode: 'auto', require: {}, min_quality: 0, max_candidates: 5, strategy: 'priority', rr_band: 0.03, weights: media, cost_profile: { images: 1, seconds: kind === 'audio_transcription' ? 60 : 5, chars: 1000, variant: kind === 'videos' ? '720p' : '' } };
-}
+  const badgeDirty = h('span', { class: 'badge bg-orange-lt', hidden: true }, 'unsaved');
+  const saveBtn = btn('Save', 'btn-primary btn-sm', () => act(api('presets', { method: 'POST', body: { client: cl.name, action: 'save', preset: p.name, category: p.category, optimization: draft.optimization, models: draft.models } }), 'Preset saved'), 'check');
+  saveBtn.disabled = true;
+  const sync = () => { const on = dirty(); saveBtn.disabled = !on; badgeDirty.hidden = !on; };
 
-// showRanking explains the order of a preset: the main list with its scores
-// and every model that was left out with the reason.
-async function showRanking(client, name) {
-  try {
-    const r = await api(`ranking?client=${encodeURIComponent(client)}&preset=${encodeURIComponent(name)}`);
-    const comps = c => Object.entries(c.components || {}).map(([k, v]) => h('span', { class: 'rank-comp' }, h('span', { class: 'text-secondary' }, k), ' ', h('strong', {}, v.toFixed(2))));
-    const row = (c, i) => h('tr', {}, h('td', { class: 'rank-num' }, i + 1), h('td', { class: 'mono' }, c.model),
-      h('td', { class: 'rank-score' }, c.score.toFixed(2)), h('td', { class: 'nowrap' }, c.cost_idr ? 'Rp ' + idr(c.cost_idr) : h('span', { class: 'text-secondary' }, 'free / plan')),
-      h('td', {}, (c.flags || []).map(f => badge(f, /free|plan|promo|proven/.test(f) ? 'green' : 'orange'))),
-      h('td', {}, h('div', { class: 'rank-comps' }, comps(c))));
-    const table = (list, empty) => list.length ? h('div', { class: 'table-responsive' }, h('table', { class: 'table table-sm rank-table' }, h('thead', {}, h('tr', {}, ['#', 'Model', 'Score', 'Cost', 'Flags', 'Components'].map(x => h('th', {}, x)))), h('tbody', {}, list.map(row)))) : h('p', { class: 'text-secondary' }, empty);
-    // the left-out models are many: group them by the reason, so the list stays short
-    const reasons = new Map();
-    for (const x of (r.rejected || [])) {
-      const list = reasons.get(x.why) || [];
-      list.push(x.model);
-      reasons.set(x.why, list);
-    }
-    const rejected = reasons.size ? h('div', { class: 'rank-reasons' }, [...reasons.entries()].sort((a, b) => b[1].length - a[1].length).map(([why, models]) => h('div', { class: 'rank-reason' },
+  const opt = h('select', { class: 'form-select form-select-sm', onchange: e => { draft.optimization = e.target.value; optHelp.textContent = OPT_HELP[draft.optimization] || ''; sync(); } },
+    OPTIMIZATIONS.map(([v, l]) => h('option', { value: v, selected: v === draft.optimization }, l)));
+  const optHelp = h('div', { class: 'form-hint' }, OPT_HELP[draft.optimization] || '');
+
+  // ---- Serving now: the ranked list, then what was left out and why ----
+  const candidates = r.candidates || [];
+  const serving = h('div', { class: 'mb-3' },
+    h('div', { class: 'subheader' }, `Serving now${r.optimization ? ' · ' + (OPTIMIZATIONS.find(o => o[0] === r.optimization)?.[1] || r.optimization) : ''}`),
+    candidates.length
+      ? h('div', { class: 'table-responsive' }, h('table', { class: 'table table-sm table-vcenter rank-table' },
+        h('thead', {}, h('tr', {}, ['#', 'Model', 'Billing', 'Score', 'Why it is here'].map(x => h('th', {}, x)))),
+        h('tbody', {}, candidates.map((c, i) => h('tr', {},
+          h('td', { class: 'rank-num' }, i + 1),
+          h('td', { class: 'mono' }, c.model),
+          h('td', {}, badge(BILLING_TEXT[c.billing] || c.billing || '—', BILLING[c.billing] || 'secondary')),
+          h('td', { class: 'rank-score' }, (c.score ?? 0).toFixed(3)),
+          h('td', { class: 'text-secondary small' }, c.reason || ''))))))
+      : h('div', { class: 'text-danger' }, 'Nothing available right now.'),
+    p.evictions && Object.keys(p.evictions).length
+      ? h('div', { class: 'form-hint' }, 'Out for now: ' + Object.entries(p.evictions).map(([m, t]) => `${m} (back in ${left(t) || 'a moment'})`).join(', '))
+      : null);
+
+  // The rejected models are grouped by the reason they were left out, so the
+  // list stays short and the reason reads once.
+  const reasons = new Map();
+  for (const x of r.rejected || []) {
+    const list = reasons.get(x.why) || [];
+    list.push(x.model);
+    reasons.set(x.why, list);
+  }
+  const rejected = reasons.size ? h('div', { class: 'mb-3' },
+    h('div', { class: 'subheader' }, `Left out (${(r.rejected || []).length})`),
+    h('div', { class: 'rank-reasons' }, [...reasons.entries()].sort((a, b) => b[1].length - a[1].length).map(([why, models]) => h('div', { class: 'rank-reason' },
       h('div', { class: 'rank-reason-head' }, h('span', { class: 'rank-reason-count' }, models.length), h('span', {}, why)),
-      h('div', { class: 'rank-reason-models mono' }, models.join(', '))))) : null;
-    const section = (title, note, body) => h('div', { class: 'mb-4' }, h('h4', { class: 'rank-h' }, title), note && h('p', { class: 'text-secondary small' }, note), body);
-    dialog(h('h3', {}, `${client} / ${name}`), h('p', { class: 'text-secondary' }, 'How the order is decided. The higher the score, the better the model; models close to the top take turns when the preset is set to do so.'),
-      section('Main list', 'The models this preset uses, best first.', table(r.candidates, 'No model qualifies right now.')),
-      r.rejected?.length ? section(`Left out (${r.rejected.length})`, 'Models of this kind that do not serve this preset, grouped by the reason.', rejected) : null,
-      r.unavailable?.length ? h('p', { class: 'text-secondary small' }, `${r.unavailable.length} more models exist but this client's keys may not call them.`) : null,
-      dialogButtons(), { __opts: { wide: true } });
-  } catch (e) { fail(e); }
+      h('div', { class: 'rank-reason-models mono' }, models.join(', ')))))) : null;
+
+  // ---- The model picker, grouped by vendor family ----
+  // The catalog is fetched when the picker is first opened: a client page can
+  // hold seven presets and the catalog is a few hundred rows.
+  let lastRows = [];
+  const picker = h('div', { class: 'picker' });
+  const summary = h('span', { class: 'text-secondary small' }, `${draft.models.length} picked`);
+
+  const pickerBody = () => {
+    if (!lastRows.length) return [empty('kenari has no model of this kind.')];
+    const families = new Map();
+    for (const m of lastRows) {
+      const list = families.get(m.owner || 'other') || [];
+      list.push(m);
+      families.set(m.owner || 'other', list);
+    }
+    const out = [];
+    for (const [owner, list] of [...families.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+      const ids = list.map(m => m.id);
+      const box = h('input', { class: 'form-check-input', type: 'checkbox', onchange: e => {
+        if (e.target.checked) { for (const id of ids) if (!draft.models.includes(id)) draft.models.push(id); }
+        else draft.models = draft.models.filter(id => !ids.includes(id));
+        redraw();
+      } });
+      const picked = ids.filter(id => draft.models.includes(id)).length;
+      box.checked = picked === ids.length;
+      box.indeterminate = picked > 0 && picked < ids.length;
+      out.push(h('div', { class: 'picker-family' },
+        h('label', { class: 'form-check picker-head' }, box,
+          h('span', { class: 'form-check-label fw-bold' }, owner),
+          h('span', { class: 'text-secondary small ms-2' }, `${picked}/${ids.length}`)),
+        h('div', { class: 'picker-rows' }, list.map(m => {
+          const on = draft.models.includes(m.id);
+          const cb = h('input', { class: 'form-check-input', type: 'checkbox', checked: on, onchange: e => {
+            if (e.target.checked) { if (!draft.models.includes(m.id)) draft.models.push(m.id); }
+            else draft.models = draft.models.filter(id => id !== m.id);
+            redraw();
+          } });
+          // free and plan-covered rows still show list prices, greyed, so the
+          // pool can be compared on the same numbers
+          const grey = m.billing !== 'balance';
+          return h('label', { class: 'picker-row' + (on ? ' picked' : '') },
+            cb,
+            h('span', { class: 'picker-id mono' }, m.id),
+            badge(BILLING_TEXT[m.billing] || m.billing || '—', BILLING[m.billing] || 'secondary'),
+            h('span', { class: 'picker-ctx text-secondary nowrap' }, ctx(m.context) + ' ctx'),
+            h('span', { class: 'picker-mod text-secondary nowrap' }, m.modalities || '—'),
+            h('span', { class: 'picker-tool nowrap' }, m.tool_call ? badge('tools', 'azure') : h('span', { class: 'text-secondary small' }, 'no tools')),
+            h('span', { class: 'picker-price nowrap' + (grey ? ' text-secondary' : '') }, priceLine(m)),
+            m.promo_off > 0 ? badge(`promo −${Math.round(m.promo_off)}%`, 'orange') : null,
+            !m.callable ? h('span', { class: 'text-orange small nowrap' }, 'no key may call it') : null);
+        }))));
+    }
+    return out;
+  };
+
+  // redraw rebuilds the picker from draft.models: it is the single source of
+  // truth, so a family box can never disagree with the rows under it.
+  const redraw = () => {
+    picker.replaceChildren(...pickerBody());
+    summary.textContent = `${draft.models.length} of ${lastRows.length} picked`;
+    sync();
+  };
+
+  let loaded = false;
+  const load = async () => {
+    if (loaded) return;
+    loaded = true;
+    picker.replaceChildren(empty('Loading the catalog…'));
+    try {
+      const res = await api(`catalog/models?client=${encodeURIComponent(cl.name)}&category=${encodeURIComponent(p.category)}`);
+      lastRows = res.models || [];
+      redraw();
+    } catch (e) {
+      loaded = false;
+      picker.replaceChildren(h('div', { class: 'text-danger' }, e.message));
+    }
+  };
+
+  const body = h('div', {},
+    h('div', { class: 'row g-3 mb-3' },
+      h('div', { class: 'col-md-5' }, h('label', { class: 'form-label' }, 'Optimization'), opt, optHelp),
+      h('div', { class: 'col-md-7' }, h('label', { class: 'form-label' }, 'Pool'),
+        h('div', { class: 'd-flex align-items-center gap-2' }, summary, h('span', { class: 'ms-auto' }), badgeDirty, saveBtn),
+        h('div', { class: 'form-hint' }, 'Every model you tick is in the pool; the optimization only orders it. A family box selects all of that vendor\'s models here.'))),
+    h('div', { class: 'mb-3' }, h('details', { class: 'picker-box', ontoggle: e => { if (e.target.open) load(); } },
+      h('summary', {}, 'Choose models'), picker)),
+    serving, rejected);
+
+  return card(h('span', { class: 'd-flex align-items-center gap-2' }, h('span', { class: 'kind-icon' }, icon(ic)),
+    h('span', {}, p.name, h('div', { class: 'text-secondary small fw-normal' }, `${p.label} · ${(p.models || []).length} in the pool · ${candidates.length} serving`))),
+  body, {
+    actions: h('div', { class: 'd-flex gap-1 align-items-center' },
+      btn('Recalculate', 'btn-sm btn-ghost-secondary', () => act(api('recompute?client=' + encodeURIComponent(cl.name), { method: 'POST' }), 'Rankings recalculated'), 'adjustments-horizontal'),
+      iconBtn('Delete preset', 'trash', () => { if (confirm(`Delete preset "${p.name}" of ${cl.name}? Apps asking for it get an error until you add it again.`)) act(api('presets', { method: 'POST', body: { client: cl.name, action: 'delete', preset: p.name } }), 'Preset deleted'); }, { sm: true, cls: 'btn-ghost-danger' })),
+    class: 'h-100',
+  });
+}
+
+function addPreset(client, missing) {
+  const f = { category: missing[0].category };
+  dialog(h('h3', {}, 'Add a preset'), h('p', { class: 'text-secondary' }, 'A client holds at most one preset per category. It starts empty and Balanced, so you only have to pick models.'),
+    h('div', { class: 'mb-3' }, h('label', { class: 'form-label' }, 'Category'), h('select', { class: 'form-select', onchange: e => f.category = e.target.value },
+      missing.map(c => h('option', { value: c.category }, `${c.preset} (${c.label})`)))),
+    dialogButtons(btn('Add', 'btn-primary', async () => {
+      try { await api('presets', { method: 'POST', body: { client, action: 'save', category: f.category, optimization: 'balanced', models: [] } }); closeDialog(); toast('Preset added'); render(); } catch (e) { fail(e); }
+    })));
 }
 
 // ---------- Usage ----------
+// Requirement 18: all clients, then one client, then its presets, then the
+// models inside a preset. Every level is one request, so the page is a link:
+// #/usage?client=babu&preset=text&window=24h
 views.usage = async function (_, q) {
-  const client = q.get('client') || '', dim = q.get('by') || 'preset', hours = +(q.get('h') || 24), filter = q.get('f') || 'all';
-  const cq = client ? '&client=' + encodeURIComponent(client) : '';
-  const unit = chartUnit(hours); // minute buckets for a short window, hours, then days
-  const [o, rows0, series0, reqs0] = await Promise.all([api('overview'), api(`usage?group=${dim}&hours=${hours}${cq}`), api(`usage?group=${unit}&hours=${hours}${cq}`), api(`requests?limit=200${cq}`)]);
-  const rows = rows0 || [], series = series0 || [], reqs = reqs0 || [];
-  const t = series.reduce((a, r) => ({ req: a.req + r.requests, err: a.err + r.errors, cost: a.cost + r.cost_idr, tin: a.tin + r.in_tok, tout: a.tout + r.out_tok, lat: a.lat + r.avg_latency_ms * r.requests }), { req: 0, err: 0, cost: 0, tin: 0, tout: 0, lat: 0 });
-  const to = patch => { const n = new URLSearchParams(q); for (const [k, v] of Object.entries(patch)) v === '' ? n.delete(k) : n.set(k, v); return 'usage?' + n; };
-  const seg = (opts, cur, mk) => h('div', { class: 'btn-group' }, opts.map(([v, l]) => h('button', { class: 'btn btn-sm ' + (String(cur) === String(v) ? 'btn-primary' : 'btn-outline-primary'), onclick: () => go(mk(v)) }, l)));
-  const max = Math.max(1, ...rows.map(r => r.requests));
-  const shown = reqs.filter(r => filter === 'all' || !r.ok);
-  setHead({ title: 'Usage', sub: client ? `Only ${client}` : 'All clients', actions: [
-    h('select', { class: 'form-select form-select-sm', style: 'width:auto', onchange: e => go(to({ client: e.target.value })) }, h('option', { value: '' }, 'All clients'), (o.clients || []).map(c => h('option', { value: c.name, selected: c.name === client }, c.name))),
-    seg([[1, '1 h'], [24, '24 h'], [168, '7 d'], [720, '30 d']], hours, v => to({ h: v }))] });
-  const DIMS = [['preset', 'Preset'], ['model', 'Model'], ['client', 'Client'], ['upstream', 'Kenari key']];
+  const client = q.get('client') || '', preset = q.get('preset') || '', window = q.get('window') || '24h';
+  const qs = new URLSearchParams({ window });
+  if (client) qs.set('client', client);
+  if (preset) qs.set('preset', preset);
+  const d = await api('usage/drill?' + qs);
+  const rows = d.rows || [], t = d.totals || {}, hours = window === '30d' ? 720 : 24;
+  // at builds a link to another level of the same drill-down: the window is
+  // kept, and a field the caller leaves out keeps its current value.
+  const at = patch => {
+    const n = new URLSearchParams({ window });
+    const nextClient = patch.client === undefined ? client : patch.client;
+    const nextPreset = patch.preset === undefined ? preset : patch.preset;
+    if (nextClient) n.set('client', nextClient);
+    if (nextPreset) n.set('preset', nextPreset);
+    return 'usage?' + n;
+  };
+  const crumbs = [h('a', { class: 'clickable', onclick: () => go(at({ client: '', preset: '' })) }, 'All clients')];
+  if (client) crumbs.push(' / ', preset ? h('a', { class: 'clickable', onclick: () => go(at({ preset: '' })) }, client) : client);
+  if (preset) crumbs.push(' / ', preset);
+  const level = d.level;
+  const next = level === 'client' ? 'presets' : level === 'preset' ? 'models' : 'presets';
+  setHead({
+    crumbs, title: 'Usage', sub: `${window === '30d' ? 'Last 30 days' : 'Last 24 hours'}${client ? ' · ' + client : ''}${preset ? ' / ' + preset : ''}`,
+    actions: [
+      h('div', { class: 'btn-group' }, [['24h', '24 h'], ['30d', '30 d']].map(([v, l]) => {
+        const n = new URLSearchParams({ window: v });
+        if (client) n.set('client', client);
+        if (preset) n.set('preset', preset);
+        return h('button', { class: 'btn btn-sm ' + (window === v ? 'btn-primary' : 'btn-outline-primary'), onclick: () => go('usage?' + n) }, l);
+      })),
+      level !== 'client' && btn('Back', 'btn-outline-secondary', () => go(at(level === 'model' ? { preset: '' } : { client: '', preset: '' })), 'arrow-left'),
+    ],
+  });
+
+  const k = d.kenari || {};
+  const wins = k.windows || [];
+  const acct = k.account || {};
+  const strip = card('kenari: plan and balance', k.configured
+    ? h('div', { class: 'row g-3' },
+      h('div', { class: 'col-lg-6' }, h('div', { class: 'd-flex align-items-center flex-wrap mb-2' },
+        h('strong', { class: 'me-2' }, acct.plan || 'No plan'), acct.plan_source === 'kenari' ? badge('live from kenari', 'green') : badge('estimated', 'orange'))),
+      h('div', { class: 'col-lg-6' }, h('div', { class: 'd-flex justify-content-between' }, h('span', { class: 'text-secondary' }, 'Balance'), h('strong', {}, 'Rp ' + idr(acct.balance_idr || 0)))),
+      wins.length
+        ? wins.map(w => h('div', { class: 'col-lg-4' }, h('div', { class: 'd-flex justify-content-between small mb-1' }, h('span', {}, w.label), h('span', { class: 'text-secondary' }, `Rp ${idr(w.used_idr)} of ${idr(w.budget_idr)}`)),
+          progress(w.used_idr, w.budget_idr), w.resets_at && !zero(w.resets_at) && h('div', { class: 'text-secondary small mt-1' }, 'Resets in ' + (left(w.resets_at) || 'a moment'))))
+        : h('div', { class: 'col-12' }, h('div', { class: 'text-secondary small' }, 'kenari has not reported the plan windows yet; add the account key on the Overview page.')))
+    : empty('No kenari key yet. Add one to a client to read plan and balance.'));
+
+  const cols = ['Name', 'Requests', 'Errors', 'Tokens in / out', 'Cached', 'RTK saved', 'Rp at list price'];
+  const table = rows.length ? h('div', { class: 'table-responsive' }, h('table', { class: 'table table-vcenter card-table table-hover' },
+    h('thead', {}, h('tr', {}, cols.map(x => h('th', {}, x)))),
+    h('tbody', {}, rows.map(r => {
+      const drill = level === 'client' ? () => go(at({ client: r.client || r.key, preset: '' }))
+        : level === 'preset' ? () => go(at({ preset: r.preset || r.key })) : null;
+      return h('tr', { class: drill ? 'clickable' : '', onclick: drill || undefined },
+        h('td', {}, h('span', { class: 'mono' }, r.label || r.key), r.billing && badge(BILLING_TEXT[r.billing] || r.billing, BILLING[r.billing] || 'secondary')),
+        h('td', {}, num(r.requests)),
+        h('td', { class: r.errors ? 'text-danger' : 'text-secondary' }, num(r.errors)),
+        h('td', { class: 'nowrap' }, `${num(r.in_tok)} / ${num(r.out_tok)}`),
+        h('td', { class: 'text-secondary' }, num(r.cached_tok)),
+        h('td', { class: 'text-secondary' }, num(r.rtk_saved)),
+        h('td', { class: 'nowrap' }, 'Rp ' + idr(r.cost_idr)),
+        drill && h('td', { class: 'text-end' }, icon('chevron-right', 'text-secondary')));
+    })))) : empty(level === 'client' ? 'No traffic in this period.' : 'Nothing served here in this period.');
+
   return h('div', {},
     statRow([
-      ['bolt', 'blue', num(t.req), `requests · ${num(t.tin)} in / ${num(t.tout)} out tokens`], ['alert-triangle', t.err ? 'orange' : 'green', t.req ? (t.err / t.req * 100).toFixed(1) + '%' : '0%', `failed (${num(t.err)} of ${num(t.req)})`],
-      ['clock', 'azure', t.req ? Math.round(t.lat / t.req) + ' ms' : '–', 'average time per request'], ['coin', 'green', 'Rp ' + idr(t.cost), 'at list price, free and plan included']]),
-    h('div', { class: 'mb-3' }, card('Requests over time', chart(series, hours, { unit }))),
-    h('div', { class: 'mb-3' }, card('Breakdown', h('div', {}, h('div', { class: 'mb-3' }, seg(DIMS, dim, v => to({ by: v }))),
-      rows.length ? h('div', { class: 'table-responsive' }, h('table', { class: 'table table-vcenter' }, h('thead', {}, h('tr', {}, [DIMS.find(d => d[0] === dim)[1], 'Requests', '', 'Failed', 'Tokens in / out', 'Avg time', 'Rp at list price'].map(x => h('th', {}, x)))),
-        h('tbody', {}, rows.filter(r => r.key).map(r => h('tr', {}, h('td', { class: 'mono' }, dim === 'upstream' ? keyLabel(r.key) : r.key), h('td', {}, num(r.requests)), h('td', { style: 'min-width:90px' }, progress(r.requests, max, true)), h('td', { class: r.errors ? 'text-danger' : 'text-secondary' }, r.errors), h('td', {}, `${num(r.in_tok)} / ${num(r.out_tok)}`), h('td', {}, Math.round(r.avg_latency_ms) + ' ms'), h('td', {}, idr(r.cost_idr))))))) : empty('No traffic in this period.')))),
-    card('Recent requests', h('div', {}, h('div', { class: 'mb-3' }, seg([['all', 'All'], ['err', 'Errors only']], filter, v => to({ f: v }))),
-      shown.length ? h('div', { class: 'table-responsive' }, h('table', { class: 'table table-sm table-vcenter' }, h('thead', {}, h('tr', {}, ['When', 'Client', 'Asked for', 'Served by', 'Key', 'Result', 'Time', 'Tokens in / out', 'Notes'].map(x => h('th', {}, x)))),
-        h('tbody', {}, shown.slice(0, 100).map(r => h('tr', {}, h('td', { class: 'nowrap text-secondary' }, ago(r.ts) + ' ago'), h('td', {}, r.client), h('td', { class: 'mono' }, r.requested || r.preset), h('td', { class: 'mono' }, r.model), h('td', {}, keyLabel(r.upstream)),
-          h('td', {}, badge(r.ok ? 'ok' : (r.status || 'error'), r.ok ? 'green' : 'red')), h('td', { class: 'nowrap' }, r.latency_ms + ' ms'), h('td', { class: 'nowrap' }, `${r.in_tok} / ${r.out_tok}`),
-          h('td', {}, r.attempt > 1 && badge('retry ' + r.attempt, 'orange'), r.rtk_saved > 0 && badge('saved ' + r.rtk_saved, 'green'), r.err && h('span', { class: 'text-danger small' }, r.err))))))) : empty('Nothing to show.'))));
-};
-
-// ---------- Settings ----------
-views.settings = async function () {
-  await ensureCfg();
-  const c = S.cfg, R = c.rules;
-  setHead({ title: 'Settings', sub: 'Sensible defaults are already set. Most of this you never need to touch.' });
-  return h('div', { class: 'row row-cards' },
-    h('div', { class: 'col-lg-6' }, card('Smart routing', h('div', {},
-      field(R, 'sticky_minutes', { type: 'num', label: 'Keep one conversation on one model (minutes)', help: 'keeps the provider cache warm and answers consistent' }),
-      field(R, 'avoid_sunset_days', { type: 'num', label: 'Stop using models that end within (days)' })), { class: 'h-100' })),
-    h('div', { class: 'col-lg-6' }, card('Token saver (RTK)', h('div', {}, h('p', { class: 'text-secondary' }, 'Shrinks big tool output (git diff, grep, ls, logs) before it is sent and paid for. Your own messages are never touched.'),
-      field(c.rtk, 'enabled', { type: 'switch', label: 'Token saver on' }),
-      h('div', { class: 'row' }, [['git_diff', 'git diff'], ['grep', 'grep results'], ['ls', 'directory listings'], ['logs', 'logs'], ['truncate', 'any very long output']].map(([k, l]) => h('div', { class: 'col-6' }, field(c.rtk, k, { type: 'switch', label: l }))))), { class: 'h-100' })));
+      ['bolt', 'blue', num(t.requests || 0), `requests · ${num(t.in_tok || 0)} in / ${num(t.out_tok || 0)} out tokens`],
+      ['alert-triangle', t.errors ? 'orange' : 'green', t.requests ? (t.errors / t.requests * 100).toFixed(1) + '%' : '0%', `failed (${num(t.errors || 0)} of ${num(t.requests || 0)})`],
+      ['wallet', 'green', num(Math.round((t.rtk_saved || 0) / 1000)) + ' k', 'characters saved by RTK'],
+      ['coin', 'azure', 'Rp ' + idr(t.cost_idr || 0), 'at list price, free and plan included']]),
+    h('div', { class: 'mb-3' }, card('Requests over time', chart(d.series || [], hours, { unit: hours > 72 ? 'day' : 'hour' }))),
+    h('div', { class: 'mb-3' }, strip),
+    card(level === 'client' ? 'Clients' : level === 'preset' ? `Presets of ${client}` : `Models in ${preset}`,
+      h('div', {}, h('div', { class: 'text-secondary small mb-2' }, level === 'model' ? 'Click a row to go back.' : `Click a row to open its ${next}.`), table), { flush: true }));
 };
 
 // ---------- Config file ----------

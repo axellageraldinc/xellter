@@ -1,6 +1,7 @@
 package rank
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -16,31 +17,102 @@ func chat(id string, in, out float64) *catalog.Model {
 	return &catalog.Model{ID: id, Endpoint: "chat", Context: 128000, ToolCall: true, InIDR: in, OutIDR: out, CachedIDR: in / 10}
 }
 
-type fx struct {
-	snap *catalog.Snapshot
-	cfg  *config.Config
-	pool *upstream.Pool
-	cl   *config.Client
+func freeChat(id string) *catalog.Model {
+	m := chat(id, 0, 0)
+	m.Free = true
+	return m
 }
 
+type fx struct {
+	snap        *catalog.Snapshot
+	cfg         *config.Config
+	pool        *upstream.Pool
+	cl          *config.Client
+	benchScores map[string]map[string]store.BenchRow
+}
+
+// fixture builds one client whose text preset holds the given models, Balanced by default.
 func fixture(models ...*catalog.Model) *fx {
 	cfg := config.Default()
-	cfg.Clients = []config.Client{{Name: "c", Enabled: true, Presets: config.DefaultPresets(), Keys: []config.Upstream{{Name: "k", KeyEnv: "K"}}}}
+	cfg.Clients = []config.Client{{
+		Name: "c", Enabled: true, Purpose: "general",
+		Keys:    []config.Upstream{{Name: "k", KeyEnv: "K"}},
+		Presets: map[string]config.Preset{"text": {Category: "chat", Optimization: "balanced", Models: []string{}}},
+	}}
 	pool := upstream.NewPool()
 	pool.Reload(cfg, map[string]string{"K": "s"}, nil)
-	snap := &catalog.Snapshot{Models: map[string]*catalog.Model{}, Tier: catalog.FreeTier{Free: catalog.TierLimit{RPM: 5, Daily: 50}, Topup: catalog.TierLimit{RPM: 10, Daily: 1000}, Plan: catalog.TierLimit{RPM: 25}}}
+	snap := &catalog.Snapshot{
+		Models: map[string]*catalog.Model{},
+		Tier:   catalog.FreeTier{Free: catalog.TierLimit{RPM: 5, Daily: 50}, Topup: catalog.TierLimit{RPM: 10, Daily: 1000}, Plan: catalog.TierLimit{RPM: 25}},
+	}
 	for _, m := range models {
 		snap.Models[m.ID] = m
 	}
-	return &fx{snap, cfg, pool, &cfg.Clients[0]}
+	f := &fx{snap: snap, cfg: cfg, pool: pool, cl: &cfg.Clients[0]}
+	ids := make([]string, 0, len(models))
+	for _, m := range models {
+		ids = append(ids, m.ID)
+	}
+	f.preset(ids...)
+	return f
 }
 
-func (f *fx) rank(preset string, mod func(*Inputs)) *Ranking {
-	in := Inputs{Cfg: f.cfg, Snap: f.snap, Pool: f.pool, Now: now, Stats: map[string]store.ModelStat{}}
+// preset sets the pool of the text preset.
+func (f *fx) preset(models ...string) config.Preset {
+	p := f.cl.Presets["text"]
+	p.Models = models
+	f.cl.Presets["text"] = p
+	return p
+}
+
+// optimize sets the text preset's optimization.
+func (f *fx) optimize(name string) {
+	p := f.cl.Presets["text"]
+	p.Optimization = name
+	f.cl.Presets["text"] = p
+}
+
+// bench records one arena score per model, in the general text arena unless an arena is given.
+func (f *fx) bench(scores map[string]float64) {
+	if f.benchScores == nil {
+		f.benchScores = map[string]map[string]store.BenchRow{}
+	}
+	for id, v := range scores {
+		if f.benchScores[id] == nil {
+			f.benchScores[id] = map[string]store.BenchRow{}
+		}
+		f.benchScores[id]["text"] = store.BenchRow{Value: v, Arena: "text"}
+	}
+}
+
+// benchIn records a score of a model in one named arena.
+func (f *fx) benchIn(id, arena string, v float64) {
+	if f.benchScores == nil {
+		f.benchScores = map[string]map[string]store.BenchRow{}
+	}
+	if f.benchScores[id] == nil {
+		f.benchScores[id] = map[string]store.BenchRow{}
+	}
+	f.benchScores[id][arena] = store.BenchRow{Value: v, Arena: arena}
+}
+
+// plan gives the account the "Indie" plan, whose scope covers the given models.
+func (f *fx) plan(scope ...string) {
+	f.snap.Plans = []catalog.Plan{{Name: "Indie", BudgetWeek: 1e6, BudgetMon: 1e6, Scope: scope, FreeCache: scope}}
+	f.pool.Reload(f.cfg, map[string]string{"K": "s"}, nil)
+	for _, k := range f.pool.Keys() {
+		k.Account().SetInfo(&upstream.PlanInfo{Name: "Indie", Windows: map[string]upstream.Window{
+			"week": {BudgetRP: 1e6, ResetsAt: now.Add(7 * 24 * time.Hour)},
+		}, Fetched: now}, k.Name)
+	}
+}
+
+func (f *fx) rank(mod func(*Inputs)) *Ranking {
+	in := Inputs{Cfg: f.cfg, Snap: f.snap, Pool: f.pool, Bench: f.benchScores, Now: now}
 	if mod != nil {
 		mod(&in)
 	}
-	return One(in, f.cl, preset, f.cl.Presets[preset])
+	return One(in, f.cl, "text", f.cl.Presets["text"])
 }
 
 func order(r *Ranking) []string {
@@ -51,7 +123,6 @@ func order(r *Ranking) []string {
 	return o
 }
 
-// containsStr reports whether the list holds the value.
 func containsStr(l []string, v string) bool {
 	for _, x := range l {
 		if x == v {
@@ -61,304 +132,540 @@ func containsStr(l []string, v string) bool {
 	return false
 }
 
-func TestFreeModelWinsWhenQualityIsAcceptable(t *testing.T) {
-	free := chat("g:free", 0, 0)
-	free.Free = true
-	f := fixture(free, chat("mid", 500, 1500), chat("big", 8000, 24000))
-	f.cfg.Benchmarks = map[string]float64{"g:free": 70, "mid": 72, "big": 90}
-	r := f.rank("text", nil)
-	if o := order(r); len(o) == 0 || o[0] != "g:free" {
-		t.Fatalf("free model should lead: %v", o)
-	}
-}
-
-func TestQualityGateKeepsBadCheapModelsOut(t *testing.T) {
-	free := chat("junk:free", 0, 0)
-	free.Free = true
-	f := fixture(free, chat("good", 600, 1800))
-	f.cfg.Benchmarks = map[string]float64{"junk:free": 5, "good": 80}
-	r := f.rank("text", nil)
-	if o := order(r); len(o) != 1 || o[0] != "good" {
-		t.Fatalf("gate failed: %v rejected=%v", o, r.Rejected)
-	}
-}
-
-func TestPromoMakesModelCheaperAndDoesNotLowerItsQuality(t *testing.T) {
-	promo := chat("promo", 63, 250) // listed price already includes a 90% discount
-	promo.Promo = &catalog.Promo{PercentOff: 90, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(7 * 24 * time.Hour)}
-	f := fixture(promo, chat("rival", 630, 2500), chat("other", 100, 300), chat("pricey", 9000, 30000))
-	pr := f.cl.Presets["text"]
-	pr.MinQuality = 0 // this test is about the price proxy, not the gate
-	f.cl.Presets["text"] = pr
-	r := f.rank("text", nil)
-	var pc *Candidate
-	for i := range r.Candidates {
-		if r.Candidates[i].Model == "promo" {
-			pc = &r.Candidates[i]
-		}
-	}
-	if pc == nil {
-		t.Fatalf("promo model rejected: %+v", r.Rejected)
-	}
-	if pc.Bonuses["promo"] <= 0 {
-		t.Fatal("promo bonus missing")
-	}
-	// the quality proxy must use the undiscounted price: "promo" was listed at Rp630/Rp2500 before the
-	// discount, so it must not look weaker than "other" (Rp100/Rp300)
-	for _, c := range r.Candidates {
-		if c.Model == "other" && pc.Components["benchmark"] <= c.Components["benchmark"] {
-			t.Fatalf("promo lowered its benchmark proxy: promo=%v other=%v", pc.Components, c.Components)
-		}
-	}
-}
-
-func TestEndingPromoGetsNoBonusAndExpiredPromoRevertsPrice(t *testing.T) {
-	m := chat("ending", 63, 250)
-	m.Promo = &catalog.Promo{PercentOff: 90, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(2 * time.Hour)}
-	if m.PromoActive(now, 12*time.Hour) {
-		t.Fatal("promo with 2h left should not count with a 12h minimum")
-	}
-	in, _, _ := m.Effective(now.Add(3*time.Hour), 0)
-	if in < 600 || in > 640 {
-		t.Fatalf("price after promo end should revert to ~630, got %v", in)
-	}
-}
-
-// The main list is capped at max_candidates; the best models win the places.
-func TestMainListKeepsTheTopCandidates(t *testing.T) {
-	models := []*catalog.Model{chat("a", 100, 300), chat("b", 110, 330), chat("c", 120, 360), chat("d", 130, 390), chat("e", 140, 420), chat("f", 150, 450)}
-	f := fixture(models...)
-	f.cfg.Benchmarks = map[string]float64{"a": 90, "b": 85, "c": 80, "d": 75, "e": 70, "f": 65}
-	r := f.rank("text", nil)
-	if len(r.Candidates) != 5 {
-		t.Fatalf("the main list must hold 5 models: %v", order(r))
-	}
-	for i, want := range []string{"a", "b", "c", "d", "e"} {
-		if r.Candidates[i].Model != want {
-			t.Fatalf("position %d must be %s: %v", i+1, want, order(r))
-		}
-	}
-	// the one that did not make it is rejected with the reason
-	var why string
+func rejected(r *Ranking, id string) string {
 	for _, x := range r.Rejected {
-		if x.Model == "f" {
-			why = x.Why
+		if x.Model == id {
+			return x.Why
 		}
 	}
-	if why != "outside top 5" {
-		t.Fatalf("the sixth model must be left out with a reason: %q", why)
+	return ""
+}
+
+// ---- reference cost ----
+
+// The worked example of the plan: Claude Opus 5 at In 100k, Out 500k, CR 40k is Rp532 per reference request.
+func TestRefCostUsesTheReferenceRequestOfEachCategory(t *testing.T) {
+	m := chat("opus", 100_000, 500_000)
+	m.CachedIDR = 40_000
+	if got, ok := RefCost(m, "chat", now); !ok || got != 532 {
+		t.Fatalf("chat reference cost: %v %v", got, ok)
+	}
+	// systemone is a chat-shaped endpoint here, so it uses the same reference profile
+	if got, _ := RefCost(m, "systemone", now); got != 532 {
+		t.Fatalf("systemone reference cost: %v", got)
+	}
+	// a running promo lowers the number, because the listed price already carries the discount
+	promo := chat("promo", 10_000, 50_000)
+	promo.Promo = &catalog.Promo{PercentOff: 90, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(24 * time.Hour)}
+	if got, _ := RefCost(promo, "chat", now); got >= 532 {
+		t.Fatalf("a promo must be cheaper: %v", got)
+	}
+	// media is priced per unit: one image, five seconds of 720p, 1000 characters, 60 seconds, one song
+	media := map[string]*catalog.Model{
+		"images":              {ID: "i", Endpoint: "images", Lines: []catalog.Line{{Unit: "image", IDR: 300}}},
+		"videos":              {ID: "v", Endpoint: "videos", Lines: []catalog.Line{{Unit: "second", Variant: "720p", IDR: 100}, {Unit: "second", Variant: "1080p", IDR: 400}}},
+		"audio_speech":        {ID: "s", Endpoint: "audio_speech", Lines: []catalog.Line{{Unit: "1k_chars", IDR: 20}}},
+		"audio_transcription": {ID: "t", Endpoint: "audio_transcription", Lines: []catalog.Line{{Unit: "second", IDR: 0.5}}},
+		"music":               {ID: "m", Endpoint: "music", Lines: []catalog.Line{{Unit: "song", IDR: 900}}},
+	}
+	want := map[string]float64{"images": 300, "videos": 500, "audio_speech": 20, "audio_transcription": 30, "music": 900}
+	for category, model := range media {
+		if got, ok := RefCost(model, category, now); !ok || got != want[category] {
+			t.Errorf("%s: got %v %v, want %v", category, got, ok, want[category])
+		}
+	}
+	// no usable price is reported as unknown, not as free
+	if _, ok := RefCost(&catalog.Model{ID: "x", Endpoint: "chat"}, "chat", now); ok {
+		t.Fatal("a model with no price must be unknown")
+	}
+	// a free model costs nothing
+	if got, ok := RefCost(freeChat("f:free"), "chat", now); !ok || got != 0 {
+		t.Fatalf("free model: %v %v", got, ok)
 	}
 }
 
-// A preset may ask for a different number of models.
-func TestMainListSizeFollowsThePreset(t *testing.T) {
-	models := []*catalog.Model{chat("a", 100, 300), chat("b", 110, 330), chat("c", 120, 360), chat("d", 130, 390), chat("e", 140, 420), chat("f", 150, 450)}
+// ---- cost score ----
+
+func TestCostScoreFollowsRelativePrice(t *testing.T) {
+	cases := []struct {
+		cost, cheapest, want float64
+	}{
+		{100, 100, 1},      // equal price
+		{113, 100, 0.891},  // 13% dearer
+		{200, 100, 0.591},  // twice
+		{1000, 100, 0.303}, // ten times
+		{0, 100, 1},        // free
+	}
+	for _, c := range cases {
+		got := round(costScore(c.cost, true, c.cheapest))
+		if got < c.want-0.01 || got > c.want+0.01 {
+			t.Errorf("cost %v against %v: got %v, want about %v", c.cost, c.cheapest, got, c.want)
+		}
+	}
+	if got := costScore(0, false, 100); got != 0.4 {
+		t.Fatalf("an unknown price is a middle guess: %v", got)
+	}
+}
+
+// ---- the three optimizations ----
+
+// Cheapest is the reference price and nothing else, with free and plan-covered models in two pools so a
+// cheap plan model never displaces a free one.
+func TestCheapestIsPriceOnly(t *testing.T) {
+	f := fixture(freeChat("free-a:free"), freeChat("free-b:free"), chat("plan-cheap", 100, 300), chat("plan-dear", 900, 2700), chat("paid", 5000, 15000))
+	f.plan("plan-*")
+	f.optimize("cheapest")
+	f.bench(map[string]float64{"free-a:free": 1, "free-b:free": 1, "plan-cheap": 99, "plan-dear": 99, "paid": 99})
+	r := f.rank(nil)
+	// the free half comes first even though its quality is the lowest, and the plan half is ordered by price
+	want := []string{"free-a:free", "free-b:free", "plan-cheap", "plan-dear", "paid"}
+	if got := order(r); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("cheapest order: %v, want %v", got, want)
+	}
+	if r.Candidates[0].Billing != BillingFree || r.Candidates[2].Billing != BillingPlan || r.Candidates[4].Billing != BillingBalance {
+		t.Fatalf("billing classes: %+v", r.Candidates)
+	}
+	// the cost of a candidate is the reference request, and its score is the cost score
+	if c := r.Candidates[2]; c.CostIDR <= 0 || c.Score <= 0 {
+		t.Fatalf("cost and score: %+v", c)
+	}
+}
+
+// A half that cannot fill its share is topped up from what is left, so the list is never short.
+func TestCheapestTopsUpAnEmptyHalf(t *testing.T) {
+	// seven free models and one plan-covered one: the free half fills its own share, and the leftover plan
+	// model takes the slot the plan half could not fill
+	var models []*catalog.Model
+	for _, id := range []string{"f1", "f2", "f3", "f4", "f5", "f6", "f7"} {
+		models = append(models, freeChat(id+":free"))
+	}
+	models = append(models, chat("plan-a", 100, 300))
 	f := fixture(models...)
-	f.cfg.Benchmarks = map[string]float64{"a": 90, "b": 85, "c": 80, "d": 75, "e": 70, "f": 65}
-	sh := f.cl.Presets["text"]
-	sh.MaxCandidates = 2
-	f.cl.Presets["text"] = sh
-	r := f.rank("text", nil)
-	if o := order(r); len(o) != 2 || o[0] != "a" || o[1] != "b" {
-		t.Fatalf("a preset of 2 models: %v", o)
+	f.plan("plan-a")
+	f.optimize("cheapest")
+	r := f.rank(func(in *Inputs) { in.Top = 4 })
+	if len(r.Candidates) != 4 {
+		t.Fatalf("a preset of 4 must fill 4 places: %v", order(r))
+	}
+	// the free half goes first, and every free model is ahead of the plan model within its own half
+	if r.Candidates[0].Billing != BillingFree || r.Candidates[1].Billing != BillingFree {
+		t.Fatalf("the free half must lead: %+v", r.Candidates)
+	}
+	found := false
+	for _, c := range r.Candidates {
+		if c.Model == "plan-a" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the plan model must still make the list: %v", order(r))
+	}
+
+	// with only plan-covered models, the plan half fills both shares, cheapest first
+	f2 := fixture(chat("p1", 100, 300), chat("p2", 200, 600), chat("p3", 300, 900), chat("p4", 400, 1200), chat("p5", 500, 1500), chat("p6", 600, 1800))
+	f2.plan("p*")
+	f2.optimize("cheapest")
+	r = f2.rank(func(in *Inputs) { in.Top = 4 })
+	want := []string{"p1", "p2", "p3", "p4"}
+	if got := order(r); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("the topped-up list must be ordered by price: %v, want %v", got, want)
 	}
 }
 
-func TestGatesAndSunset(t *testing.T) {
-	noTools := chat("notools", 100, 300)
-	noTools.ToolCall = false
-	small := chat("small", 100, 300)
-	small.Context = 8000
+// Balanced is cost 50 : benchmark 50.
+func TestBalancedWeighsCostAndQuality(t *testing.T) {
+	// cheap is the cheapest but the weakest; good is dearer but much better; dear is the best and the priciest
+	f := fixture(chat("cheap", 100, 300), chat("good", 400, 1200), chat("dear", 5000, 15000))
+	f.bench(map[string]float64{"cheap": 0.2, "good": 0.8, "dear": 0.95})
+	r := f.rank(nil)
+	got := map[string]Candidate{}
+	for _, c := range r.Candidates {
+		got[c.Model] = c
+	}
+	// the reported score is exactly 0.5*costScore + 0.5*bench, measured against the cheapest model in the pool
+	cheapest := got["cheap"].CostIDR
+	for _, c := range got {
+		want := round(0.5*costScore(c.CostIDR, true, cheapest) + 0.5*c.Bench)
+		if c.Score < want-0.001 || c.Score > want+0.001 {
+			t.Fatalf("%s: score %v is not half cost (%v) and half quality (%v)", c.Model, c.Score, costScore(c.CostIDR, true, cheapest), c.Bench)
+		}
+	}
+	if order(r)[0] != "good" {
+		t.Fatalf("balanced must not lead with the weakest model: %v", order(r))
+	}
+	if order(r)[len(order(r))-1] != "dear" {
+		t.Fatalf("balanced must not lead with the dearest model: %v", order(r))
+	}
+	// the blend is monotone in both halves: improving quality without changing price can only help
+	f.bench(map[string]float64{"cheap": 0.99, "good": 0.8, "dear": 0.95})
+	if r := f.rank(nil); order(r)[0] != "cheap" {
+		t.Fatalf("the free-cheapest model with the best quality must lead: %v", order(r))
+	}
+}
+
+// Best quality ranks on the benchmark alone, drops models with no evidence, and applies a median floor.
+func TestBestQualityUsesTheBenchmarkOnly(t *testing.T) {
+	f := fixture(chat("top", 9000, 27000), chat("mid", 3000, 9000), chat("low", 100, 300), chat("mystery", 500, 1500))
+	f.bench(map[string]float64{"top": 0.9, "mid": 0.6, "low": 0.2})
+	f.optimize("best_quality")
+	r := f.rank(nil)
+	got := order(r)
+	if len(got) != 2 || got[0] != "top" || got[1] != "mid" {
+		t.Fatalf("best quality must rank on the benchmark and drop the floor: %v", got)
+	}
+	if r.Candidates[0].Score != 0.9 || r.Candidates[0].Bench != 0.9 {
+		t.Fatalf("the score must be the benchmark: %+v", r.Candidates[0])
+	}
+	if why := rejected(r, "mystery"); why != "no quality evidence for chat" {
+		t.Fatalf("a model with no evidence must be reported: %q", why)
+	}
+	if !containsStr(r.Unranked, "mystery") {
+		t.Fatalf("unranked: %v", r.Unranked)
+	}
+	// low is rejected by the floor, with the number it failed
+	if why := rejected(r, "low"); why == "" {
+		t.Fatalf("the model under the median must be rejected: %v", r.Rejected)
+	}
+}
+
+// A preset with no quality evidence at all has no best-quality list, but the models are still reported as
+// unranked rather than silently dropped.
+func TestBestQualityWithoutEvidenceIsEmptyButExplained(t *testing.T) {
+	f := fixture(chat("a", 100, 300), chat("b", 200, 600))
+	f.optimize("best_quality")
+	r := f.rank(nil)
+	if len(r.Candidates) != 0 || len(r.Unranked) != 2 {
+		t.Fatalf("candidates=%v unranked=%v", order(r), r.Unranked)
+	}
+}
+
+// ---- purpose ----
+
+// The purpose decides which arenas a text model is scored on; a model missing its purpose-specific score
+// falls back to the general arena and says so, and is never dropped for lack of a number.
+func TestPurposeSelectsTheArenasAndFallsBackToGeneral(t *testing.T) {
+	// the third model keeps the median floor below both of them, so the floor is not what this test measures
+	f := fixture(chat("coder", 100, 300), chat("writer", 100, 300), chat("weak", 100, 300))
+	f.benchIn("coder", "swebench", 0.9)
+	f.benchIn("writer", "text", 0.95)
+	f.benchIn("weak", "swebench", 0.1)
+	f.cl.Purpose = "coding"
+	f.optimize("best_quality")
+	r := f.rank(nil)
+	got := map[string]Candidate{}
+	for _, c := range r.Candidates {
+		got[c.Model] = c
+	}
+	if got["coder"].Bench != 0.9 || got["coder"].BenchSource != "swebench" {
+		t.Fatalf("coding must use the coding arenas: %+v", got["coder"])
+	}
+	if got["writer"].BenchSource != "general (fallback)" || !containsStr(got["writer"].Flags, "general score") {
+		t.Fatalf("a model without a coding score falls back to the general arena: %+v", got["writer"])
+	}
+	if !containsStr(order(r), "writer") || !containsStr(order(r), "coder") {
+		t.Fatalf("the fallback must still compete: %v", order(r))
+	}
+	if why := rejected(r, "weak"); why == "" {
+		t.Fatalf("the model under the floor must be rejected: %v", r.Rejected)
+	}
+	// bulk has no quality metric at all: cost only, and no model carries a quality source
+	f.cl.Purpose = "bulk"
+	if r := f.rank(nil); len(r.Candidates) != 0 || len(r.Unranked) != 3 {
+		t.Fatalf("bulk has nothing to rank on quality: %v %v", order(r), r.Unranked)
+	}
+}
+
+// The coding composite uses the fixed weights 50/30/20 and renormalises over the sources a model has.
+func TestCodingCompositeRenormalisesOverTheSourcesItHas(t *testing.T) {
+	f := fixture(chat("all", 100, 300), chat("swe-only", 100, 300), chat("web-and-aider", 100, 300))
+	f.benchIn("all", "swebench", 0.8)
+	f.benchIn("all", "webdev", 0.6)
+	f.benchIn("all", "aider", 0.4)
+	f.benchIn("swe-only", "swebench", 0.5)
+	f.benchIn("web-and-aider", "webdev", 0.7)
+	f.benchIn("web-and-aider", "aider", 0.1)
+	f.cl.Purpose = "coding"
+	r := f.rank(nil) // balanced, so the median floor does not hide a model
+	got := map[string]Candidate{}
+	for _, c := range r.Candidates {
+		got[c.Model] = c
+	}
+	if v := got["all"].Bench; v < 0.65 || v > 0.67 { // 0.5*0.8 + 0.3*0.6 + 0.2*0.4 = 0.66
+		t.Fatalf("the full composite: %v", v)
+	}
+	if v := got["swe-only"].Bench; v != 0.5 {
+		t.Fatalf("a single source must renormalise to its own value: %v", v)
+	}
+	if v := got["web-and-aider"].Bench; v < 0.45 || v > 0.49 { // (0.3*0.7 + 0.2*0.1) / 0.5 = 0.46
+		t.Fatalf("two sources must renormalise over their weights: %v", v)
+	}
+	if got["all"].BenchSource != "aider, swebench, webdev" {
+		t.Fatalf("the panel must know which sources were used: %q", got["all"].BenchSource)
+	}
+}
+
+// ---- membership ----
+
+// A pool is explicit: only the models the owner picked are ranked, and every one that cannot serve says why.
+func TestPoolMembershipAndRejections(t *testing.T) {
 	dying := chat("dying", 100, 300)
 	t1 := now.Add(24 * time.Hour)
 	dying.SunsetAt = &t1
-	f := fixture(noTools, small, dying, chat("fine", 200, 600))
-	r := f.rank("text", nil)
-	if o := order(r); len(o) != 1 || o[0] != "fine" || len(r.Rejected) != 3 {
-		t.Fatalf("order=%v rejected=%v", o, r.Rejected)
+	sub := chat("sub", 100, 300)
+	sub.Subscriber = true
+	image := &catalog.Model{ID: "img", Endpoint: "images", Lines: []catalog.Line{{Unit: "image", IDR: 300}}}
+	f := fixture(chat("fine", 200, 600), dying, sub, image)
+	f.preset("fine", "dying", "sub", "img", "ghost")
+	r := f.rank(nil)
+	if got := order(r); len(got) != 1 || got[0] != "fine" {
+		t.Fatalf("order: %v", got)
 	}
-}
-
-func TestRoundRobinFrontGroupAndPriority(t *testing.T) {
-	f := fixture(chat("a", 100, 300), chat("b", 102, 304), chat("c", 5000, 15000))
-	f.cfg.Benchmarks = map[string]float64{"a": 70, "b": 70, "c": 70}
-	r := f.rank("text", nil)
-	if r.Front < 2 {
-		t.Fatalf("near-equal models should form a round-robin group, front=%d %v", r.Front, order(r))
+	want := map[string]string{
+		"ghost": "not in the kenari catalog",
+		"dying": "sunsets " + t1.Format("2006-01-02"),
+		"sub":   "subscriber only and the account has no plan",
+		"img":   "is a images model, not chat",
 	}
-	sh := f.cl.Presets["text"]
-	sh.Strategy = "priority"
-	f.cl.Presets["text"] = sh
-	if r := f.rank("text", nil); r.Front != 1 {
-		t.Fatalf("priority strategy must have front=1, got %d", r.Front)
-	}
-}
-
-func TestMediaPresetSortsByPriceFreeFirst(t *testing.T) {
-	paid := &catalog.Model{ID: "img-paid", Endpoint: "images", Lines: []catalog.Line{{Unit: "image", IDR: 300}}}
-	cheap := &catalog.Model{ID: "img-cheap", Endpoint: "images", Lines: []catalog.Line{{Unit: "image", IDR: 40}}}
-	free := &catalog.Model{ID: "img-free:free", Endpoint: "images", Free: true}
-	f := fixture(paid, cheap, free)
-	r := f.rank("image", nil)
-	if o := order(r); len(o) != 3 || o[0] != "img-free:free" || o[1] != "img-cheap" || o[2] != "img-paid" {
-		t.Fatalf("media order: %v", o)
-	}
-}
-
-func TestComboKeepsConfiguredOrder(t *testing.T) {
-	f := fixture(chat("a", 1, 1), chat("b", 1, 1))
-	f.cl.Presets["text"] = config.Preset{Modality: "chat", Mode: "combo", Models: []string{"b", "ghost", "a"}, Strategy: "priority", MaxCandidates: 4}
-	r := f.rank("text", nil)
-	if o := order(r); len(o) != 2 || o[0] != "b" || o[1] != "a" || len(r.Rejected) != 1 {
-		t.Fatalf("combo: %v %v", o, r.Rejected)
-	}
-}
-
-func TestUsageCostUsesCacheDiscountAndPlanFreeCache(t *testing.T) {
-	m := chat("m", 1000, 2000) // Rp/1M tokens; cached = 100
-	got := UsageCost(m, 1_000_000, 500_000, 800_000, false, now)
-	want := 200_000*1000.0/1e6 + 800_000*100.0/1e6 + 500_000*2000.0/1e6
-	if d := got - want; d > 1e-9 || d < -1e-9 {
-		t.Fatalf("got %v want %v", got, want)
-	}
-	if free := UsageCost(m, 1_000_000, 500_000, 800_000, true, now); free >= got {
-		t.Fatal("free cache must lower the cost")
-	}
-}
-
-func TestRankingListsEveryCallableModel(t *testing.T) {
-	f := fixture(chat("a", 100, 300), chat("b", 200, 600), chat("c", 300, 900))
-	f.cfg.Benchmarks = map[string]float64{"a": 70, "b": 70, "c": 70}
-	r := f.rank("text", nil)
-	if len(r.Models) != 3 {
-		t.Fatalf("the list needs every callable model: %v", r.Models)
-	}
-	// a preset has no model filters: every model the keys can call is a candidate
-	for _, m := range []string{"a", "b", "c"} {
-		found := false
-		for _, c := range r.Candidates {
-			if c.Model == m {
-				found = true
-			}
-		}
-		if !found {
-			t.Fatalf("model %s must be a candidate: %v", m, order(r))
+	for id, why := range want {
+		if got := rejected(r, id); got != why {
+			t.Errorf("%s: %q, want %q", id, got, why)
 		}
 	}
+	// with a plan the subscriber-only model is allowed
+	f.plan("sub")
+	if got := order(f.rank(nil)); len(got) != 2 {
+		t.Fatalf("a subscriber model is usable on a plan: %v", got)
+	}
 }
 
-func TestCostScoreFollowsRelativePrice(t *testing.T) {
-	f := fixture(chat("cheap", 1000, 4000), chat("mid", 1150, 4600), chat("dear", 3000, 12000))
-	f.cfg.Benchmarks = map[string]float64{"cheap": 60, "mid": 70, "dear": 70} // the pricier ones are a bit better
-	p := f.cl.Presets["text"]
-	p.Weights = config.Weights{Cost: 60, Benchmark: 10, Reliability: 15, Context: 5} // "Cheapest"
-	p.MinQuality = 0.3
-	f.cl.Presets["text"] = p
-	r := f.rank("text", nil)
-	if o := order(r); len(o) != 3 || o[0] != "cheap" || o[1] != "mid" || o[2] != "dear" {
-		t.Fatalf("Cheapest must follow the price: %v", o)
+// A model no key may call is rejected with that reason, and a model listed twice is ranked once.
+func TestKeysDecideUsability(t *testing.T) {
+	f := fixture(chat("allowed", 100, 300), chat("restricted", 100, 300))
+	f.pool.Keys()[0].SetAllowed([]string{"allowed"})
+	f.preset("allowed", "restricted", "allowed")
+	r := f.rank(nil)
+	if got := order(r); len(got) != 1 || got[0] != "allowed" {
+		t.Fatalf("order: %v", got)
 	}
-	cs := map[string]float64{}
+	if why := rejected(r, "restricted"); why != "no key of this client may call it" {
+		t.Fatalf("restricted: %q", why)
+	}
+}
+
+// A model listed twice in the pool appears once.
+func TestDuplicatePoolEntriesAreRankedOnce(t *testing.T) {
+	f := fixture(chat("a", 100, 300))
+	f.preset("a", "a")
+	if got := order(f.rank(nil)); len(got) != 1 {
+		t.Fatalf("order: %v", got)
+	}
+}
+
+// The list holds Routing.TopModels models, and Inputs.Top overrides it.
+func TestTopSizeComesFromRouting(t *testing.T) {
+	models := []*catalog.Model{}
+	ids := []string{}
+	for _, id := range []string{"a", "b", "c", "d", "e", "f"} {
+		models = append(models, chat(id, 100, 300))
+		ids = append(ids, id)
+	}
+	f := fixture(models...)
+	f.preset(ids...)
+	f.bench(map[string]float64{"a": 0.9, "b": 0.8, "c": 0.7, "d": 0.6, "e": 0.5, "f": 0.4})
+	f.cfg.Routing.TopModels = 3
+	if got := order(f.rank(nil)); len(got) != 3 {
+		t.Fatalf("top_models=3: %v", got)
+	}
+	if got := order(f.rank(func(in *Inputs) { in.Top = 2 })); len(got) != 2 {
+		t.Fatalf("Inputs.Top=2: %v", got)
+	}
+	// a config with no routing size falls back to ten
+	f.cfg.Routing.TopModels = 0
+	if got := order(f.rank(nil)); len(got) != 6 {
+		t.Fatalf("a pool smaller than the top must be listed whole: %v", got)
+	}
+}
+
+// ---- whole-run behaviour ----
+
+// Every preset of every enabled client is ranked, and the map key is client/preset.
+func TestAllRanksEveryPresetOfEveryEnabledClient(t *testing.T) {
+	f := fixture(chat("a", 100, 300))
+	f.cfg.Clients = append(f.cfg.Clients, config.Client{
+		Name: "off", Enabled: false, Purpose: "general",
+		Presets: map[string]config.Preset{"text": {Category: "chat", Optimization: "balanced", Models: []string{"a"}}},
+	})
+	f.cfg.Clients = append(f.cfg.Clients, config.Client{
+		Name: "img", Enabled: true, Purpose: "general",
+		Keys:    []config.Upstream{{Name: "k2", KeyEnv: "K2"}},
+		Presets: map[string]config.Preset{"image": {Category: "images", Optimization: "cheapest", Models: []string{"a"}}},
+	})
+	f.pool.Reload(f.cfg, map[string]string{"K": "s", "K2": "s"}, nil)
+	out := All(Inputs{Cfg: f.cfg, Snap: f.snap, Pool: f.pool, Now: now})
+	if len(out) != 2 {
+		t.Fatalf("rankings: %v", out)
+	}
+	if out[Key("c", "text")] == nil {
+		t.Fatal("the client's text preset must be ranked")
+	}
+	if r := out[Key("img", "image")]; r == nil || r.Category != "images" || r.Optimization != "cheapest" {
+		t.Fatalf("the image preset: %+v", r)
+	}
+	if out[Key("off", "text")] != nil {
+		t.Fatal("a disabled client must not be ranked")
+	}
+}
+
+// The ranking explains itself: every candidate carries its numbers, its billing class and a reason, and the
+// whole run is deterministic.
+func TestCandidatesCarryTheirExplanationAndTheRunIsDeterministic(t *testing.T) {
+	f := fixture(chat("b", 200, 600), chat("a", 100, 300))
+	f.bench(map[string]float64{"a": 0.5, "b": 0.5})
+	f.preset("b", "a")
+	r1, r2 := f.rank(nil), f.rank(nil)
+	if got, want := order(r1), order(r2); len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("two runs must agree: %v %v", got, want)
+	}
+	// equal scores are ordered by model id, so the order never depends on map iteration
+	if got := order(r1); got[0] != "a" || got[1] != "b" {
+		t.Fatalf("equal scores must break by id: %v", got)
+	}
+	for _, c := range r1.Candidates {
+		if c.Reason == "" || c.Billing == "" || c.BenchSource == "" {
+			t.Fatalf("a candidate without an explanation: %+v", c)
+		}
+	}
+	if r1.Client != "c" || r1.Preset != "text" || r1.Category != "chat" || r1.Purpose != "general" || !r1.Computed.Equal(now) {
+		t.Fatalf("ranking header: %+v", r1)
+	}
+}
+
+// A promo makes a model cheaper without making it look worse, and the list price is kept next to the
+// promo-effective one for the panel.
+func TestPromoIsAppliedToTheCostButNotToQuality(t *testing.T) {
+	promo := chat("promo", 63, 250) // listed price already includes a 90% discount
+	promo.Promo = &catalog.Promo{PercentOff: 90, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(7 * 24 * time.Hour)}
+	f := fixture(promo, chat("rival", 630, 2500))
+	f.bench(map[string]float64{"promo": 0.5, "rival": 0.5})
+	r := f.rank(nil)
+	got := map[string]Candidate{}
 	for _, c := range r.Candidates {
-		cs[c.Model] = c.Components["cost"]
+		got[c.Model] = c
 	}
-	// 1/(1+ln(cost/cheapest)): 15% dearer ~0.88, three times dearer ~0.48
-	if cs["cheap"] != 1 || cs["mid"] < 0.85 || cs["mid"] > 0.9 || cs["dear"] < 0.4 || cs["dear"] > 0.55 {
-		t.Fatalf("cost scores should fall smoothly with relative price: %v", cs)
+	if got["promo"].CostIDR >= got["rival"].CostIDR {
+		t.Fatalf("the promo model must be cheaper: %+v", got)
+	}
+	if got["promo"].Bench != got["rival"].Bench {
+		t.Fatalf("a discount must not change the benchmark: %+v", got)
+	}
+	if got["promo"].ListCostIDR >= got["promo"].CostIDR*10 {
+		t.Fatalf("the list price should be the undiscounted one: %+v", got["promo"])
 	}
 }
 
-func freeChat(id string) *catalog.Model {
-	m := chat(id, 0, 0)
-	m.Free = true
-	return m
-}
-
-// A model with no quality evidence is flagged, not locked out: the score
-// decides whether it serves, and the panel says its quality is a guess.
-func TestUnverifiedModelIsFlaggedButStillRanks(t *testing.T) {
-	f := fixture(freeChat("mystery:free"), chat("known", 500, 1500))
-	f.cfg.Benchmarks = map[string]float64{"known": 70}
-	r := f.rank("text", nil)
-	if o := order(r); len(o) != 2 {
-		t.Fatalf("both models must be in the list: %v", o)
+// A model with no price still competes: it is scored as a middle guess, never dropped, and its price stays
+// unknown rather than being reported as free.
+func TestUnpricedModelStillCompetes(t *testing.T) {
+	f := fixture(&catalog.Model{ID: "noprice", Endpoint: "chat"}, chat("priced", 100, 300))
+	f.optimize("cheapest")
+	r := f.rank(nil)
+	if len(r.Candidates) != 2 {
+		t.Fatalf("both models must compete: %v", order(r))
 	}
-	var mystery *Candidate
-	for i := range r.Candidates {
-		if r.Candidates[i].Model == "mystery:free" {
-			mystery = &r.Candidates[i]
-		}
-	}
-	if mystery == nil {
-		t.Fatal("the unverified model must be a candidate")
-	}
-	if !containsStr(mystery.Flags, "unverified") {
-		t.Fatalf("it must be marked as unverified: %+v", mystery.Flags)
-	}
-	// once the model has a score from a leaderboard, the flag is gone
-	f.cfg.Benchmarks["mystery:free"] = 65
-	r = f.rank("text", nil)
 	for _, c := range r.Candidates {
-		if c.Model == "mystery:free" && containsStr(c.Flags, "unverified") {
-			t.Fatalf("a scored model is no longer unverified: %+v", c.Flags)
+		if c.Model != "noprice" {
+			continue
+		}
+		if c.CostIDR != 0 {
+			t.Fatalf("an unknown price must not be reported as a number: %+v", c)
+		}
+		if c.Score != 0.4 {
+			t.Fatalf("an unknown price is a middle guess: %+v", c)
 		}
 	}
 }
 
-func TestObjectivesBehaveAsNamed(t *testing.T) {
-	free := freeChat("free-big:free")
-	free.FreeSibling = "big" // priced twin, so its quality can be estimated
-	f := fixture(free, chat("big", 6000, 24000), chat("mid", 1200, 4800), chat("small", 300, 1200))
-	f.cfg.Benchmarks = map[string]float64{"big": 92, "mid": 75, "small": 55, "free-big:free": 68}
-	obj := map[string]struct {
-		w config.Weights
-		q float64
-	}{
-		"cheapest": {config.Weights{Cost: 60, Benchmark: 10, Reliability: 15, Context: 5}, 0.30},
-		"balanced": {config.Weights{Cost: 30, Benchmark: 25, Reliability: 15, Context: 10}, 0.45},
-		"quality":  {config.Weights{Cost: 5, Benchmark: 40, Reliability: 15, Context: 10}, 0.60},
+// ---- billing ----
+
+// The billing class is free, then plan, then balance, and a free model is always free even on a plan.
+func TestBillingClassPrefersFreeThenPlanThenBalance(t *testing.T) {
+	f := fixture(freeChat("free:free"), chat("plan-a", 100, 300), chat("paid", 100, 300))
+	f.plan("plan-*")
+	r := f.rank(nil)
+	got := map[string]string{}
+	for _, c := range r.Candidates {
+		got[c.Model] = c.Billing
 	}
-	top := map[string]string{}
-	for name, o := range obj {
-		p := f.cl.Presets["text"]
-		p.Weights, p.MinQuality, p.Strategy = o.w, o.q, "priority"
-		f.cl.Presets["text"] = p
-		r := f.rank("text", nil)
-		top[name] = r.Candidates[0].Model
-		if name == "cheapest" && order(r)[len(order(r))-1] != "big" {
-			t.Fatalf("Cheapest must put the dearest model last: %v", order(r))
-		}
-		if name == "quality" && order(r)[0] == "small" {
-			t.Fatalf("Best quality must not lead with the weakest model: %v", order(r))
-		}
-	}
-	if top["cheapest"] != "free-big:free" {
-		t.Fatalf("Cheapest should take the free model that is good enough, got %s", top["cheapest"])
-	}
-	if top["quality"] != "big" {
-		t.Fatalf("Best quality should take the strongest model even though it is the dearest, got %s", top["quality"])
-	}
-	if top["balanced"] == "small" || top["balanced"] == "big" && false {
-		t.Fatalf("Balanced should not pick the weakest model: %s", top["balanced"])
+	if got["free:free"] != BillingFree || got["plan-a"] != BillingPlan || got["paid"] != BillingBalance {
+		t.Fatalf("billing classes: %v", got)
 	}
 }
 
-func TestStackedPlanAndPromoNeverBeatAFreeModelOfEqualQuality(t *testing.T) {
-	free := freeChat("free-ok:free")
-	free.FreeSibling = "x"
-	promo := chat("promo-plan", 100, 400)
-	promo.Promo = &catalog.Promo{PercentOff: 90, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(72 * time.Hour)}
-	f := fixture(free, promo)
-	f.snap.Plans = []catalog.Plan{{Name: "P", Scope: []string{"promo-plan"}}}
-	f.pool.Reload(f.cfg, map[string]string{"K": "s"}, nil)
-	// the plan is detected from kenari, not configured
-	f.pool.Keys()[0].Account().SetInfo(&upstream.PlanInfo{Name: "P", Windows: map[string]upstream.Window{}, Fetched: now}, f.pool.Keys()[0].Name)
-	f.cfg.Benchmarks = map[string]float64{"free-ok:free": 70, "promo-plan": 70}
-	p := f.cl.Presets["text"]
-	p.Weights, p.MinQuality = config.Weights{Cost: 60, Benchmark: 10, Reliability: 15, Context: 5}, 0.3
-	f.cl.Presets["text"] = p
-	r := f.rank("text", nil)
-	if len(r.Candidates) != 2 || r.Candidates[0].Model != "free-ok:free" {
-		t.Fatalf("the free model must lead: %+v", order(r))
+// ---- non-text categories ----
+
+// Every non-text category has one metric of its own, and the client's purpose must not change it: an image
+// preset is ranked on the image arena whoever owns it (ADR 0018).
+func TestMediaCategoriesUseTheirOwnArena(t *testing.T) {
+	cases := []struct{ category, preset, arena string }{
+		{"images", "image", "text_to_image"},
+		{"videos", "video", "text_to_video"},
+		{"audio_transcription", "stt", "asr"},
 	}
+	for _, c := range cases {
+		f := fixture()
+		f.cl.Purpose = "coding" // irrelevant for these categories
+		weak, strong := "weak-one", "strong-one"
+		f.snap.Models[weak] = &catalog.Model{ID: weak, Endpoint: c.category, Lines: []catalog.Line{{Unit: unitFor(c.category), IDR: 100}}}
+		f.snap.Models[strong] = &catalog.Model{ID: strong, Endpoint: c.category, Lines: []catalog.Line{{Unit: unitFor(c.category), IDR: 100}}}
+		f.cl.Presets = map[string]config.Preset{c.preset: {Category: c.category, Optimization: "best_quality", Models: []string{weak, strong}}}
+		f.benchIn(weak, c.arena, 0.2)
+		f.benchIn(strong, c.arena, 0.9)
+		in := Inputs{Cfg: f.cfg, Snap: f.snap, Pool: f.pool, Bench: f.benchScores, Now: now}
+		r := One(in, f.cl, c.preset, f.cl.Presets[c.preset])
+		// the weaker model is below the pool median, so Best Quality drops it with a reason; what matters here
+		// is that the arena was read at all, which the source of the surviving candidate proves
+		if len(r.Candidates) == 0 {
+			t.Fatalf("%s: no model was ranked on the %s arena: %+v", c.category, c.arena, r)
+		}
+		if r.Candidates[0].Model != strong {
+			t.Fatalf("%s: the better %s model must lead, got %v", c.category, c.arena, order(r))
+		}
+		if r.Candidates[0].BenchSource != c.arena {
+			t.Fatalf("%s: the score must come from the %s arena, got %q", c.category, c.arena, r.Candidates[0].BenchSource)
+		}
+	}
+}
+
+// TTS, music and System One have no public benchmark, so Best Quality has nothing to offer and says so.
+func TestCategoriesWithoutABenchmarkAreUnranked(t *testing.T) {
+	for _, c := range []struct{ category, preset, unit string }{
+		{"audio_speech", "tts", "1k_chars"},
+		{"music", "music", "song"},
+		{"systemone", "systemone", "token_1m"},
+	} {
+		f := fixture()
+		f.snap.Models["m1"] = &catalog.Model{ID: "m1", Endpoint: c.category, InIDR: 1000, OutIDR: 2000,
+			Lines: []catalog.Line{{Unit: c.unit, IDR: 100}}}
+		f.cl.Presets = map[string]config.Preset{c.preset: {Category: c.category, Optimization: "best_quality", Models: []string{"m1"}}}
+		in := Inputs{Cfg: f.cfg, Snap: f.snap, Pool: f.pool, Bench: f.benchScores, Now: now}
+		r := One(in, f.cl, c.preset, f.cl.Presets[c.preset])
+		if len(r.Candidates) != 0 || len(r.Unranked) != 1 {
+			t.Fatalf("%s: a category with no benchmark must report the model as unranked, got %+v", c.category, r)
+		}
+	}
+}
+
+// unitFor is the catalog price unit a category is billed in, for building fixtures.
+func unitFor(category string) string {
+	switch category {
+	case "images":
+		return "image"
+	case "videos", "audio_transcription":
+		return "second"
+	case "audio_speech":
+		return "1k_chars"
+	case "music":
+		return "song"
+	}
+	return "token_1m"
 }

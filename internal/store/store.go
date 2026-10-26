@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,6 +37,8 @@ type Request struct {
 	Attempt     int
 	RTKSaved    int
 	Err         string
+	Session     string // session id the request belonged to ("" when none)
+	Key         string // hint of the xellter API key the caller used (never the key itself)
 }
 
 // ModelStat is aggregated health of one model.
@@ -59,7 +62,7 @@ const schema = `
 CREATE TABLE IF NOT EXISTS requests(
  id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, client TEXT, preset TEXT, requested TEXT, model TEXT, upstream TEXT, path TEXT,
  status INTEGER, ok INTEGER, latency_ms INTEGER, ttft_ms INTEGER, in_tok INTEGER, out_tok INTEGER, cached_tok INTEGER,
- cost REAL, billing TEXT, stream INTEGER, attempt INTEGER, rtk_saved INTEGER, err TEXT);
+ cost REAL, billing TEXT, stream INTEGER, attempt INTEGER, rtk_saved INTEGER, err TEXT, session TEXT, api_key TEXT);
 CREATE INDEX IF NOT EXISTS req_ts ON requests(ts);
 CREATE INDEX IF NOT EXISTS req_model_ts ON requests(model, ts);
 CREATE INDEX IF NOT EXISTS req_up_ts ON requests(upstream, ts);
@@ -67,7 +70,7 @@ CREATE INDEX IF NOT EXISTS req_client_ts ON requests(client, ts);
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, exp INTEGER NOT NULL, ip TEXT, ua TEXT, created INTEGER);
 CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, upstream TEXT NOT NULL, ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);
-CREATE TABLE IF NOT EXISTS bench(model TEXT PRIMARY KEY, value REAL, rating REAL, lo REAL, hi REAL, arena TEXT, matched TEXT, date TEXT, votes REAL);
+CREATE TABLE IF NOT EXISTS bench(model TEXT NOT NULL, arena TEXT NOT NULL, value REAL, rating REAL, lo REAL, hi REAL, matched TEXT, date TEXT, votes REAL, PRIMARY KEY(model, arena));
 `
 
 // Open creates or opens the database in dir.
@@ -108,6 +111,32 @@ func Open(dir string) (*Store, error) {
 	if _, err := db.Exec(`DELETE FROM requests WHERE client='_system'`); err != nil {
 		return nil, err
 	}
+	// the session and api_key columns arrived with the rewrite: the panel's per-session and per-key views need them
+	for _, col := range []string{"session", "api_key"} {
+		if db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('requests') WHERE name=?`, col).Scan(&n) == nil && n == 0 {
+			if _, err := db.Exec(`ALTER TABLE requests ADD COLUMN ` + col + ` TEXT`); err != nil {
+				return nil, err
+			}
+		}
+	}
+	// the session index needs the column above, so it is created after the migration, not in the schema
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS req_session ON requests(session, ts)`); err != nil {
+		return nil, err
+	}
+	// the bench table became one row per (model, arena): a score from another source is a different fact, not a
+	// replacement. The old shape held one arena per model, so it is rebuilt rather than migrated.
+	if db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('bench') WHERE name='model'`).Scan(&n) == nil {
+		var pk int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('bench') WHERE pk>0`).Scan(&pk)
+		if pk < 2 {
+			if _, err := db.Exec(`DROP TABLE IF EXISTS bench`); err != nil {
+				return nil, err
+			}
+			if _, err := db.Exec(schema); err != nil {
+				return nil, err
+			}
+		}
+	}
 	s := &Store{db: db, logC: make(chan Request, 1024), stop: make(chan struct{})}
 	s.wg.Add(1)
 	go s.writer()
@@ -143,10 +172,10 @@ func (s *Store) writer() {
 			batch = batch[:0]
 			return
 		}
-		st, err := tx.Prepare(`INSERT INTO requests(ts,client,preset,requested,model,upstream,path,status,ok,latency_ms,ttft_ms,in_tok,out_tok,cached_tok,cost,billing,stream,attempt,rtk_saved,err) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		st, err := tx.Prepare(`INSERT INTO requests(ts,client,preset,requested,model,upstream,path,status,ok,latency_ms,ttft_ms,in_tok,out_tok,cached_tok,cost,billing,stream,attempt,rtk_saved,err,session,api_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 		if err == nil {
 			for _, r := range batch {
-				_, _ = st.Exec(r.TS, r.Client, r.Preset, r.Requested, r.Model, r.Upstream, r.Path, r.Status, b2i(r.OK), r.LatencyMS, r.TTFTMS, r.InTok, r.OutTok, r.CachedTok, r.CatalogCost, r.Billing, b2i(r.Stream), r.Attempt, r.RTKSaved, r.Err)
+				_, _ = st.Exec(r.TS, r.Client, r.Preset, r.Requested, r.Model, r.Upstream, r.Path, r.Status, b2i(r.OK), r.LatencyMS, r.TTFTMS, r.InTok, r.OutTok, r.CachedTok, r.CatalogCost, r.Billing, b2i(r.Stream), r.Attempt, r.RTKSaved, r.Err, r.Session, r.Key)
 			}
 			st.Close()
 		}
@@ -272,28 +301,43 @@ func (s *Store) ClientSpend(client string, since time.Time) (float64, error) {
 	return v.Float64, err
 }
 
-// UsageRow is one aggregate row for the dashboard.
+// UsageRow is one aggregate row: the dashboard's chart buckets and the usage drill-down (client, preset,
+// model, key) all use this shape. Only the fields of the requested grouping are filled.
 type UsageRow struct {
-	Key      string  `json:"key"`
+	Key      string  `json:"key,omitempty"` // the bucket or dimension value
+	Client   string  `json:"client,omitempty"`
+	Preset   string  `json:"preset,omitempty"`
+	Model    string  `json:"model,omitempty"`
+	APIKey   string  `json:"api_key,omitempty"`
+	Billing  string  `json:"billing,omitempty"`
 	Requests int     `json:"requests"`
 	Errors   int     `json:"errors"`
 	InTok    int64   `json:"in_tok"`
 	OutTok   int64   `json:"out_tok"`
+	Cached   int64   `json:"cached_tok"`
 	Cost     float64 `json:"cost_idr"`
 	AvgLat   float64 `json:"avg_latency_ms"`
 	RTKSaved int64   `json:"rtk_saved"`
 }
 
-// Usage groups requests by client, model, upstream, preset, hour, minute or day.
-func (s *Store) Usage(group string, since time.Time, client string) ([]UsageRow, error) {
-	col := map[string]string{"client": "client", "model": "model", "upstream": "upstream", "preset": "preset",
-		"hour":   "strftime('%Y-%m-%d %H:00', ts/1000, 'unixepoch')",
-		"minute": "strftime('%Y-%m-%d %H:%M', ts/1000, 'unixepoch')",
-		"day":    "strftime('%Y-%m-%d', ts/1000, 'unixepoch')"}[group]
+// Usage groups requests. group is one of client, model, upstream, preset, key, hour, minute, day, or
+// preset_model (one row per preset and model, which is the usage drill-down's last level). client and preset
+// filter the rows ("" = no filter).
+func (s *Store) Usage(group string, since time.Time, client, preset string) ([]UsageRow, error) {
+	col := map[string]string{
+		"client": "client", "model": "model", "upstream": "upstream", "preset": "preset", "key": "api_key",
+		"preset_model": "preset||'|'||model",
+		"hour":         "strftime('%Y-%m-%d %H:00', ts/1000, 'unixepoch')",
+		"minute":       "strftime('%Y-%m-%d %H:%M', ts/1000, 'unixepoch')",
+		"day":          "strftime('%Y-%m-%d', ts/1000, 'unixepoch')",
+	}[group]
 	if col == "" {
 		return nil, errors.New("bad group")
 	}
-	rows, err := s.db.Query(fmt.Sprintf(`SELECT %s k, COUNT(*), COUNT(*)-SUM(ok), COALESCE(SUM(in_tok),0), COALESCE(SUM(out_tok),0), COALESCE(SUM(cost),0), COALESCE(AVG(latency_ms),0), COALESCE(SUM(rtk_saved),0) FROM requests WHERE ts>=? AND (?='' OR client=?) GROUP BY k ORDER BY k`, col), since.UnixMilli(), client, client)
+	rows, err := s.db.Query(fmt.Sprintf(`SELECT %s k, COUNT(*), COUNT(*)-COALESCE(SUM(ok),0), COALESCE(SUM(in_tok),0),
+		COALESCE(SUM(out_tok),0), COALESCE(SUM(cached_tok),0), COALESCE(SUM(cost),0), COALESCE(AVG(latency_ms),0), COALESCE(SUM(rtk_saved),0)
+		FROM requests WHERE ts>=? AND (?='' OR client=?) AND (?='' OR preset=?) GROUP BY k ORDER BY k`,
+		col), since.UnixMilli(), client, client, preset, preset)
 	if err != nil {
 		return nil, err
 	}
@@ -302,10 +346,24 @@ func (s *Store) Usage(group string, since time.Time, client string) ([]UsageRow,
 	for rows.Next() {
 		var u UsageRow
 		var k sql.NullString
-		if err := rows.Scan(&k, &u.Requests, &u.Errors, &u.InTok, &u.OutTok, &u.Cost, &u.AvgLat, &u.RTKSaved); err != nil {
+		if err := rows.Scan(&k, &u.Requests, &u.Errors, &u.InTok, &u.OutTok, &u.Cached, &u.Cost, &u.AvgLat, &u.RTKSaved); err != nil {
 			return nil, err
 		}
 		u.Key = k.String
+		switch group {
+		case "client":
+			u.Client = u.Key
+		case "model":
+			u.Model = u.Key
+		case "preset":
+			u.Preset = u.Key
+		case "key":
+			u.APIKey = u.Key
+		case "preset_model":
+			if p, m, ok := strings.Cut(u.Key, "|"); ok {
+				u.Preset, u.Model = p, m
+			}
+		}
 		out = append(out, u)
 	}
 	return out, rows.Err()
@@ -459,9 +517,10 @@ func (s *Store) KVSet(k, v string) {
 
 // ---- benchmark scores (mapped from public leaderboards, see package bench) ----
 
-// BenchRow is the leaderboard score of one catalog model.
+// BenchRow is one published score of one catalog model in one arena. A model has several rows: one per
+// leaderboard it appears on (text, webdev, agent, text_to_image, swebench, ...).
 type BenchRow struct {
-	Value   float64 `json:"value"` // 0..1
+	Value   float64 `json:"value"` // 0..1, higher is better
 	Rating  float64 `json:"rating"`
 	Lo      float64 `json:"lo"`
 	Hi      float64 `json:"hi"`
@@ -472,7 +531,29 @@ type BenchRow struct {
 }
 
 // ReplaceBench swaps the whole score table.
-func (s *Store) ReplaceBench(rows map[string]BenchRow) error {
+func (s *Store) ReplaceBench(rows []BenchRow, model string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM bench WHERE model=?`, model); err != nil {
+		tx.Rollback()
+		return err
+	}
+	for _, r := range rows {
+		if _, err := tx.Exec(`INSERT INTO bench(model,arena,value,rating,lo,hi,matched,date,votes) VALUES(?,?,?,?,?,?,?,?,?)
+			ON CONFLICT(model,arena) DO UPDATE SET value=excluded.value, rating=excluded.rating, lo=excluded.lo, hi=excluded.hi,
+			matched=excluded.matched, date=excluded.date, votes=excluded.votes`,
+			model, r.Arena, r.Value, r.Rating, r.Lo, r.Hi, r.Matched, r.Date, r.Votes); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// ReplaceAllBench swaps every stored score in one transaction.
+func (s *Store) ReplaceAllBench(byModel map[string][]BenchRow) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -481,32 +562,103 @@ func (s *Store) ReplaceBench(rows map[string]BenchRow) error {
 		tx.Rollback()
 		return err
 	}
-	for m, r := range rows {
-		if _, err := tx.Exec(`INSERT INTO bench(model,value,rating,lo,hi,arena,matched,date,votes) VALUES(?,?,?,?,?,?,?,?,?)`, m, r.Value, r.Rating, r.Lo, r.Hi, r.Arena, r.Matched, r.Date, r.Votes); err != nil {
-			tx.Rollback()
-			return err
+	for model, rows := range byModel {
+		for _, r := range rows {
+			if _, err := tx.Exec(`INSERT INTO bench(model,arena,value,rating,lo,hi,matched,date,votes) VALUES(?,?,?,?,?,?,?,?,?)`,
+				model, r.Arena, r.Value, r.Rating, r.Lo, r.Hi, r.Matched, r.Date, r.Votes); err != nil {
+				tx.Rollback()
+				return err
+			}
 		}
 	}
 	return tx.Commit()
 }
 
-// Bench returns the stored leaderboard scores.
-func (s *Store) Bench() (map[string]BenchRow, error) {
-	rows, err := s.db.Query(`SELECT model,value,rating,lo,hi,arena,matched,date,votes FROM bench`)
+// Bench returns the stored scores, grouped model -> arena -> row.
+func (s *Store) Bench() (map[string]map[string]BenchRow, error) {
+	rows, err := s.db.Query(`SELECT model,arena,value,rating,lo,hi,matched,date,votes FROM bench`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[string]BenchRow{}
+	out := map[string]map[string]BenchRow{}
 	for rows.Next() {
 		var m string
 		var r BenchRow
-		var matched, date, arena sql.NullString
-		if err := rows.Scan(&m, &r.Value, &r.Rating, &r.Lo, &r.Hi, &arena, &matched, &date, &r.Votes); err != nil {
+		var matched, date sql.NullString
+		if err := rows.Scan(&m, &r.Arena, &r.Value, &r.Rating, &r.Lo, &r.Hi, &matched, &date, &r.Votes); err != nil {
 			return nil, err
 		}
-		r.Arena, r.Matched, r.Date = arena.String, matched.String, date.String
-		out[m] = r
+		r.Matched, r.Date = matched.String, date.String
+		if out[m] == nil {
+			out[m] = map[string]BenchRow{}
+		}
+		out[m][r.Arena] = r
 	}
 	return out, rows.Err()
+}
+
+// SessionUsage is what one session has done so far: the models it used and its token totals. A session is
+// pinned to one model, but the rows can span several when a model was evicted mid-session.
+type SessionUsage struct {
+	Session   string   `json:"session"`
+	Client    string   `json:"client"`
+	Preset    string   `json:"preset"`
+	Models    []string `json:"models"` // most recent last
+	Requests  int      `json:"requests"`
+	Errors    int      `json:"errors"`
+	InTok     int64    `json:"in_tok"`
+	OutTok    int64    `json:"out_tok"`
+	Cached    int64    `json:"cached_tok"`
+	Cost      float64  `json:"cost_idr"`
+	FirstTS   int64    `json:"first_ts"`
+	LastTS    int64    `json:"last_ts"`
+	LastModel string   `json:"last_model"`
+}
+
+// Session reads one session's traffic for a client.
+func (s *Store) Session(client, session string) (*SessionUsage, error) {
+	rows, err := s.db.Query(`SELECT preset, model, ok, in_tok, out_tok, cached_tok, cost, ts FROM requests
+		WHERE client=? AND session=? AND session!='' ORDER BY ts`, client, session)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	u := &SessionUsage{Session: session, Client: client}
+	seen := map[string]bool{}
+	for rows.Next() {
+		var preset, model sql.NullString
+		var ok, in, out, cached int64
+		var cost float64
+		var ts int64
+		if err := rows.Scan(&preset, &model, &ok, &in, &out, &cached, &cost, &ts); err != nil {
+			return nil, err
+		}
+		if u.Preset == "" {
+			u.Preset = preset.String // the session's preset: one per session, even if the model was evicted
+		}
+		u.Requests++
+		if ok == 0 {
+			u.Errors++
+		}
+		u.InTok += in
+		u.OutTok += out
+		u.Cached += cached
+		u.Cost += cost
+		if u.FirstTS == 0 {
+			u.FirstTS = ts
+		}
+		u.LastTS = ts
+		if model.String != "" && model.String != u.LastModel {
+			if !seen[model.String] {
+				seen[model.String] = true
+				u.Models = append(u.Models, model.String)
+			}
+			u.LastModel = model.String
+		}
+	}
+	if u.Requests == 0 {
+		return nil, nil
+	}
+	return u, rows.Err()
 }
