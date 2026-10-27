@@ -32,7 +32,10 @@ export function OverviewPage() {
   const toast = useToast()
 
   const load = React.useCallback(async () => {
-    const [o, u] = await Promise.all([api<Overview>('overview'), api<Usage>('usage?group=hour&hours=24')])
+    // The usage drill answers totals, rows and the hourly series: the cards and the
+    // chart both read it. /api/usage returns a bare array of buckets and has no totals,
+    // which left every number on this page at zero.
+    const [o, u] = await Promise.all([api<Overview>('overview'), api<Usage>('usage/drill?window=24h')])
     setData(o)
     setUsage(u)
   }, [])
