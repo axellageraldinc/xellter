@@ -43,6 +43,8 @@
 
 - The search path is one key and one endpoint. It is not a preset, so it has no ranking, no pool and no
   eviction: a failed search is one failed search.
+- A **successful** search appears in the client's usage as its own row (`x/search`, paid), because
+  kenari bills it from the balance. A failed search is not charged and therefore not counted as usage.
 - A pay-as-you-go key is only ever spent on the calls the client asked for.
 - The proxy answers a request for an endpoint it does not have with 404 and does not touch the upstream.
 - A model named directly is refused on an endpoint of another kind, like a preset is.

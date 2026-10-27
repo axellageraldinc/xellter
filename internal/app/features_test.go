@@ -166,6 +166,61 @@ func TestUnknownEndpointDoesNotReachTheModel(t *testing.T) {
 	}
 }
 
+// A successful search is traffic like any other: it shows up in the client's usage
+// as its own row, paid, because kenari bills it from the balance. A failed search is
+// not charged, so it must not appear.
+func TestSearchShowsInUsageOnlyWhenItSucceeds(t *testing.T) {
+	e := setup(t, func(c *config.Config) {
+		c.Clients[0].Keys = append(c.Clients[0].Keys, config.Upstream{Name: "X", KeyEnv: "KEY_X", Capability: "search"})
+	})
+	e.a.Pool.Reload(e.a.Cfg(), map[string]string{
+		"KEY_PLAN": "secret-plan", "KEY_TOPUP": "secret-topup", "KEY_LOCKED": "secret-locked",
+		"KEY_DIRECT": "secret-direct", "KEY_CODED": "secret-coded", "KENARI_ACCOUNT_KEY": "secret-account",
+		"KEY_X": "secret-x",
+	}, nil)
+
+	usage := func() string {
+		t.Helper()
+		resp, body := e.get(t, e.keyCl, "/v1/usage?range=24h")
+		if resp.StatusCode != 200 {
+			t.Fatalf("usage failed: %d %s", resp.StatusCode, body)
+		}
+		return body
+	}
+	before := usage()
+	if strings.Contains(before, "x/search") {
+		t.Fatalf("a search that never ran must not be in the usage: %s", before)
+	}
+
+	if r, body := e.post(t, e.keyCl, "/v1/x/search", `{"query":"news"}`); r.StatusCode != 200 {
+		t.Fatalf("search failed: %d %s", r.StatusCode, body)
+	}
+	e.a.St.Flush() // the log is written in the background
+
+	after := usage()
+	var got struct {
+		Data []struct {
+			Model       string `json:"model"`
+			BillingKind string `json:"billing_kind"`
+			Requests    int    `json:"requests"`
+			CostMicro   int64  `json:"cost_micro_idr"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(after), &got); err != nil {
+		t.Fatalf("cannot read the usage: %v", err)
+	}
+	for _, m := range got.Data {
+		if m.Model != "x/search" {
+			continue
+		}
+		if m.BillingKind != "payg" || m.Requests != 1 || m.CostMicro != 100_000_000 {
+			t.Fatalf("the search row is wrong: %+v", m)
+		}
+		return
+	}
+	t.Fatalf("a successful search must show in the usage: %s", after)
+}
+
 func TestAccountQuotaFromUnrestrictedKeyIsRead(t *testing.T) {
 	e := setup(t, nil)
 	reset := time.Now().Add(48 * time.Hour).UTC().Format(time.RFC3339)
