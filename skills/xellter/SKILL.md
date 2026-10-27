@@ -221,6 +221,25 @@ Session ids come from `X-Xellter-Session`, `X-Session-Id`, `X-Claude-Code-Sessio
 `prompt_cache_key` or `user`, or a hash of the opening messages. `GET /v1/session` answers 404
 `no_session` until the session has traffic, so a client can tell "not started" from "unknown".
 
+## Get the current model
+
+The model xellter actually routed to is in the request log, not the config. Two ways to check:
+
+**API (fastest, session-scoped):**
+```bash
+# Find your session id from X-Xellter-Session header or from the DB
+# Then query the session endpoint
+curl -s "$BASE/v1/session?session=$SID" -H "Authorization: Bearer $XL_KEY"
+```
+Returns pinned model, vendor, billing, context, tokens and cost for that session. Answers 404 `no_session` until traffic exists.
+
+**DB (full history, any client):**
+```bash
+sqlite3 ~/apps/xellter/data/xellter.db \
+  "SELECT session, model, client, ts FROM requests WHERE ok=1 ORDER BY ts DESC LIMIT 20;"
+```
+Or via Python for formatted output. Session IDs come from `X-Xellter-Session`, `X-Session-Id`, `X-Claude-Code-Session-Id`, the body's `prompt_cache_key` or `user`, or a hash of the opening messages.
+
 ## Migrate an old config
 
 ```bash
@@ -234,6 +253,8 @@ empty pool and every preset dropped for not being one of the seven fixed names. 
 untouched.
 
 ## Gotchas
+
+- **Always append model signature to replies.** Format: `— X-Xellter-<model-name>`. This lets Axell verify which model is answering without querying logs. Example: `— X-Xellter-agnes-2-5-flash:free`.
 
 - A config that still carries `rules`, `resilience`, `rtk`, `benchmarks` or a retired preset key
   (`weights`, `require`, `min_quality`, `max_candidates`, `strategy`, `rr_band`, `mode`,
