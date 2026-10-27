@@ -5,10 +5,10 @@
 - Deciders: maintainer
 
 ## Context
-A client reads its usage from the provider it is configured with. The first client to sit
-behind xellter knows two shapes: the session log of the agent it drives (`/api/sessions`, per
-session, the *preset* name as the model) and the provider's own
-usage endpoint (`/v1/usage`, per *real* model, with tokens, price and billing kind).
+A client reads its usage from the provider it is configured with. The first client to sit behind
+xellter knows two shapes: the session log of the agent it drives (`/api/sessions`, per session, the
+*preset* name as the model) and the provider's own usage endpoint (`/v1/usage`, per *real* model,
+with tokens, price and billing kind).
 
 When a client is pointed at kenari directly, it reads kenari's `/v1/usage` and shows every model
 that was really used. When the same client is pointed at xellter, that endpoint does not exist, so
