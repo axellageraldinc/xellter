@@ -55,10 +55,3 @@ export function ctx(n: number): string {
 export function pl(n: number, word: string): string {
   return `${n} ${word}${n === 1 ? '' : 's'}`
 }
-
-/** billingTone maps a billing kind to a badge tone. */
-export function billingTone(billing: string | undefined): 'success' | 'primary' | 'neutral' {
-  if (billing === 'free') return 'success'
-  if (billing === 'plan') return 'primary'
-  return 'neutral'
-}

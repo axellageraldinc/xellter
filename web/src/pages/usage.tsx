@@ -4,7 +4,6 @@ import { AlertTriangle, ArrowLeft, Coins, Wallet, Zap } from 'lucide-react'
 import { api } from '@/lib/api'
 import type { Usage } from '@/lib/types'
 import { idr, num } from '@/lib/format'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Table, TBody, TD, TH, THead, TR, Empty } from '@/components/ui/table'
@@ -12,6 +11,7 @@ import { Stat, StatRow } from '@/components/stat'
 import { Chart } from '@/components/chart'
 import { Page } from '@/components/shell'
 import { useToast } from '@/components/ui/toast'
+import { BillingBadge } from '@/components/billing-badge'
 
 /**
  * Usage is a drill-down: all clients, then one client, then its presets, then
@@ -165,11 +165,7 @@ export function UsagePage() {
                     <TD>
                       <span className="flex items-center gap-2">
                         <span className="mono">{r.label || r.key}</span>
-                        {r.billing && (
-                          <Badge tone={r.billing === 'free' ? 'success' : r.billing === 'plan' ? 'primary' : 'neutral'}>
-                            {r.billing}
-                          </Badge>
-                        )}
+                        {r.billing && <BillingBadge billing={r.billing} />}
                       </span>
                     </TD>
                     <TD className="tabular text-right">{num(r.requests)}</TD>

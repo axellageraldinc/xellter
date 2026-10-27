@@ -20,6 +20,7 @@ import { Field, Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table'
 import { useToast } from '@/components/ui/toast'
+import { BillingBadge } from '@/components/billing-badge'
 
 const OPTIMIZATIONS = [
   { value: 'cheapest', label: 'Cheapest', help: 'Price only: input, output, cache and promos.' },
@@ -202,9 +203,7 @@ export function PresetCard({
                     <TD className="tabular text-text-muted">{i + 1}</TD>
                     <TD className="mono">{c.model}</TD>
                     <TD>
-                      <Badge tone={c.billing === 'free' ? 'success' : c.billing === 'plan' ? 'primary' : 'neutral'}>
-                        {c.billing}
-                      </Badge>
+                      <BillingBadge billing={c.billing} />
                     </TD>
                     <TD className="tabular text-right">{c.score.toFixed(3)}</TD>
                     <TD className="max-w-xs text-xs text-text-muted">{c.reason}</TD>
@@ -406,7 +405,7 @@ function ModelPicker({
                                 onChange={(e) => toggle(m.id, e.target.checked)}
                               />
                               <span className="mono min-w-0 flex-1 truncate">{m.id}</span>
-                              {m.free && <Badge tone="success">free</Badge>}
+                              {m.callable && <BillingBadge billing={m.billing} />}
                               {m.promo_off > 0 && <Badge tone="warning">promo −{Math.round(m.promo_off)}%</Badge>}
                               {!m.callable && <Badge tone="danger">no key may call it</Badge>}
                               <span className="tabular w-14 shrink-0 text-right text-text-muted">{ctx(m.context)}</span>
