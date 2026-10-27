@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-26
-- Deciders: owner (Axell)
+- Deciders: maintainer
 - Supersedes: ADR 0003, ADR 0013, the scoring parts of ADR 0010
 
 ## Context

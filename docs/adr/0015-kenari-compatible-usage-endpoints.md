@@ -2,17 +2,17 @@
 
 - Status: Accepted
 - Date: 2026-10-25
-- Deciders: owner (Axell)
+- Deciders: maintainer
 
 ## Context
-The clients that talk to xellter (aixell, babu, polifin) read their usage from the provider
-they are configured with. The aixell web app knows two shapes: the session log of the Hermes
-agent (`/api/sessions`, per session, the *preset* name as the model) and the provider's own
+A client reads its usage from the provider it is configured with. The first client to sit
+behind xellter knows two shapes: the session log of the agent it drives (`/api/sessions`, per
+session, the *preset* name as the model) and the provider's own
 usage endpoint (`/v1/usage`, per *real* model, with tokens, price and billing kind).
 
-When a client is pointed at kenari directly, aixell reads kenari's `/v1/usage` and shows every
-model that was really used. When the same client is pointed at xellter, that endpoint does not
-exist, so the per-model view is gone: aixell falls back to the session log, where the model is
+When a client is pointed at kenari directly, it reads kenari's `/v1/usage` and shows every model
+that was really used. When the same client is pointed at xellter, that endpoint does not exist, so
+the per-model view is gone: the client falls back to the session log, where the model is
 the preset ("text"), and the real model behind it is invisible.
 
 The owner wants the per-model view to work through xellter, and wants the client to keep
@@ -40,7 +40,7 @@ receiving only what xellter sends: no change in the client at all.
 ## Consequences
 - A client that reads `/v1/usage` works against xellter unchanged: the same URL, the same JSON,
   the same units. Pointing it at xellter instead of kenari costs it nothing.
-- The per-model view in aixell shows the real models again, with the requests, the tokens and the
+- The per-model view in the client shows the real models again, with the requests, the tokens and the
   price of each one, split into free, plan and pay-as-you-go.
 - xellter's own numbers and kenari's may differ slightly: xellter counts the traffic it routed,
   kenari counts the traffic its key sent. A request that failed after reaching kenari is in both;

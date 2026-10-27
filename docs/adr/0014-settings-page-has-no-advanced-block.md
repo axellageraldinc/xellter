@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-25
-- Deciders: owner (Axell)
+- Deciders: maintainer
 
 ## Context
 ADR 0012 shrank the panel's client and preset surfaces, but the Settings page kept the shape it

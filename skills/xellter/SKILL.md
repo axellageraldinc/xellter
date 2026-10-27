@@ -27,7 +27,7 @@ it again when its promo ends (ADR 0022).
 
 ## When to Use
 
-- A client (Babu, aixell, polifin, …) needs an xellter key, a kenari key, or a preset.
+- A client (an app, an agent, …) needs an xellter key, a kenari key, or a preset.
 - The owner wants a preset cheaper, stronger, or wants a different model to answer.
 - Something is not routed as expected: the wrong model answers, a request 503s, a model is never used,
   a model keeps disappearing.
@@ -40,7 +40,7 @@ Panel -> **Clients** -> **New client**: name, purpose, optional kenari key. The 
 once — copy it then; only its sha256 is stored. Or:
 
 ```bash
-./bin/xellter client add -name babu -purpose coding -out data/babu.key
+./bin/xellter client add -name demo -purpose coding -out data/demo.key
 ```
 
 Purpose picks the text scoring sources and nothing else:
@@ -63,7 +63,7 @@ xellter probes kenari to learn which models it may call, and reads account, plan
 itself. Or:
 
 ```bash
-echo 'kn-...' | ./bin/xellter key add -client babu -name main
+echo 'kn-...' | ./bin/xellter key add -client demo -name main
 ```
 
 The value goes to `data/secrets.env` (0600); the YAML keeps only `key_env`. Rename moves the secret
@@ -188,7 +188,7 @@ Apply a change: the panel applies at once; a hand edit needs a restart
 
 ```bash
 ./bin/xellter check -config xellter.yaml     # validate
-./bin/xellter explain -client babu -preset text   # print the ranking and every reason
+./bin/xellter explain -client demo -preset text   # print the ranking and every reason
 ```
 
 ## Endpoints

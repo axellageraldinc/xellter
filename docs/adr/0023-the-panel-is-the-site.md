@@ -36,7 +36,7 @@ built with React, Vite, Tailwind and shadcn/ui.**
 
 - The panel answers every path that is not the API. The API is `/api/*`, the
   proxy is `/v1/*`, and `/healthz` is the proxy's. A deep link such as
-  `/clients/babu` loads the panel shell and the page works out the rest.
+  `/clients/demo` loads the panel shell and the page works out the rest.
 - The session cookie covers `/`, not one path.
 - The panel is built by Vite into static files that the Go binary embeds. The
   shipped artefact is still one file, and the browser still loads nothing from

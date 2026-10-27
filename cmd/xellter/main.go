@@ -251,7 +251,7 @@ func adminCmd(args []string) error {
 	fs := flag.NewFlagSet("admin init", flag.ExitOnError)
 	path := cfgPath(fs)
 	user := fs.String("username", "admin", "admin username")
-	from := fs.String("from-record", "", "reuse an existing record (for example aixell's auth-record.json)")
+	from := fs.String("from-record", "", "reuse an existing record (for example, one produced by another app)")
 	out := fs.String("credentials-out", "", "write the generated credentials to this file (mode 0600) instead of stdout")
 	force := fs.Bool("force", false, "replace an existing login: new password, new authenticator secret, all sessions ended")
 	_ = fs.Parse(args[1:])

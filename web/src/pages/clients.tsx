@@ -60,7 +60,7 @@ export function ClientsPage() {
           <CardContent className="py-10 text-center text-sm text-text-muted">Loading…</CardContent>
         ) : data.clients.length === 0 ? (
           <Empty>
-            No clients yet. A client is one app, for example “babu” or “aixell”.
+            No clients yet. A client is one app, for example “my-app” or “editor”.
           </Empty>
         ) : (
           <Table>
@@ -193,7 +193,7 @@ function AddClientDialog({
             <Input
               id="client-name"
               value={name}
-              placeholder="e.g. babu"
+              placeholder="e.g. my-app"
               onChange={(e) => setName(e.target.value)}
               autoFocus
             />

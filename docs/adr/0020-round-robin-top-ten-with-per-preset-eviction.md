@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-26
-- Deciders: owner (Axell)
+- Deciders: maintainer
 - Supersedes: the sticky/round-robin-band rules of ADR 0003
 
 ## Context

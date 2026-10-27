@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-26
-- Deciders: owner (Axell)
+- Deciders: maintainer
 
 ## Context
 One text preset per client means one quality signal, but the clients do different work: a coding agent and

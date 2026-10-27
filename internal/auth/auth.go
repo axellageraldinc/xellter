@@ -1,6 +1,6 @@
 // Package auth implements the admin login: scrypt password, TOTP second factor,
 // single-use recovery codes and brute-force rate limiting. The record format is
-// the same as aixell's auth-record.json, so an aixell record can be reused.
+// the same as the record the app it replaces used, so an existing record can be reused.
 package auth
 
 import (

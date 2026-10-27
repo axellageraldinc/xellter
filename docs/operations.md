@@ -5,14 +5,14 @@
 make build
 install -d -m 700 data
 ./bin/xellter admin init -credentials-out data/FIRST-LOGIN.txt     # username, password, TOTP secret, recovery codes
-./bin/xellter client add -name babu -out data/babu.key             # the xellter key the app will use
-echo 'kn-...' | ./bin/xellter key add -client babu -name main      # a kenari key for that client
+./bin/xellter client add -name demo -out data/demo.key             # the xellter key the app will use
+echo 'kn-...' | ./bin/xellter key add -client demo -name main      # a kenari key for that client
 ./bin/xellter serve
 ```
 The same can be done in the panel (Clients, Add client, Add key). `admin init -from-record <file>` reuses an existing login record instead of generating one.
 
 ## systemd (user)
-`~/infra/systemd/user/xellter.service` runs `bin/xellter serve -config xellter.yaml` from the project directory. After editing: `systemctl --user daemon-reload`. Logs: `journalctl --user -u xellter -f`.
+A user systemd unit `xellter.service` runs `bin/xellter serve -config xellter.yaml` from the project directory. After editing: `systemctl --user daemon-reload`. Logs: `journalctl --user -u xellter -f`.
 
 ## Tailscale
 ```bash

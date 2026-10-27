@@ -24,14 +24,14 @@ internal/route     rankings cache, round-robin ring, session pin, per-preset evi
 internal/proxy     data plane: auth, body rewrite, streaming relay, usage accounting, read-only endpoints
 internal/rtk       tool-output compression, always on, no configuration
 internal/bench     public leaderboards -> 0..1 per model and arena
-internal/auth      admin login: scrypt + TOTP + recovery codes (aixell-compatible record)
+internal/auth      admin login: scrypt + TOTP + recovery codes (an existing record can be reused)
 internal/admin     the panel: /api JSON API + the embedded React app (built by Vite, no CDN)
 internal/app       wiring + hot reload (Apply) + background loops
 web                the panel's source: React, Vite, Tailwind, shadcn/ui; builds into internal/admin/ui/dist
 ```
 
 ## Deploy
-User systemd unit `xellter.service` (`~/infra/systemd/user/`), listens on `127.0.0.1:8480`, exposed on the tailnet with `tailscale serve`. Runbook: `docs/operations.md`. Registry entry: `~/infra/REGISTRY.md`.
+User systemd unit `xellter.service`, listens on `127.0.0.1:8480`, exposed on the tailnet with `tailscale serve`. Runbook: `docs/operations.md`.
 
 ## Project rules
 - **The panel shows only what matters** (ADR 0012). A kenari key has a name and nothing else; xellter detects the account, plan, tier, limits and the models a key may call. The panel offers purpose, keys, and per preset the optimization plus the model picker. Anything else is edited in `xellter.yaml` (the Config tab edits the same file) — do not add a panel control for it. There is no Settings page and no "Advanced" block (ADR 0014).

@@ -300,7 +300,7 @@ counters. `/v1/usage` remains per model with `billing_kind` (`free`, `plan`, `pa
 ## Panel (`internal/admin`)
 
 The panel is the site: it is served at the root of its host and its JSON API is at `/api` (ADR 0023).
-The proxy keeps `/v1`, and `/healthz` is the proxy's. A deep link such as `/clients/babu` loads the
+The proxy keeps `/v1`, and `/healthz` is the proxy's. A deep link such as `/clients/demo` loads the
 panel shell and the page works out the rest.
 
 Routes: **Overview**, **Clients**, **Usage**, **Config file**. There is no Settings page: the few

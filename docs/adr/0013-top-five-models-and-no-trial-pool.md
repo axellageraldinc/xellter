@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-24
-- Deciders: owner (Axell)
+- Deciders: maintainer
 
 ## Context
 The ranking engine produced two lists. The main list held the best `max_candidates` models
@@ -12,7 +12,7 @@ had to earn its place by being judged or by serving well.
 
 In practice the trial pool did the opposite of what it was meant to do. A trial model was kept
 out of the main list because its quality was unknown, but the score it received was computed
-exactly like everybody else's. The live ranking for `babu/text` showed the effect:
+exactly like everybody else's. The live ranking for `demo/text` showed the effect:
 
 ```
  1. minimax-m3                 score 1.123

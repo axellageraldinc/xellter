@@ -2,10 +2,10 @@
 
 - Status: Accepted (supersedes the global `upstreams` + `presets` layout of the first build)
 - Date: 2026-10-24
-- Deciders: owner (Axell)
+- Deciders: maintainer
 
 ## Context
-The first build had a global pool of kenari keys, a global set of hand-configured presets, and clients that picked from both. It was hard to use: the owner thinks in terms of apps (Babu, aixell, polifin), each with its own key(s), and wants to see what each app can do and what it costs, not to configure routing tables.
+The first build had a global pool of kenari keys, a global set of hand-configured presets, and clients that picked from both. It was hard to use: the owner thinks in terms of apps, each with its own key(s), and wants to see what each app can do and what it costs, not to configure routing tables.
 
 ## Decision
 - The unit is the **client**. A client has its xellter key (hash only), one or more **kenari keys**, **presets**, an optional spending limit and a passthrough list. A client only ever uses its own keys.

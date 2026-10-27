@@ -112,7 +112,7 @@ func (h *Handler) shell(w http.ResponseWriter, r *http.Request) {
 }
 
 // static serves the panel's files. A path that is not a file is the panel
-// itself: the panel is a single-page app, so a deep link like /clients/babu
+// itself: the panel is a single-page app, so a deep link like /clients/demo
 // must load the shell and let the page work out the rest.
 func (h *Handler) static(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/")

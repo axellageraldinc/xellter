@@ -1,6 +1,6 @@
 # xellter rewrite — plan
 
-Status: accepted, in progress. Owner: Axell. Date: 2026-10-26.
+Status: accepted, in progress. Owner: maintainer. Date: 2026-10-26.
 Supersedes the ranking and routing parts of ADR 0003, 0010, 0013, 0016 and the panel rules of ADR 0012, 0014.
 
 ## Why
@@ -92,12 +92,12 @@ routing:     # the few knobs that survive
   avoid_sunset_days: 3
 
 clients:
-  - name: babu
+  - name: demo
     enabled: true
     purpose: general          # general | coding | agentic | vision | bulk
     keys:                     # kenari keys, secret in secrets.env
       - name: main
-        key_env: KENARI_KEY_BABU
+        key_env: KENARI_KEY_DEMO
     presets:                  # at most one per category
       text:
         category: chat
@@ -315,7 +315,7 @@ kenari says" sit next to each other.
 
 ## Migration
 
-The live server has three clients (babu, aixell, polifin) and four keys, one of them the read-only account
+The live server has three clients and four keys, one of them the read-only account
 key. The migration must not lose them.
 
 1. Load the current `xellter.yaml` with the current schema.

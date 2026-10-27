@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-24
-- Deciders: owner (Axell)
+- Deciders: maintainer
 
 ## Context
 The admin panel had grown a configuration surface that nobody used and nobody wanted:

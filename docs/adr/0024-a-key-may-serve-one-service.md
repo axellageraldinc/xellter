@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-27
-- Deciders: owner (Axell)
+- Deciders: maintainer
 
 ## Context
 

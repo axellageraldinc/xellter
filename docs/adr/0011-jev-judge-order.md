@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-24
-- Deciders: owner (Axell)
+- Deciders: maintainer
 
 ## Context
 Judging already ran as a chain: the configured judge, then every other free System One model in turn, so one judge being down at kenari never stopped a round. The panel only exposed the head of that chain as a dropdown ("First judge to try"), which hid the rest of the order: the owner could not see which judge would take over, could not put a second choice in front of an automatic one, and could not take a paid judge out of the middle of the chain. The UI suggested a single choice while the behaviour was a sequence.

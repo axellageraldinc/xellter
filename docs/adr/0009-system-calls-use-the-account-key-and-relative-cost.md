@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-24
-- Deciders: owner (Axell)
+- Deciders: maintainer
 
 ## Context
 1. The JEV judge picked "the first client key that could call both models", so a client's quota and logs paid for work that belongs to no client.

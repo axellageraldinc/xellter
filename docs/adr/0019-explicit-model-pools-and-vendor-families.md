@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-26
-- Deciders: owner (Axell)
+- Deciders: maintainer
 - Supersedes: the "generated presets" part of ADR 0008, the allow/deny rules of ADR 0012
 
 ## Context

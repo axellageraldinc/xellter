@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-24
-- Deciders: owner (Axell)
+- Deciders: maintainer
 
 ## Context
 9router (Node, Next.js 16, React 19) covers the idea but is heavy: a framework runtime, many providers, OAuth flows, cloud sync, a tunnel and an MITM bridge. We need something very light and very fast for a personal server whose only upstream is kenari.id.

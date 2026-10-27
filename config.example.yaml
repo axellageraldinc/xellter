@@ -28,18 +28,18 @@ routing:
 # A client is one app that calls xellter. It has its own kenari keys, one purpose
 # that decides how its text preset is scored, and at most one preset per category.
 clients:
-  - name: babu
+  - name: demo
     enabled: true
     purpose: general              # general | coding | agentic | vision | bulk
     key_hash: ""                  # sha256 of the xellter key; created by `xellter client add` or the panel
     keys:                         # kenari API keys of this client (values live in data/secrets.env)
       - name: main
-        key_env: KENARI_KEY_BABU_MAIN
+        key_env: KENARI_KEY_DEMO_MAIN
       # A key that serves one service instead of a model. `search` is the only capability:
       # it answers POST /v1/x/search, is never probed, never joins a pool and never serves
       # a model call, so a pay-as-you-go key is only spent on the calls the app asked for.
       # - name: X-search
-      #   key_env: KENARI_KEY_BABU_X_SEARCH
+      #   key_env: KENARI_KEY_DEMO_X_SEARCH
       #   capability: search
     presets:                      # one entry per category; the name is the model's name (ADR 0021)
       text:                       # chat   | image: images | video: videos

@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-24
-- Deciders: owner (Axell)
+- Deciders: maintainer
 
 ## Context
 The three objectives were hand-picked weights over a quality estimate that, for most models, was a price percentile. With 70+ callable models this produced nonsense: Cheapest and Balanced were identical, weak free models outranked strong paid ones, and Best quality led with free models. We looked for how the literature defines these trade-offs and for a benchmark source that covers every available model and updates itself.

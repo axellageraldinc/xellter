@@ -72,8 +72,8 @@ Found while rewriting the docs; not fixed here because the fix is code, not pros
 
 ## Rollout
 1. Run on the tailnet only; owner tests with curl and the panel.
-2. Move **polifin** first (smallest key, one model), then **aixell**, then **Babu**: change `base_url`
-   and key in each profile, keep the old direct key as a rollback.
+2. Move one app at a time, the smallest key first: change `base_url` and key in its profile, keep
+   the old direct key as a rollback.
 3. Watch Overview and Usage for a few days; adjust a preset's optimization or its pool.
 4. Open the public domain (`xellter.<your-domain>`) and flip the repo to public when the owner says so.
 
@@ -82,7 +82,7 @@ Found while rewriting the docs; not fixed here because the fix is code, not pros
 - Prometheus `/metrics`.
 - A second upstream provider (the catalog/route/proxy seams are provider-shaped but only kenari is
   implemented).
-- Weekly digest to Babu (discounts ending, new models, sunsets).
+- Weekly digest to the operator (discounts ending, new models, sunsets).
 - `benchmarks` coverage: more sources for TTS, music and System One, which are price-only today.
 
 ## Performance targets

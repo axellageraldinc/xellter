@@ -1,7 +1,7 @@
 # xellter
 
 A small LLM gateway in front of [kenari.id](https://kenari.id). An app calls an OpenAI-compatible
-endpoint with its own xellter key and asks for a **preset name** the owner chose (`chat`, `image`, …);
+endpoint with its own xellter key and asks for a **preset name** the owner chose (`text`, `image`, …);
 xellter picks a real model from that preset's pool, keeps one model per conversation, retries a
 failure once, and takes a model out of that preset after three errors. One static Go binary, SQLite,
 no runtime dependencies.
@@ -45,8 +45,8 @@ nothing there.
 make build                                     # -> bin/xellter (needs Go 1.27+)
 install -d -m 700 data
 ./bin/xellter admin init -credentials-out data/FIRST-LOGIN.txt
-./bin/xellter client add -name babu -out data/babu.key
-echo 'kn-...' | ./bin/xellter key add -client babu -name main
+./bin/xellter client add -name demo -out data/demo.key
+echo 'kn-...' | ./bin/xellter key add -client demo -name main
 ./bin/xellter serve                            # http://127.0.0.1:8480/
 ```
 
@@ -60,7 +60,7 @@ Upgrading an old config:
 
 ```bash
 curl http://127.0.0.1:8480/v1/chat/completions \
-  -H "Authorization: Bearer $(cat data/babu.key)" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $(cat data/demo.key)" -H 'Content-Type: application/json' \
   -d '{"model":"text","messages":[{"role":"user","content":"hello"}]}'
 ```
 

@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-26
-- Deciders: owner (Axell)
+- Deciders: maintainer
 - Supersedes: the JEV parts of ADR 0003, the account-key/system-call part of ADR 0009 and ADR 0011 in full
 
 ## Context

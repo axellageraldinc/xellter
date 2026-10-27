@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-24
-- Deciders: owner (Axell)
+- Deciders: maintainer
 
 ## Context
 1. The first build tracked rpm, free quota and plan spend per key and hard-coded the plan name in config. kenari documents these limits as **per account** (free quota resets 00:00 UTC), and exposes the real plan name, budgets, usage, reset times and balance at `GET /v1/account/quota` and `/v1/account/balance` for *unrestricted* keys only. The hard-coded plan was wrong for this account (guessed Indie, actual Kreator).

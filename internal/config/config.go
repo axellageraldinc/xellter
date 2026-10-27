@@ -84,7 +84,7 @@ type Upstream struct {
 	Capability string `yaml:"capability" json:"capability,omitempty"` // "" (a model key) | search
 }
 
-// Client is an app that calls xellter (Babu, aixell, polifin, ...). It has one
+// Client is an app that calls xellter (a chat app, an editor, ...). It has one
 // xellter API key (stored only as a hash), its own kenari keys, one purpose that
 // decides how its text preset is scored, and at most one preset per category.
 type Client struct {

@@ -2,7 +2,7 @@
 
 - Status: Accepted (the trial rule is superseded by ADR 0013)
 - Date: 2026-10-24
-- Deciders: owner (Axell)
+- Deciders: maintainer
 
 ## Context
 Clients should use a stable "preset" name while xellter picks the real model automatically: prefer free models, plan-covered models and discounted models, try promising new models, and for non-text modalities order by price. "Cheapest wins" is unsafe: cheap models can be bad (for example an English-only TTS model for Indonesian).
