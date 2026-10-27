@@ -169,26 +169,56 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listModels(w http.ResponseWriter, r *http.Request, cl *config.Client, p string) {
 	presets, real := s.rt.Models(cl)
+	// The list answers in the OpenAI shape, plus the fields a client needs to pick a model sensibly. Without
+	// context_length a client falls back to its own default, which is how a preset looked like a 1M-token model.
 	type item struct {
-		ID          string `json:"id"`
-		Object      string `json:"object"`
-		Created     int64  `json:"created"`
-		OwnedBy     string `json:"owned_by"`
-		Modality    string `json:"modality,omitempty"`
-		Description string `json:"description,omitempty"`
-		Preset      bool   `json:"preset,omitempty"`
+		ID            string `json:"id"`
+		Object        string `json:"object"`
+		Created       int64  `json:"created"`
+		OwnedBy       string `json:"owned_by"`
+		Modality      string `json:"modality,omitempty"`
+		Description   string `json:"description,omitempty"`
+		Preset        bool   `json:"preset,omitempty"`
+		ContextLength int    `json:"context_length,omitempty"`
+		ToolCall      bool   `json:"tool_call,omitempty"`
+		Vision        bool   `json:"vision,omitempty"`
+		Reasoning     bool   `json:"reasoning,omitempty"`
 	}
 	var data []item
 	for _, n := range presets {
 		sh := cl.Presets[n]
 		desc := sh.Optimization + " over " + fmt.Sprint(len(sh.Models)) + " models"
-		data = append(data, item{n, "model", s.startedAt.Unix(), "xellter", sh.Category, desc, true})
+		it := item{ID: n, Object: "model", Created: s.startedAt.Unix(), OwnedBy: "xellter", Modality: sh.Category,
+			Description: desc, Preset: true}
+		// A preset advertises what its pool can do: the smallest context any model in it has, and whether every
+		// model in it supports a feature. That is the honest answer for a name that may resolve to any of them.
+		if snap := s.cat.Snapshot(); snap != nil {
+			for i, id := range sh.Models {
+				m := snap.Models[id]
+				if m == nil {
+					continue
+				}
+				if i == 0 || (m.Context > 0 && (it.ContextLength == 0 || m.Context < it.ContextLength)) {
+					it.ContextLength = m.Context
+				}
+				if i == 0 {
+					it.ToolCall, it.Vision, it.Reasoning = m.ToolCall, m.Vision, m.Reasoning
+				} else {
+					it.ToolCall = it.ToolCall && m.ToolCall
+					it.Vision = it.Vision && m.Vision
+					it.Reasoning = it.Reasoning && m.Reasoning
+				}
+			}
+		}
+		data = append(data, it)
 	}
 	snap := s.cat.Snapshot()
 	for _, id := range real {
 		it := item{ID: id, Object: "model", Created: s.startedAt.Unix(), OwnedBy: "kenari"}
 		if snap != nil && snap.Models[id] != nil {
-			it.Modality = snap.Models[id].Endpoint
+			m := snap.Models[id]
+			it.Modality, it.ContextLength = m.Endpoint, m.Context
+			it.ToolCall, it.Vision, it.Reasoning = m.ToolCall, m.Vision, m.Reasoning
 		}
 		data = append(data, it)
 	}
