@@ -401,6 +401,7 @@ func (k *Key) Success(model string, now time.Time) {
 	k.mu.Lock()
 	k.fails = 0
 	k.lastOK = now
+	k.lastErr = "" // a success makes the previous failure history, not current state
 	delete(k.blockN, model)
 	delete(k.blocked, model)
 	a := k.acct

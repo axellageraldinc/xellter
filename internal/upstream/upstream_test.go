@@ -227,6 +227,27 @@ func TestBlockBackoffGrowsAndSuccessResets(t *testing.T) {
 	}
 }
 
+// A rejection that later succeeds must not stay in the panel: the key row shows
+// the last error as current state, so a success has to clear it.
+func TestSuccessClearsLastError(t *testing.T) {
+	k := key(t, config.Upstream{Name: "k", KeyEnv: "K"})
+	body := []byte(`{"error":{"code":"upstream_rejected","message":"the model's provider rejected the request."}}`)
+	k.Failure("x", 400, body, 0, now)
+	if st := k.Status(now); st.LastError == "" {
+		t.Fatal("a rejected request must be reported")
+	} else if st.LastOK.Equal(now) {
+		t.Fatal("a failure must not count as an OK")
+	}
+	k.Success("x", now.Add(time.Minute))
+	st := k.Status(now.Add(time.Minute))
+	if st.LastError != "" {
+		t.Fatalf("success must clear the last error, still %q", st.LastError)
+	}
+	if !st.LastOK.Equal(now.Add(time.Minute)) {
+		t.Fatalf("success must record the OK time, got %v", st.LastOK)
+	}
+}
+
 func TestSeededFromStoreAndLearnedAllowList(t *testing.T) {
 	st, err := store.Open(t.TempDir())
 	if err != nil {
