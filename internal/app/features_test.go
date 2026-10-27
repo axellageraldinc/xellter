@@ -43,6 +43,38 @@ func TestRoundRobinRotatesAndSessionsStick(t *testing.T) {
 	}
 }
 
+// The sticky toggle is per preset, and it reaches the request path: a preset
+// that does not stick serves the same session from a different model on the
+// next turn, while a sticky one holds its model.
+func TestTheStickyToggleIsPerPreset(t *testing.T) {
+	roaming := func(c *config.Config) {
+		c.Clients[0].Presets["text"] = config.Preset{Category: "chat", Optimization: "cheapest", Models: []string{"cheap-b", "pro-c"}, Sticky: new(false)}
+	}
+	e := setup(t, roaming)
+	seen := map[string]bool{}
+	for i := 0; i < 6; i++ {
+		r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "text"), "X-Xellter-Session", "s1")
+		seen[r.Header.Get("X-Xellter-Model")] = true
+	}
+	if len(seen) < 2 {
+		t.Fatalf("a preset that does not stick must route every turn again, used %v", seen)
+	}
+
+	// the same client, the same session, a sticky preset: one model only
+	e2 := setup(t, twoEqualModels)
+	first := ""
+	for i := 0; i < 6; i++ {
+		r, _ := e2.post(t, e2.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "text"), "X-Xellter-Session", "s1")
+		m := r.Header.Get("X-Xellter-Model")
+		if first == "" {
+			first = m
+		}
+		if m != first {
+			t.Fatalf("a sticky preset moved from %s to %s", first, m)
+		}
+	}
+}
+
 // A model that fails falls back to the next one in the list.
 func TestAFailingModelFallsBackToTheNext(t *testing.T) {
 	e := setup(t, nil)

@@ -172,7 +172,7 @@ func TestConfigPutAppliesARoutingKnob(t *testing.T) {
 		t.Fatalf("the routing knobs did not apply: %+v", after.Routing)
 	}
 	// the untouched knobs kept their default
-	if after.Routing.EvictCooldownMin != config.Default().Routing.EvictCooldownMin || !after.Routing.StickySession {
+	if after.Routing.EvictCooldownMin != config.Default().Routing.EvictCooldownMin {
 		t.Fatalf("an untouched knob changed: %+v", after.Routing)
 	}
 	// the change is on disk
@@ -529,6 +529,73 @@ func TestPresetSaveAndDelete(t *testing.T) {
 	}
 	if rec := do(t, h, c, http.MethodPost, "/api/presets", map[string]any{"client": "babu", "action": "delete", "preset": "image"}); rec.Code != http.StatusNotFound {
 		t.Fatalf("deleting it twice: %d", rec.Code)
+	}
+}
+
+// The sticky toggle is a per-preset setting: the panel reads it, saves it, and
+// a save that does not mention it leaves the preset as it was.
+func TestPresetStickyIsSavedAndRead(t *testing.T) {
+	a := newTestApp(t)
+	h := New(a)
+	c := sessionCookie(t, a)
+
+	// a preset that says nothing sticks
+	rec := do(t, h, c, http.MethodGet, "/api/client?name=babu", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("client detail: %d %s", rec.Code, rec.Body)
+	}
+	var view struct {
+		Presets []struct {
+			Name   string `json:"name"`
+			Sticky bool   `json:"sticky"`
+		} `json:"presets"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Presets) != 2 {
+		t.Fatalf("the client must have two presets: %+v", view.Presets)
+	}
+	for _, p := range view.Presets {
+		if !p.Sticky {
+			t.Fatalf("preset %q must stick until the owner says otherwise", p.Name)
+		}
+	}
+
+	// the owner turns it off
+	rec = do(t, h, c, http.MethodPost, "/api/presets", map[string]any{
+		"client": "babu", "action": "save", "preset": "text", "category": "chat",
+		"optimization": "balanced", "models": []string{"cheap-b"}, "sticky": false,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("save preset: %d %s", rec.Code, rec.Body)
+	}
+	p := a.Cfg().Clients[0].Presets["text"]
+	if p.IsSticky() {
+		t.Fatalf("the preset must not stick any more: %+v", p)
+	}
+	// and the change is on disk
+	b, err := os.ReadFile(a.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "sticky: false") {
+		t.Fatalf("the saved config does not carry the toggle:\n%s", b)
+	}
+
+	// a save that does not mention the toggle keeps it off
+	rec = do(t, h, c, http.MethodPost, "/api/presets", map[string]any{
+		"client": "babu", "action": "save", "preset": "text", "category": "chat",
+		"optimization": "cheapest", "models": []string{"cheap-b"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("save preset: %d %s", rec.Code, rec.Body)
+	}
+	if a.Cfg().Clients[0].Presets["text"].IsSticky() {
+		t.Fatal("a save that says nothing about the toggle must keep it off")
+	}
+	if a.Cfg().Clients[0].Presets["text"].Optimization != "cheapest" {
+		t.Fatal("the optimization was not saved")
 	}
 }
 

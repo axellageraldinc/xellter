@@ -49,7 +49,6 @@ type Plan struct {
 	// even when the attempts below start with a different model, because the proxy reports it to the client.
 	Model    string
 	Attempts []Attempt
-	Retried  bool // the first attempt is the same model as the session's pin
 }
 
 // Router holds rankings, the round-robin ring, the session pin and evictions.
@@ -66,6 +65,11 @@ type Router struct {
 	// with the rankings, so the request path never recomputes it.
 	poolsMu sync.RWMutex
 	pools   map[string][]string
+
+	// stickyPresets says for every preset whether a session keeps one model. It
+	// is rebuilt with the rankings, so the request path only reads it (ADR 0025).
+	stickyMu      sync.RWMutex
+	stickyPresets map[string]bool
 
 	rrMu sync.Mutex
 	rr   map[string]uint64 // per client+preset rotation counter
@@ -118,15 +122,22 @@ func (r *Router) Recompute(now time.Time) {
 	// The effective pool of every preset is rebuilt here, so the request path
 	// only reads it (ADR 0022).
 	pools := make(map[string][]string, len(m))
+	// The stickiness of every preset is rebuilt here too, so the request path
+	// only reads it (ADR 0025).
+	sticky := make(map[string]bool, len(m))
 	for i := range cfg.Clients {
 		cl := &cfg.Clients[i]
 		for name, sh := range cl.Presets {
 			pools[rank.Key(cl.Name, name)] = rank.EffectivePool(cfg, snap, r.pool, cl, sh, now)
+			sticky[rank.Key(cl.Name, name)] = sh.IsSticky()
 		}
 	}
 	r.poolsMu.Lock()
 	r.pools = pools
 	r.poolsMu.Unlock()
+	r.stickyMu.Lock()
+	r.stickyPresets = sticky
+	r.stickyMu.Unlock()
 }
 
 // effectivePool returns the cached pool of a preset.
@@ -182,7 +193,6 @@ func (r *Router) Models(cl *config.Client) (presets []string, real []string) {
 
 // Plan resolves the requested name for the client into the attempts to try, in order.
 func (r *Router) Plan(cl *config.Client, requested, session, path string, now time.Time) (*Plan, *Error) {
-	cfg := r.cfg.Load()
 	snap := r.cat.Snapshot()
 	if snap == nil {
 		return nil, &Error{503, "catalog_unavailable", "model catalog not loaded yet", 5 * time.Second}
@@ -212,7 +222,7 @@ func (r *Router) Plan(cl *config.Client, requested, session, path string, now ti
 		return nil, &Error{503, "no_candidates", fmt.Sprintf("preset %q has no usable model right now", requested), 30 * time.Second}
 	}
 	p := &Plan{Preset: requested, Requested: requested, Modality: sh.Category, Session: session}
-	order := r.order(cfg, cl, rk, session, now)
+	order := r.order(cl, rk, session, now)
 	if len(order) == 0 {
 		return nil, &Error{503, "all_evicted", fmt.Sprintf("every model of preset %q is cooling down after errors", requested), 60 * time.Second}
 	}
@@ -271,7 +281,9 @@ func (r *Router) pinModel(cl *config.Client, id, session, category string, now t
 
 // order returns the models to try, best first: the session's pinned model, then the round-robin ring over the
 // top list starting where the counter is, then the rest of the list. Evicted models are skipped.
-func (r *Router) order(cfg *config.Config, cl *config.Client, rk *rank.Ranking, session string, now time.Time) []string {
+//
+// A preset that does not stick has no pinned model: every request takes the next model of the ring.
+func (r *Router) order(cl *config.Client, rk *rank.Ranking, session string, now time.Time) []string {
 	var out []string
 	seen := map[string]bool{}
 	add := func(id string) {
@@ -284,11 +296,6 @@ func (r *Router) order(cfg *config.Config, cl *config.Client, rk *rank.Ranking, 
 		seen[id] = true
 		out = append(out, id)
 	}
-	if cfg.Routing.StickySession && session != "" {
-		if id := r.pinned(cl.Name, rk.Preset, session); id != "" {
-			add(id)
-		}
-	}
 	ids := make([]string, len(rk.Candidates))
 	for i, c := range rk.Candidates {
 		ids[i] = c.Model
@@ -298,6 +305,13 @@ func (r *Router) order(cfg *config.Config, cl *config.Client, rk *rank.Ranking, 
 	for _, c := range rk.Reserve {
 		ids = append(ids, c.Model)
 	}
+	// The pinned model goes first, so a sticky session stays on the model it
+	// started with.
+	if r.sticky(cl.Name, rk.Preset) && session != "" {
+		if id := r.pinned(cl.Name, rk.Preset, session); id != "" {
+			add(id)
+		}
+	}
 	if len(ids) > 0 {
 		off := int(r.next(cl.Name, rk.Preset) % uint64(len(ids)))
 		for i := range len(ids) {
@@ -305,6 +319,16 @@ func (r *Router) order(cfg *config.Config, cl *config.Client, rk *rank.Ranking, 
 		}
 	}
 	return out
+}
+
+// sticky reports whether the preset keeps one model per session. A preset that
+// is not in the map (it does not exist, or the map was not built yet) sticks,
+// as it always did (ADR 0025).
+func (r *Router) sticky(client, preset string) bool {
+	r.stickyMu.RLock()
+	defer r.stickyMu.RUnlock()
+	v, ok := r.stickyPresets[rank.Key(client, preset)]
+	return !ok || v
 }
 
 // next advances the round-robin counter of one preset and returns the previous value.
@@ -358,9 +382,9 @@ func (r *Router) keysFor(cl *config.Client, m *catalog.Model, snap *catalog.Snap
 }
 
 // Pin remembers the model a session is using, so every later request of that session goes there.
+// A preset that does not stick keeps no pin: every request takes the next model of the ring.
 func (r *Router) Pin(client, preset, session, model string, now time.Time) {
-	cfg := r.cfg.Load()
-	if !cfg.Routing.StickySession || session == "" {
+	if session == "" || !r.sticky(client, preset) {
 		return
 	}
 	r.smu.Lock()

@@ -117,6 +117,68 @@ func TestTwoSessionsDoNotShareAModel(t *testing.T) {
 	}
 }
 
+// A preset that does not stick routes every turn again: the same session moves
+// through the pool instead of holding one model.
+func TestANonStickyPresetRoutesEveryTurn(t *testing.T) {
+	r, cl := setup("a", "b", "c")
+	cl.Presets["text"] = config.Preset{Category: "chat", Optimization: "cheapest", Models: []string{"a", "b", "c"}, Sticky: new(false)}
+	r.SetConfig(r.cfg.Load())
+
+	seen := map[string]bool{}
+	for i := range 6 {
+		p, err := r.Plan(cl, "text", "same-session", "/v1/chat/completions", t0.Add(time.Duration(i)*time.Minute))
+		if err != nil {
+			t.Fatalf("plan: %v", err)
+		}
+		seen[p.Model] = true
+	}
+	if len(seen) != 3 {
+		t.Fatalf("a non-sticky preset must use every model of the pool, used %v", seen)
+	}
+	// and it keeps no pin at all
+	if m, _ := r.PinOf(cl.Name, "text", "same-session"); m != "" {
+		t.Fatalf("a non-sticky preset must not pin, pinned %s", m)
+	}
+}
+
+// The toggle is per preset: a client may hold a sticky preset and a roaming
+// one at the same time, and each behaves its own way.
+func TestStickyIsPerPreset(t *testing.T) {
+	r, cl := setup("a", "b")
+	cl.Presets["text"] = config.Preset{Category: "chat", Optimization: "cheapest", Models: []string{"a", "b"}}
+	cl.Presets["roam"] = config.Preset{Category: "chat", Optimization: "cheapest", Models: []string{"a", "b"}, Sticky: new(false)}
+	r.SetConfig(r.cfg.Load())
+
+	first, err := r.Plan(cl, "text", "s1", "/v1/chat/completions", t0)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	r.Pin(cl.Name, "text", "s1", first.Model, t0)
+	for i := range 4 {
+		p, err := r.Plan(cl, "text", "s1", "/v1/chat/completions", t0.Add(time.Duration(i+1)*time.Minute))
+		if err != nil {
+			t.Fatalf("plan: %v", err)
+		}
+		if p.Model != first.Model {
+			t.Fatalf("the sticky preset moved from %s to %s", first.Model, p.Model)
+		}
+	}
+	// the roaming preset of the same client moves the same session on
+	moved := false
+	for i := range 4 {
+		p, err := r.Plan(cl, "roam", "s1", "/v1/chat/completions", t0.Add(time.Duration(i+1)*time.Minute))
+		if err != nil {
+			t.Fatalf("plan: %v", err)
+		}
+		if p.Model != first.Model {
+			moved = true
+		}
+	}
+	if !moved {
+		t.Fatal("the roaming preset must not hold the session")
+	}
+}
+
 // Three errors inside the window take a model out of that preset only, and the next model takes over.
 func TestThreeErrorsEvictFromThatPresetOnly(t *testing.T) {
 	r, cl := setup("a", "b")

@@ -147,7 +147,7 @@ Rules:
 **Serving now** — the ranked list for the preset, in order: rank, model, billing class, score, and a
 one-line reason ("score 0.612 (cost 532.00, quality 0.83, plan) from text — balanced: 50% cost, 50%
 quality"). The order decides who goes first in the round-robin and who serves after an eviction.
-Every model in the list is used in turn; a session stays on the model it is pinned to.
+Every model in the list is used in turn; a sticky preset keeps a session on the model it is pinned to.
 
 **Out for now** — models evicted from this preset, with the moment each returns. Three failed attempts
 inside `evict_window_minutes` take a model out of **this preset only** for
@@ -167,7 +167,7 @@ errors, tokens and cost. This is the same data `GET /v1/session` returns to the 
 
 ## The `routing` knobs
 
-All seven live in `xellter.yaml` under `routing`. The panel does not edit them (it only displays the
+All six live in `xellter.yaml` under `routing`. The panel does not edit them (it only displays the
 refresh interval on a client page), so a change is a config edit or a `PUT /api/config`.
 
 | Knob | Default | Change it when |
@@ -178,10 +178,27 @@ refresh interval on a client page), so a change is a config edit or a `PUT /api/
 | `evict_window_minutes` | 60 | the failures are spread over a longer period than an hour |
 | `evict_cooldown_minutes` | 720 | a model should come back sooner than 12 h, or stay out longer |
 | `avoid_sunset_days` | 3 | you want to stop using models that retire earlier (5) or keep them until the end (0) |
-| `sticky_session` | true | almost never. Turning it off makes every request rotate, which loses provider cache warmth |
 
 `retry_once` is not a knob: a retriable failure (5xx, timeout, 429, network) always retries the same
 model once, then moves to the next model.
+
+## Sticky session (per preset)
+
+Whether a session keeps one model for its whole life is a **preset** setting, not a routing knob
+(ADR 0025). The old `routing.sticky_session` is refused on load.
+
+**Panel** -> the client -> the preset card -> **Sticky session**.
+
+| Setting | Meaning |
+|---|---|
+| on (default) | the first request picks a model and the session stays on it, so the provider's prompt cache stays warm |
+| off | every turn is routed again, so the traffic spreads over the whole pool |
+
+- It is per preset: one client can hold a sticky chat preset and a roaming bulk preset.
+- A preset that says nothing in the config sticks, so an old file keeps its behaviour.
+- A roaming preset keeps no pin, so `/v1/session` reports the last model it served, not a pinned one.
+- Turn it off for bulk traffic, where one model behind one key is a rate limit waiting to happen. Keep
+  it on for chat, where the conversation changes model halfway through otherwise.
 
 Apply a change: the panel applies at once; a hand edit needs a restart
 (`systemctl --user restart xellter` — never without the owner's permission).
@@ -199,7 +216,7 @@ Apply a change: the panel applies at once; a hand edit needs a restart
 | `POST /v1/images/*`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/videos`, `/v1/music` | media |
 | `GET /v1/videos/{id}` | a video job, always through the key that created it |
 | `GET /v1/models`, `/v1/models/{id}` | the client's presets plus the real models in its pools |
-| `GET /v1/session` | the pinned model, vendor, billing, context, tokens and cost of one session |
+| `GET /v1/session` | the pinned model (or the last model served, on a roaming preset), vendor, billing, context, tokens and cost of one session |
 | `GET /v1/usage?range=24h\|30d` | per model and billing kind, in kenari's shape |
 | `GET /v1/usage/keys` | per kenari key name (the key that actually served the request) |
 | `GET /v1/usage/models?preset=` | per preset and model |
@@ -248,9 +265,9 @@ Or via Python for formatted output. Session IDs come from `X-Xellter-Session`, `
 ```
 
 Keeps server, kenari, clients, keys, hashes and notes; purpose becomes `general`, optimization
-`balanced`, and each preset keeps its name and model list. The notes name every preset left with an
-empty pool and every preset dropped for not being one of the seven fixed names. Secrets are
-untouched.
+`balanced`, and each preset keeps its name and model list. The old global `routing.sticky_session`
+becomes the per-preset `sticky` flag. The notes name every preset left with an empty pool and every
+preset dropped for not being one of the seven fixed names. Secrets are untouched.
 
 ## Gotchas
 
@@ -259,6 +276,9 @@ untouched.
   (`weights`, `require`, `min_quality`, `max_candidates`, `strategy`, `rr_band`, `mode`,
   `cost_profile`, `description`) **fails to load** with a message naming ADR 0017. That is not a bug:
   run `xellter migrate`, or delete the section.
+- A config that still carries `routing.sticky_session` **fails to load** with a message naming
+  ADR 0025. Stickiness is a per-preset toggle now; run `xellter migrate`, which carries the old
+  switch over to the presets.
 - `passthrough`, `daily_budget_idr` and `seeded` are silently ignored — they no longer exist.
 - A new client has no presets and nothing to route to until you create one and tick models.
 - RTK is always on and only touches tool outputs. There is no switch and no header.

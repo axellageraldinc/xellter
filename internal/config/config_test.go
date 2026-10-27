@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +17,7 @@ func TestMinimalYAMLWorksAndDefaultsFill(t *testing.T) {
 		t.Fatalf("defaults missing: %+v", c.Clients[0].Keys[0])
 	}
 	// the routing constants keep their defaults, and a client with no purpose is general
-	if c.Routing.TopModels != 10 || c.Routing.EvictErrors != 3 || !c.Routing.StickySession {
+	if c.Routing.TopModels != 10 || c.Routing.EvictErrors != 3 {
 		t.Fatalf("routing defaults missing: %+v", c.Routing)
 	}
 	if c.Clients[0].Purpose != "general" {
@@ -205,5 +206,93 @@ func TestRetiredKeysAreRefused(t *testing.T) {
 		if !strings.Contains(err.Error(), "retired by the rewrite") {
 			t.Errorf("%s: error does not name the reason: %v", name, err)
 		}
+	}
+}
+
+// The global sticky knob is gone: stickiness is a per-preset toggle now, so a
+// file that still carries the old key is refused instead of being ignored.
+func TestTheGlobalStickyKnobIsRefused(t *testing.T) {
+	_, err := Parse([]byte("routing:\n  sticky_session: true\n"))
+	if err == nil {
+		t.Fatal("routing.sticky_session was accepted")
+	}
+	if !strings.Contains(err.Error(), "sticky_session") {
+		t.Fatalf("the error must name the knob: %v", err)
+	}
+}
+
+// A preset that says nothing about stickiness sticks, as it always did. A
+// preset that says `sticky: false` roams.
+func TestPresetStickyDefaultsToOn(t *testing.T) {
+	c, err := Parse([]byte("clients:\n  - name: x\n    presets:\n      text: {category: chat, optimization: balanced}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Clients[0].Presets["text"].IsSticky() {
+		t.Fatal("a preset that says nothing must stick")
+	}
+	roam, err := Parse([]byte("clients:\n  - name: x\n    presets:\n      text: {category: chat, optimization: balanced, sticky: false}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if roam.Clients[0].Presets["text"].IsSticky() {
+		t.Fatal("sticky: false must not stick")
+	}
+	stay, err := Parse([]byte("clients:\n  - name: x\n    presets:\n      text: {category: chat, optimization: balanced, sticky: true}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stay.Clients[0].Presets["text"].IsSticky() {
+		t.Fatal("sticky: true must stick")
+	}
+}
+
+// The panel reads the config as JSON and writes it back, so the toggle has to
+// survive that round trip: a preset that does not stick must not come back
+// sticky.
+func TestPresetStickySurvivesTheJSONRoundTrip(t *testing.T) {
+	c, err := Parse([]byte("clients:\n  - name: x\n    presets:\n      text: {category: chat, optimization: balanced, sticky: false}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := &Config{}
+	if err := json.Unmarshal(b, out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Clients[0].Presets["text"].IsSticky() {
+		t.Fatal("sticky: false must not come back sticky")
+	}
+	if out.Clients[0].Presets["text"].Sticky == nil {
+		t.Fatal("the flag must survive the round trip")
+	}
+}
+
+// The old global switch becomes the per-preset toggle, so a file that turned
+// stickiness off does not come back sticking after the migration.
+func TestMigrateCarriesTheOldStickySwitchOver(t *testing.T) {
+	off, _, err := Migrate([]byte("routing:\n  sticky_session: false\nclients:\n  - name: x\n    presets:\n      text: {modality: chat, models: [a]}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off.Clients[0].Presets["text"].IsSticky() {
+		t.Fatal("sticky_session: false must migrate to a preset that does not stick")
+	}
+	on, _, err := Migrate([]byte("routing:\n  sticky_session: true\nclients:\n  - name: x\n    presets:\n      text: {modality: chat, models: [a]}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !on.Clients[0].Presets["text"].IsSticky() {
+		t.Fatal("sticky_session: true must migrate to a preset that sticks")
+	}
+	silent, _, err := Migrate([]byte("clients:\n  - name: x\n    presets:\n      text: {modality: chat, models: [a]}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !silent.Clients[0].Presets["text"].IsSticky() {
+		t.Fatal("a file that never said anything must keep the sticky default")
 	}
 }

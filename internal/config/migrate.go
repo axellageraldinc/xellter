@@ -13,6 +13,11 @@ import (
 type legacyConfig struct {
 	Server  Server `yaml:"server"`
 	Kenari  Kenari `yaml:"kenari"`
+	Routing struct {
+		// StickySession is the rewrite-era global switch. It became a per-preset
+		// toggle (ADR 0025); the migration carries the intent over.
+		StickySession *bool `yaml:"sticky_session"`
+	} `yaml:"routing"`
 	Clients []struct {
 		Name    string `yaml:"name"`
 		Enabled bool   `yaml:"enabled"`
@@ -64,6 +69,11 @@ func Migrate(data []byte) (*Config, string, error) {
 				category = CategoryOfPreset(n)
 			}
 			p := Preset{Category: category, Optimization: "balanced", Models: append([]string(nil), op.Models...)}
+			// The old global switch becomes the per-preset toggle (ADR 0025). A file
+			// that never said anything keeps the sticky default.
+			if old.Routing.StickySession != nil {
+				p.Sticky = new(*old.Routing.StickySession)
+			}
 			cl.Presets[n] = p
 			if len(p.Models) == 0 {
 				notes = append(notes, fmt.Sprintf("client %s: preset %q has an empty pool; pick its models in the panel", cl.Name, n))

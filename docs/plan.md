@@ -23,6 +23,7 @@ decisions. Rollout and tuning continue (see "Next").
 | The panel moved to the site root | the panel is served at `/`, its API at `/api`, the proxy keeps `/v1`; the session cookie covers `/` | done (ADR 0023) |
 | Presets are named by the owner | the name is the model the app asks for; the category says what it serves; one preset per category still holds | done (ADR 0021) |
 | Free and discounted models are always in the pool | every free model and every running promo of the category is added to every preset of that category, and leaves it again when the promo ends | done (ADR 0022) |
+| Stickiness is a per-preset toggle | a preset keeps one model per session (the default) or routes every turn again; the global `routing.sticky_session` is refused on load | done (ADR 0025) |
 
 ## Earlier phases (first build)
 
@@ -66,7 +67,7 @@ Found while rewriting the docs; not fixed here because the fix is code, not pros
 | `rank_refresh_minutes: 0` | Validation accepts it and clamps a negative to it, but `app.Start` calls `time.NewTicker(0)` and panics at start-up. Either the loop must skip a zero interval or the schema must reject it |
 | The Cheapest halves follow `top_models` | The plan says five free + five plan-covered; the code uses `top/2` per half, which is 5 with the default `top_models: 10`. Lowering the knob lowers the halves too, which is consistent but not what the plan states |
 | No retry-once switch | The plan lists `routing.retry_once: true`; the code has no such key — retry-once is unconditional in the proxy. The docs describe the behaviour, not a knob |
-| Sticky is a boolean, not minutes | The plan lists `sticky_minutes: 0`; the code has `sticky_session: true`, i.e. a pin that never expires. Behaviour matches the intent |
+| Sticky is a boolean, not minutes | The plan lists `sticky_minutes: 0`; the code has a `sticky` flag on the preset (ADR 0025), i.e. a pin that never expires. Behaviour matches the intent |
 | Eviction does not promote a model | The plan says an evicted model "is replaced by the next model below the top 10". `route.order` only ever walks `rk.Candidates` (the top list), so an evicted model is skipped and the ring continues over the remaining candidates; nothing below the top list is promoted |
 | `/v1/usage/keys` keys on the kenari key | The plan calls it "usage broken down by xellter API key". The request row's `api_key` column holds the kenari key name (`at.Key.Label()`), so the endpoint splits by kenari key, not by the xellter key the client used. There is one xellter key per client, so the two coincide per client but not when a client has several kenari keys |
 

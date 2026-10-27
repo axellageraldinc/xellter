@@ -67,6 +67,8 @@ export type PresetView = {
   optimization_label: string
   models: string[]
   auto_models: string[]
+  /** A session keeps one model for its whole life. */
+  sticky: boolean
   ranking: Ranking | null
   evictions: Record<string, string>
 }
@@ -148,7 +150,6 @@ export type ClientDetail = {
     evict_window_minutes: number
     evict_cooldown_minutes: number
     avoid_sunset_days: number
-    sticky_session: boolean
   }
 }
 

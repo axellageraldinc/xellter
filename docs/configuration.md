@@ -15,11 +15,11 @@ server:   { listen, data_dir, secrets_file, admin_hosts, max_body_mb, log_retent
             trusted_proxy, session_hours, auth_record }
 kenari:   { base_url, sync_minutes, user_agent, first_byte_timeout_s, music_timeout_s, account_key_env }
 routing:  { rank_refresh_minutes, top_models, evict_errors, evict_window_minutes,
-            evict_cooldown_minutes, avoid_sunset_days, sticky_session }
+            evict_cooldown_minutes, avoid_sunset_days }
 clients[]:
   - { name, enabled, purpose, key_hash, key_hint, note,
       keys[]:    { name, key_env },
-      presets{}: { <preset name>: { category, optimization, models[] } } }
+      presets{}: { <preset name>: { category, optimization, models[], sticky } } }
 ```
 
 ## server
@@ -49,10 +49,10 @@ clients[]:
 
 ## routing
 
-The seven knobs that survived the rewrite. Everything a preset or a model decides is not here: the
-optimization lives on the preset, and RTK, retry-once, key cooldown, the breaker and the reference
-request are constants. The panel does not edit `routing`: change it in this file or through
-`PUT /api/config`.
+The six knobs that survived the rewrite. Everything a preset or a model decides is not here: the
+optimization and the stickiness live on the preset, and RTK, retry-once, key cooldown, the breaker
+and the reference request are constants. The panel does not edit `routing`: change it in this file or
+through `PUT /api/config`.
 
 | key | default | meaning |
 |---|---|---|
@@ -62,7 +62,6 @@ request are constants. The panel does not edit `routing`: change it in this file
 | `evict_window_minutes` | `60` | the window those failures are counted in; >= 1 |
 | `evict_cooldown_minutes` | `720` | how long the model stays out of that preset; >= 1 |
 | `avoid_sunset_days` | `3` | a model retiring sooner than this is rejected when ranking |
-| `sticky_session` | `true` | one model per session, for the life of the session (ADR 0020) |
 
 There is no way to switch the timer off: `0` is not a working value (see above). Rankings are always
 rebuilt after a catalog sync, after a config change and from the panel's Recalculate button.
@@ -121,6 +120,7 @@ client holds at most one preset per category, so a second preset of a kind is re
 | `category` | the kind of model the preset serves; required for a name that is not one of the suggested ones. A config written before ADR 0021 still loads: the old names keep their meaning |
 | `optimization` | `cheapest` \| `balanced` \| `best_quality`; empty means `balanced` |
 | `models` | the pool: explicit catalog model ids, no duplicates, no blanks. The optimization only orders what is listed here |
+| `sticky` | `true` keeps one model per session for the life of the session; `false` routes every turn again. Absent means `true`, so a config written before ADR 0025 keeps the behaviour it had |
 
 Every free model and every model whose promo is running is in the pool of every preset of that
 category, whether it is listed here or not (ADR 0022). The added models are the ones the client's
@@ -151,6 +151,7 @@ are otherwise ignored and a retired knob would look like it still works.
 | `presets.<name>.mode` | `auto` / `combo` — a preset is a pool plus an optimization |
 | `presets.<name>.cost_profile` | reference request — fixed per category |
 | `presets.<name>.description` | free text |
+| `routing.sticky_session` | the global switch — stickiness is a per-preset toggle now (ADR 0025) |
 
 Client-level `passthrough`, `daily_budget_idr` and `seeded` are **not** refused: they are silently
 ignored, so an old file still loads. Being in a preset's pool is the allow list now (ADR 0019), the
@@ -169,6 +170,10 @@ purpose becomes `general` and the optimization `balanced`. It reports every pres
 pool and every preset dropped because its name is not a fixed one. A preset whose stored `modality`
 contradicts its fixed name fails validation, and the command prints that error instead of writing.
 Secrets are untouched.
+
+The old global `routing.sticky_session` becomes the per-preset `sticky` flag (ADR 0025): a file that
+turned it off gets presets that do not stick, and a file that never said anything keeps the sticky
+default.
 
 A pool is only carried over when the old preset listed explicit models (a `combo`); an `auto` preset
 becomes an empty pool, so its models must be ticked in the panel before it serves. See "Known gaps" in

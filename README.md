@@ -2,9 +2,9 @@
 
 A small LLM gateway in front of [kenari.id](https://kenari.id). An app calls an OpenAI-compatible
 endpoint with its own xellter key and asks for a **preset name** the owner chose (`text`, `image`, …);
-xellter picks a real model from that preset's pool, keeps one model per conversation, retries a
-failure once, and takes a model out of that preset after three errors. One static Go binary, SQLite,
-no runtime dependencies.
+xellter picks a real model from that preset's pool, keeps one model per conversation unless the
+owner says otherwise, retries a failure once, and takes a model out of that preset after three
+errors. One static Go binary, SQLite, no runtime dependencies.
 
 ## The three optimizations
 
@@ -33,6 +33,10 @@ nothing there.
   retry once on a retriable error, then the next model, and three errors in an hour evict a model
   from that preset for 12 hours. Rankings rebuild every 5 minutes, after each catalog sync, and from
   the panel's Recalculate button.
+- **Sticky session, per preset.** A preset keeps one model for the whole conversation, so the
+  provider's prompt cache stays warm — that is the default. Turn the toggle off on a preset that
+  should spread its traffic: every turn is routed again, and the whole pool is used. One client can
+  hold a sticky preset and a roaming one at the same time.
 - **RTK.** Tool output (`git diff`, `grep`, `ls`, logs, oversized text) is compressed before it is
   sent. Always on, no switch.
 - **Plan numbers.** With an optional full-access account key, plan windows and balance come straight
@@ -49,7 +53,8 @@ accounting, and one row per client.
 ![Overview](docs/screenshots/overview.png)
 
 **A client** — its kenari keys with their live state, and its presets; the preset shows the models
-it may call, why the order is what it is, and the model it is serving right now.
+it may call, why the order is what it is, and the model it is serving right now. Each preset card
+carries the sticky-session toggle, next to its optimization and its pool.
 
 ![A client and its presets](docs/screenshots/client.png)
 

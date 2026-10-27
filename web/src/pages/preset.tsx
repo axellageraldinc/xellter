@@ -18,6 +18,7 @@ import {
 } from '@/components/ui/dialog'
 import { Field, Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Switch } from '@/components/ui/switch'
 import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table'
 import { useToast } from '@/components/ui/toast'
 import { BillingBadge } from '@/components/billing-badge'
@@ -53,12 +54,14 @@ export function PresetCard({
 }) {
   const [optimization, setOptimization] = React.useState(preset.optimization)
   const [models, setModels] = React.useState<string[]>(preset.models)
+  const [sticky, setSticky] = React.useState(preset.sticky)
   const [picking, setPicking] = React.useState(false)
   const [renaming, setRenaming] = React.useState(false)
   const toast = useToast()
 
   const dirty =
     optimization !== preset.optimization ||
+    sticky !== preset.sticky ||
     models.length !== preset.models.length ||
     [...models].sort().join('\n') !== [...preset.models].sort().join('\n')
   const ranking = preset.ranking
@@ -68,13 +71,22 @@ export function PresetCard({
   React.useEffect(() => {
     setOptimization(preset.optimization)
     setModels(preset.models)
-  }, [preset.optimization, preset.models])
+    setSticky(preset.sticky)
+  }, [preset.optimization, preset.models, preset.sticky])
 
   async function save() {
     try {
       await api('presets', {
         method: 'POST',
-        body: { client, action: 'save', preset: preset.name, category: preset.category, optimization, models },
+        body: {
+          client,
+          action: 'save',
+          preset: preset.name,
+          category: preset.category,
+          optimization,
+          models,
+          sticky,
+        },
       })
       toast.push('Preset saved')
       onChanged()
@@ -157,6 +169,24 @@ export function PresetCard({
               </Button>
             </div>
           </Field>
+        </div>
+
+        {/* One model per session, or a fresh one on every turn. */}
+        <div className="flex items-start justify-between gap-4 rounded-md border border-border bg-surface-muted/40 px-3 py-2.5">
+          <div className="min-w-0">
+            <div className="text-xs font-medium text-text-secondary">Sticky session</div>
+            <div className="mt-0.5 text-xs text-text-muted">
+              {sticky
+                ? 'A session keeps one model for its whole life, so the provider cache stays warm.'
+                : 'Every turn is routed again, so the traffic spreads over the whole pool.'}
+            </div>
+          </div>
+          <Switch
+            checked={sticky}
+            onCheckedChange={setSticky}
+            aria-label="Sticky session"
+            title={sticky ? 'Sticky session is on' : 'Sticky session is off'}
+          />
         </div>
 
         {/* The models that are free or discounted and that xellter put in the

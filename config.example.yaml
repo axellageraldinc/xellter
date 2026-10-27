@@ -23,7 +23,6 @@ routing:
   evict_window_minutes: 60        # ... counted inside this window
   evict_cooldown_minutes: 720     # ... and the model is skipped for this long
   avoid_sunset_days: 3            # a model retiring sooner than this is not offered
-  sticky_session: true            # one model per session, for the life of the session
 
 # A client is one app that calls xellter. It has its own kenari keys, one purpose
 # that decides how its text preset is scored, and at most one preset per category.
@@ -46,6 +45,7 @@ clients:
         category: chat            # tts: audio_speech | stt: audio_transcription
         optimization: balanced    # music: music | systemone: systemone
         models: []                # the pool, picked in the panel; the optimization only orders it
+        sticky: true              # one model per session; false routes every turn again (ADR 0025)
     # A second preset of the same category is refused: a client holds one of each.
     # Every free and discounted model of the category is in the pool on its own (ADR 0022).
     # optimization: cheapest | balanced | best_quality

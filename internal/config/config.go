@@ -61,13 +61,12 @@ type Kenari struct {
 // Routing is the small set of knobs that survived the rewrite. Everything a
 // preset or a model decides is not here.
 type Routing struct {
-	RankRefreshMinutes int  `yaml:"rank_refresh_minutes" json:"rank_refresh_minutes"` // 0 = never refresh on a timer
-	TopModels          int  `yaml:"top_models" json:"top_models"`                     // how many models a preset routes against
-	EvictErrors        int  `yaml:"evict_errors" json:"evict_errors"`                 // errors that take a model out of a preset
-	EvictWindowMin     int  `yaml:"evict_window_minutes" json:"evict_window_minutes"`
-	EvictCooldownMin   int  `yaml:"evict_cooldown_minutes" json:"evict_cooldown_minutes"`
-	AvoidSunsetDays    int  `yaml:"avoid_sunset_days" json:"avoid_sunset_days"`
-	StickySession      bool `yaml:"sticky_session" json:"sticky_session"` // one model per session (ADR 0020)
+	RankRefreshMinutes int `yaml:"rank_refresh_minutes" json:"rank_refresh_minutes"` // 0 = never refresh on a timer
+	TopModels          int `yaml:"top_models" json:"top_models"`                     // how many models a preset routes against
+	EvictErrors        int `yaml:"evict_errors" json:"evict_errors"`                 // errors that take a model out of a preset
+	EvictWindowMin     int `yaml:"evict_window_minutes" json:"evict_window_minutes"`
+	EvictCooldownMin   int `yaml:"evict_cooldown_minutes" json:"evict_cooldown_minutes"`
+	AvoidSunsetDays    int `yaml:"avoid_sunset_days" json:"avoid_sunset_days"`
 }
 
 // Upstream is one kenari API key of a client. Only a name and the secret
@@ -107,7 +106,15 @@ type Preset struct {
 	Category     string   `yaml:"category" json:"category"`         // chat | images | videos | audio_speech | audio_transcription | music | systemone
 	Optimization string   `yaml:"optimization" json:"optimization"` // cheapest | balanced | best_quality
 	Models       []string `yaml:"models" json:"models"`             // the pool, chosen in the panel
+	// Sticky says whether a session keeps one model for its whole life. A preset
+	// that never said anything sticks, as it always did (ADR 0025).
+	Sticky *bool `yaml:"sticky,omitempty" json:"sticky,omitempty"`
 }
+
+// IsSticky reports whether the preset keeps one model for the whole session.
+// A preset that does not say sticks: that is how it behaved before the toggle
+// existed (ADR 0025).
+func (p Preset) IsSticky() bool { return p.Sticky == nil || *p.Sticky }
 
 // Categories are the endpoint kinds a preset can serve, in display order.
 var Categories = []string{"chat", "images", "videos", "audio_speech", "audio_transcription", "music", "systemone"}
@@ -159,7 +166,7 @@ func Default() *Config {
 		},
 		Routing: Routing{
 			RankRefreshMinutes: 5, TopModels: 10, EvictErrors: 3, EvictWindowMin: 60,
-			EvictCooldownMin: 720, AvoidSunsetDays: 3, StickySession: true,
+			EvictCooldownMin: 720, AvoidSunsetDays: 3,
 		},
 	}
 }
@@ -202,7 +209,10 @@ func checkRetired(data []byte) error {
 		Resilience any `yaml:"resilience"`
 		RTK        any `yaml:"rtk"`
 		Benchmarks any `yaml:"benchmarks"`
-		Clients    []struct {
+		Routing    struct {
+			StickySession *bool `yaml:"sticky_session"`
+		} `yaml:"routing"`
+		Clients []struct {
 			Presets map[string]map[string]any `yaml:"presets"`
 		} `yaml:"clients"`
 	}
@@ -215,6 +225,9 @@ func checkRetired(data []byte) error {
 		if val != nil {
 			return fmt.Errorf("%s: retired by the rewrite (ADR 0017); routing rules are constants and RTK is always on, see docs/rewrite-plan.md", key)
 		}
+	}
+	if probe.Routing.StickySession != nil {
+		return fmt.Errorf("routing.sticky_session: retired (ADR 0025); stickiness is a per-preset toggle now, set `sticky: false` on the preset")
 	}
 	for _, cl := range probe.Clients {
 		for name, p := range cl.Presets {

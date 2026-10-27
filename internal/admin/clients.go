@@ -401,6 +401,9 @@ func clonePresets(m map[string]config.Preset) map[string]config.Preset {
 	out := make(map[string]config.Preset, len(m))
 	for k, v := range m {
 		v.Models = append([]string{}, v.Models...)
+		if v.Sticky != nil {
+			v.Sticky = new(*v.Sticky)
+		}
 		out[k] = v
 	}
 	return out
@@ -691,6 +694,7 @@ type presetView struct {
 	OptimizationLabel string               `json:"optimization_label"`
 	Models            []string             `json:"models"`
 	AutoModels        []string             `json:"auto_models"` // free and promo models xellter added on its own
+	Sticky            bool                 `json:"sticky"`      // a session keeps one model for its whole life
 	Ranking           *rank.Ranking        `json:"ranking"`
 	Evictions         map[string]time.Time `json:"evictions"`
 }
@@ -735,7 +739,8 @@ func (h *Handler) clientDetail(w http.ResponseWriter, r *http.Request) {
 		presets = append(presets, presetView{
 			Name: n, Category: p.Category, Label: categoryLabel[p.Category],
 			Optimization: p.Optimization, OptimizationLabel: optimizationLabel[p.Optimization],
-			Models: append([]string{}, p.Models...), AutoModels: auto, Ranking: rk[rank.Key(cl.Name, n)],
+			Models: append([]string{}, p.Models...), AutoModels: auto, Sticky: p.IsSticky(),
+			Ranking:   rk[rank.Key(cl.Name, n)],
 			Evictions: h.a.Rt.Evictions(cl.Name, n, now),
 		})
 	}
@@ -763,9 +768,10 @@ func (h *Handler) presets(w http.ResponseWriter, r *http.Request) {
 		Category     string   `json:"category"`
 		Optimization string   `json:"optimization"`
 		Models       []string `json:"models"`
+		Sticky       *bool    `json:"sticky"` // absent keeps what the preset has
 	}
 	if r.Method != http.MethodPost || readJSON(r, &in) != nil {
-		jerr(w, 400, "POST {client, action, preset, category, optimization, models}")
+		jerr(w, 400, "POST {client, action, preset, category, optimization, models, sticky}")
 		return
 	}
 	next := cloneConfig(h.a.Cfg())
@@ -804,7 +810,11 @@ func (h *Handler) presets(w http.ResponseWriter, r *http.Request) {
 			seen[m] = true
 			models = append(models, m)
 		}
-		cl.Presets[name] = config.Preset{Category: category, Optimization: opt, Models: models}
+		sticky := cl.Presets[name].Sticky
+		if in.Sticky != nil {
+			sticky = new(*in.Sticky)
+		}
+		cl.Presets[name] = config.Preset{Category: category, Optimization: opt, Models: models, Sticky: sticky}
 	case "rename":
 		newName := strings.TrimSpace(in.NewName)
 		if newName == "" {

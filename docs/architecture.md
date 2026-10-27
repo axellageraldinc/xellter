@@ -6,7 +6,7 @@ client ──(xl-… key)──▶ proxy ──▶ router ──▶ upstream key
                          │          ├─ rankings ◀───┤ catalog (models, prices, promos, plans)
                          │          │                └ store (leaderboard scores)
                          │          ├─ round-robin ring + session pins + evictions
-                         │          └─ one preset = a pool of models + one optimization
+                         │          └─ one preset = a pool of models + one optimization + sticky or roaming
                          └─ RTK (always on), usage accounting, request log (SQLite, async)
 admin panel ──▶ app.Apply(config) ──▶ hot reload of pool, router, proxy
 ```
@@ -16,8 +16,9 @@ ADR [0017](adr/0017-three-optimizations.md), [0018](adr/0018-client-purpose-chan
 [0019](adr/0019-explicit-model-pools-and-vendor-families.md),
 [0020](adr/0020-round-robin-top-ten-with-per-preset-eviction.md),
 [0021](adr/0021-preset-names-are-the-owners.md),
-[0022](adr/0022-free-and-discounted-models-are-always-in-the-pool.md) and
-[0023](adr/0023-the-panel-is-the-site.md).
+[0022](adr/0022-free-and-discounted-models-are-always-in-the-pool.md),
+[0023](adr/0023-the-panel-is-the-site.md) and
+[0025](adr/0025-sticky-is-a-per-preset-toggle.md).
 
 ## Components
 
@@ -102,9 +103,9 @@ otherwise an ignored key would look like it still works. `xellter migrate` conve
    The ranking also reports a **reserve**: the pool members the list size pushed out, in the
    optimization's own order. They sit at the end of the ring, so an evicted model is replaced by the next
    best one instead of shrinking the list.
-9. **Success.** Pin the session to the model, stream the response, add `X-Xellter-Model` and
-   `X-Xellter-Attempt`, compute the cost at catalog prices, log metadata (async) and update the
-   account ledger and the client's spend counter.
+9. **Success.** Pin the session to the model (a preset that does not stick keeps no pin, ADR 0025),
+   stream the response, add `X-Xellter-Model` and `X-Xellter-Attempt`, compute the cost at catalog
+   prices, log metadata (async) and update the account ledger and the client's spend counter.
 
 `X-Xellter-Attempts` is set on the error response when every attempt failed. The upstream's own error
 body and status are relayed when one is available.
@@ -235,10 +236,11 @@ reason; every model left out carries a reason too. `xellter explain` prints the 
 
 Four rules, in this order.
 
-1. **Session pin.** With `routing.sticky_session` on (the default), the first successful request pins
-   the session to one model and every later request of that session uses it. There is no expiry: a
-   session moves only when its model is evicted. Pins are in memory; when the map passes 20 000
-   entries, pins older than a day are dropped.
+1. **Session pin.** A sticky preset (the default, ADR 0025) pins the session to one model: the first
+   successful request picks the model, and every later request of that session uses it. There is no
+   expiry: a session moves only when its model is evicted. A preset with `sticky: false` keeps no
+   pin, and every turn is routed again. Pins are in memory; when the map passes 20 000 entries, pins
+   older than a day are dropped.
 2. **Round-robin ring.** A fresh session takes the next model in the preset's ring, which runs over
    the whole top list. The counter is per client and preset, so two presets never share one. Every
    model in the list is used in turn.
@@ -310,7 +312,7 @@ remaining knobs live in `xellter.yaml` and the Config tab edits that file (ADR 0
 |---|---|
 | Overview | status banner with alerts, 24 h requests / failures / cost at list price / characters saved by RTK, kenari plan windows and balance, hourly chart, per-client table, Refresh catalog |
 | Clients | one row per client: purpose, key names, presets, 24 h requests and cost; New client (name, purpose, optional kenari key) and the xellter key shown once |
-| Client detail | purpose and enabled; kenari keys with probe state and the models they may call (add, rename, remove); one card per preset: its name (renameable), optimization, pool picker grouped by vendor with a family checkbox and a price line, the free and discounted models xellter added on its own, "Serving now" (rank, model, billing, score, why), the eviction list with the moment each model returns, and "Left out" grouped by reason; Look up a session; New xellter key; Recalculate; Delete client |
+| Client detail | purpose and enabled; kenari keys with probe state and the models they may call (add, rename, remove); one card per preset: its name (renameable), optimization, the sticky-session toggle, pool picker grouped by vendor with a family checkbox and a price line, the free and discounted models xellter added on its own, "Serving now" (rank, model, billing, score, why), the eviction list with the moment each model returns, and "Left out" grouped by reason; Look up a session; New xellter key; Recalculate; Delete client |
 | Usage | 24 h or 30 d; all clients -> one client -> its presets -> the models in a preset; totals, chart, and kenari's own plan windows and balance next to xellter's numbers |
 | Config file | the YAML, checked and applied on save, with earlier versions restorable |
 
