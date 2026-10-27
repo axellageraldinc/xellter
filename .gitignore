@@ -12,6 +12,8 @@ data/
 /bin/
 FIRST-LOGIN*.txt
 *.key
+# the backup copies hold the database, the secrets and the config
+/xellter-backups/
 # tooling
 node_modules/
 __pycache__/

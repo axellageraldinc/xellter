@@ -1,8 +1,12 @@
 package store
 
 import (
+	"bytes"
 	"database/sql"
+	"log"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -322,5 +326,47 @@ func TestSessionsAndJobs(t *testing.T) {
 	st.KVSet("k", "w")
 	if st.KVGet("k") != "w" {
 		t.Fatal("kv not replaced")
+	}
+}
+
+// The request log is the only history xellter keeps, and it lives in one file.
+// Deleting that file used to bring the service back as if it had never run:
+// the new database started at request id 1 and the usage page showed nothing.
+// A marker next to the database makes the loss visible.
+func TestALostDatabaseIsDetected(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Log(Request{TS: time.Now().UnixMilli(), Client: "c", Preset: "text", Model: "m", OK: true})
+	st.Flush()
+	st.Close()
+
+	// the marker says the database existed
+	if _, err := os.Stat(filepath.Join(dir, lostMarker)); err != nil {
+		t.Fatalf("the marker must exist: %v", err)
+	}
+
+	// the database is deleted and recreated, which is what an accidental
+	// `rm` looks like
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.Remove(filepath.Join(dir, "xellter.db"+suffix)); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
+	// the log is captured around the open, so the report is caught
+	var buf bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&buf)
+	st2, err := Open(dir)
+	log.SetOutput(old)
+	if err != nil {
+		t.Fatalf("the service must still start: %v", err)
+	}
+	defer st2.Close()
+
+	if !strings.Contains(buf.String(), "the history was lost") {
+		t.Fatalf("the lost history was not reported: %q", buf.String())
 	}
 }

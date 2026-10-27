@@ -14,6 +14,10 @@ The same can be done in the panel (Clients, Add client, Add key). `admin init -f
 ## systemd (user)
 A user systemd unit `xellter.service` runs `bin/xellter serve -config xellter.yaml` from the project directory. After editing: `systemctl --user daemon-reload`. Logs: `journalctl --user -u xellter -f`.
 
+A second pair, `xellter-backup.service` and `xellter-backup.timer`, takes a daily snapshot (see
+"Backups" below). The timer is enabled and running; it survives reboots because it is
+`Persistent=true`.
+
 ## Tailscale
 ```bash
 tailscale serve --bg --https=8445 http://127.0.0.1:8480
@@ -38,7 +42,50 @@ The tunnel (`~/.cloudflared/xellter.yml`, `cloudflared-xellter.service`) points
 - **Plan numbers:** Overview, Kenari plan & balance, Add account key (a full-access kenari key). Without it the plan budget is estimated.
 - **Usage:** per client, preset, model or kenari key, with a request list; filter by client and period.
 - **A client got `503`/`429`:** the Overview banner names the key or account that is paused and why; the client page has "Re-check".
-- Backup: `data/` (SQLite is WAL: `sqlite3 data/xellter.db ".backup file"`) and `xellter.yaml`.
+
+## Backups
+
+`xellter-backup.timer` (user systemd) takes a snapshot every day at 04:30 and keeps the last 14. It
+writes to `~/apps/xellter/xellter-backups/`, **outside** `data/`, because `data/` is the thing that
+gets lost. Each copy is the database, `secrets.env` and `xellter.yaml`, all mode 0600.
+
+```bash
+systemctl --user list-timers xellter-backup.timer   # when it ran and when it runs next
+systemctl --user start xellter-backup.service         # take one now
+./scripts/xellter-backup.py data xellter-backups 14   # the same, by hand
+```
+
+The database runs in WAL mode, so the script uses SQLite's **online backup API** rather than copying
+the file: a plain `cp` of a database that is being written to can capture a torn page.
+
+To restore, stop the service, put the database back and start it again:
+
+```bash
+systemctl --user stop xellter.service
+cp xellter-backups/xellter-20261027-154624.db data/xellter.db
+rm -f data/xellter.db-wal data/xellter.db-shm     # the WAL belongs to the old database
+systemctl --user start xellter.service
+```
+
+**Never** copy `xellter.db` with `cp` while the service is running, and never delete `data/` while
+the service is up: the request log, the leaderboard scores and the admin sessions all live there.
+The clients, the keys and the login record are in `xellter.yaml`, `data/secrets.env` and
+`data/auth-record.json`; the log itself is a history, and losing it costs the usage history, not
+the service.
+
+## If the history was lost
+
+`data/xellter.db.marker` records that the database existed. When xellter starts and finds a
+database with no requests in it while the marker says there was one, it says so in the log:
+
+```
+xellter: the request log in /home/wongjava/apps/xellter/data is empty but the database existed
+since 2026-10-27T15:51:36Z: the history was lost (the database file was deleted or replaced)
+```
+
+The service still starts: a warning beats a gateway that refuses to come up. The message names the
+time the database was created, so the loss is dated. Restore the newest copy from
+`xellter-backups/` with the steps above.
 
 ## When a model fails
 The ranking is also the fallback order. For every request xellter builds up to `resilience.max_attempts` (4) attempts, best first, at most two keys per model, and moves to the next one **before the first byte reaches the client** when:

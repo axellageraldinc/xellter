@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,6 +86,15 @@ func Open(dir string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(4)
 	if _, err := db.Exec(schema); err != nil {
+		return nil, err
+	}
+	// The request log and the leaderboard scores are the only history xellter
+	// keeps, and they live in this one file. Deleting it silently throws them
+	// away and the service comes back as if it had never run, so a marker file
+	// next to the database records that it existed: a database that reappears
+	// without its marker means the file was lost, and the operator is told
+	// (see checkLost).
+	if err := checkLost(dir, db); err != nil {
 		return nil, err
 	}
 	// databases created before the "shadow" -> "preset" rename
@@ -661,4 +671,47 @@ func (s *Store) Session(client, session string) (*SessionUsage, error) {
 		return nil, nil
 	}
 	return u, rows.Err()
+}
+
+// ---- lost-database marker ----
+
+// lostMarker is the file that records that the database existed. It sits next
+// to the database but outside it, so deleting the database alone leaves the
+// marker behind and the loss is visible.
+const lostMarker = "xellter.db.marker"
+
+// checkLost reports a database that was lost: the marker says there was one,
+// and the database in front of it holds no request at all. That is what a
+// deleted-and-recreated file looks like, and it must not pass silently.
+func checkLost(dir string, db *sql.DB) error {
+	marker := filepath.Join(dir, lostMarker)
+	st, err := os.Stat(marker)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// The first run: record that the database is now the real one.
+			return writeMarker(marker)
+		}
+		return err
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM requests`).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	// The database is empty but the marker says it was not. The rows are gone.
+	// The service still starts: the owner may have emptied it on purpose, and a
+	// gateway that refuses to start is a worse outcome than a warning.
+	log.Printf("xellter: the request log in %s is empty but the database existed since %s: the history was lost (the database file was deleted or replaced)",
+		dir, st.ModTime().Format(time.RFC3339))
+	return writeMarker(marker)
+}
+
+// writeMarker records the database's creation time, so a later loss is dated.
+func writeMarker(path string) error {
+	if err := os.WriteFile(path, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600); err != nil {
+		return err
+	}
+	return nil
 }

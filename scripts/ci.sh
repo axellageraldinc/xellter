@@ -16,4 +16,6 @@ unformatted=$(gofmt -l cmd internal)
 if [ -n "$unformatted" ]; then echo "gofmt needed:"; echo "$unformatted"; exit 1; fi
 go vet ./...
 go test -count=1 ./...
+# the backup script is python: it is checked here so a broken snapshot never ships
+python3 scripts/backup_test.py
 echo "ci ok"

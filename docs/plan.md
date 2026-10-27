@@ -24,6 +24,7 @@ decisions. Rollout and tuning continue (see "Next").
 | Presets are named by the owner | the name is the model the app asks for; the category says what it serves; one preset per category still holds | done (ADR 0021) |
 | Free and discounted models are always in the pool | every free model and every running promo of the category is added to every preset of that category, and leaves it again when the promo ends | done (ADR 0022) |
 | Stickiness is a per-preset toggle | a preset keeps one model per session (the default) or routes every turn again; the global `routing.sticky_session` is refused on load | done (ADR 0025) |
+| The usage history was lost | a stray `rm` deleted the live SQLite database, and the service came back as if it had never run: the new database started at request id 1 and the usage page showed nothing. Nothing in the code deleted it | fixed: a daily backup timer snapshots the database, the secrets and the config outside `data/`, and a marker file makes a lost database visible in the log instead of silent |
 
 ## Earlier phases (first build)
 
