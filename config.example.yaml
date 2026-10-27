@@ -35,6 +35,12 @@ clients:
     keys:                         # kenari API keys of this client (values live in data/secrets.env)
       - name: main
         key_env: KENARI_KEY_BABU_MAIN
+      # A key that serves one service instead of a model. `search` is the only capability:
+      # it answers POST /v1/x/search, is never probed, never joins a pool and never serves
+      # a model call, so a pay-as-you-go key is only spent on the calls the app asked for.
+      # - name: X-search
+      #   key_env: KENARI_KEY_BABU_X_SEARCH
+      #   capability: search
     presets:                      # one entry per category; the name is the model's name (ADR 0021)
       text:                       # chat   | image: images | video: videos
         category: chat            # tts: audio_speech | stt: audio_transcription

@@ -22,13 +22,13 @@ The tailnet URL is `https://<host>.<tailnet>.ts.net:8445/`; add that host name t
 
 ## Public domain
 The panel is the site: it is served at the root of its host and its API is at `/api`, so
-`https://xellter.wongjvm.my.id` opens the panel and `https://xellter.wongjvm.my.id/v1` serves the
+`https://xellter.example.com` opens the panel and `https://xellter.example.com/v1` serves the
 clients. Because the panel answers only for hostnames listed in `admin_hosts`, a public hostname
 that is not in that list serves `/v1/*` and `/healthz` and returns 404 for everything else. Still
 prefer Cloudflare Access in front of the public name.
 
 The tunnel (`~/.cloudflared/xellter.yml`, `cloudflared-xellter.service`) points
-`xellter.wongjvm.my.id` at `http://127.0.0.1:8480`, so no change was needed there.
+`xellter.example.com` at `http://127.0.0.1:8480`, so no change was needed there.
 
 ## Day to day
 - **Overview:** health banner with warnings you can act on, 24 h numbers, plan budget and balance, per-client summary.

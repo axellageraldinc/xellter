@@ -46,10 +46,9 @@ scheduled change. Cache write is kept as a display value (`0` = kenari publishes
 
 **System One is the sixth category.** Its models are not on the main list: they are fetched from
 `/v1/models?modality=systemone`, marked with endpoint `systemone`, priced like any other model, and
-never mixed into a chat pool. Note that no API path is mapped to the `systemone` category
-(`route.modalityOfPath` knows chat, images, videos, audio and music), so the preset is rejected on the
-chat paths and a request for it is forwarded to whatever other `/v1/…` path the caller used. See
-"Known gaps" in `docs/plan.md`.
+never mixed into a chat pool. `POST /v1/systemone` is the only path mapped to that category
+(`route.modalityOfPath`), so a systemone preset is refused on every other path and never answers a
+chat request.
 
 Refresh loops:
 

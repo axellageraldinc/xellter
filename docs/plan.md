@@ -69,7 +69,6 @@ Found while rewriting the docs; not fixed here because the fix is code, not pros
 | Sticky is a boolean, not minutes | The plan lists `sticky_minutes: 0`; the code has `sticky_session: true`, i.e. a pin that never expires. Behaviour matches the intent |
 | Eviction does not promote a model | The plan says an evicted model "is replaced by the next model below the top 10". `route.order` only ever walks `rk.Candidates` (the top list), so an evicted model is skipped and the ring continues over the remaining candidates; nothing below the top list is promoted |
 | `/v1/usage/keys` keys on the kenari key | The plan calls it "usage broken down by xellter API key". The request row's `api_key` column holds the kenari key name (`at.Key.Label()`), so the endpoint splits by kenari key, not by the xellter key the client used. There is one xellter key per client, so the two coincide per client but not when a client has several kenari keys |
-| The `systemone` preset has no chat serving path | `route.modalityOfPath` maps no API path to the `systemone` category, so the preset cannot be used on `/v1/chat/completions` (400 "systemone is a systemone preset"). `/v1/systemone` serves it (ADR 0024). The category, catalog fetch and pricing exist; a chat-shaped mapping does not |
 
 ## Rollout
 1. Run on the tailnet only; owner tests with curl and the panel.

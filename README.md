@@ -1,9 +1,10 @@
 # xellter
 
-A small LLM gateway in front of [kenari.id](https://kenari.id). An app asks for a preset name
-(`text`, `image`, …) with its own xellter key; xellter picks a real model from that preset's pool,
-keeps one model per conversation, retries a failure once, and takes a model out of that preset after
-three errors. One static Go binary, SQLite, no runtime dependencies.
+A small LLM gateway in front of [kenari.id](https://kenari.id). An app calls an OpenAI-compatible
+endpoint with its own xellter key and asks for a **preset name** the owner chose (`chat`, `image`, …);
+xellter picks a real model from that preset's pool, keeps one model per conversation, retries a
+failure once, and takes a model out of that preset after three errors. One static Go binary, SQLite,
+no runtime dependencies.
 
 ## The three optimizations
 
@@ -70,14 +71,65 @@ curl http://127.0.0.1:8480/v1/chat/completions \
 | Method and path | Answers |
 |---|---|
 | `POST /v1/chat/completions`, `/v1/responses`, `/v1/messages` | chat, passed through unchanged (OpenAI chat, OpenAI Responses, Anthropic messages) |
+| `POST /v1/systemone` | System One, passed through as-is to a `systemone` preset |
+| `POST /v1/x/search` | the X search, passed through as-is to the key the client keeps for that service |
 | `POST /v1/images/*`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/videos`, `/v1/music` | media |
 | `GET /v1/videos/{id}` | a video job, through the key that created it |
-| `GET /v1/models`, `/v1/models/{id}` | the client's presets and the real models in its pools |
+| `GET /v1/models`, `/v1/models/{id}` | the client's presets and the real models in its pools, with their prices |
 | `GET /v1/session` | the model this session is pinned to, and what it has cost |
-| `GET /v1/usage?range=24h\|30d` | traffic per model and billing kind |
+| `GET /v1/usage?range=24h\|30d` | traffic per model and billing kind (only successful requests count) |
 | `GET /v1/usage/keys`, `/v1/usage/models` | traffic per kenari key name, per preset and model |
 | `GET /v1/account/balance`, `/v1/account/quota` | kenari's balance and plan windows |
 | `GET /healthz` | catalog size, age and degraded flag |
+
+Anything else is refused with **404** and never forwarded: a request for an endpoint xellter does
+not have would otherwise reach kenari as a model call, and its failure would be counted against
+every model of the preset (ADR 0024).
+
+## Integrate
+
+Any OpenAI-compatible client works. Point it at the gateway, give it the client key, and set the
+model to a preset name:
+
+```bash
+curl https://xellter.example.com/v1/chat/completions \
+  -H "Authorization: Bearer $XELLTER_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"chat","messages":[{"role":"user","content":"hello"}]}'
+```
+
+- **The model you ask for is the preset, not a kenari model.** List what a client may ask for with
+  `GET /v1/models`; the entry is the preset, `data[].models` are the real models behind it.
+- **`X-Xellter-Session` keeps one model for the conversation.** Send a stable id (a chat id, a
+  thread id); without it the pin follows a hash of the body. `GET /v1/session?session=<id>` says
+  what that session is using and what it has cost.
+- **`X-Xellter-Model` on the response** names the real model that answered; `X-Xellter-Attempt` is
+  the attempt number (1, or 2 after one retry).
+- **Usage** (`GET /v1/usage?range=24h|30d`) is priced from the catalogue and split by billing kind
+  (`plan`, `payg`, `free`), in the shape kenari's own usage endpoint uses.
+- **Streaming** is copied through unbuffered; the prompt and the response are never logged or stored.
+
+### Custom endpoints
+
+Two endpoints have no analogue in an OpenAI client, and both are passed through untouched — xellter
+rewrites no field in the body:
+
+**`POST /v1/x/search`** — the X (Twitter) search, which kenari bills per call from the account
+balance. It is served by a key marked `capability: search`, never by a model key: a capability key is
+never probed, never joins a pool and never serves a model call, so a pay-as-you-go key is only spent
+on the calls the client asked for. kenari calls a 503 "failed to return a usable answer, not charged,
+retry", so xellter retries up to three times. A successful search is logged as one paid row
+(`x/search`, Rp 100 at the time of writing); a failed one is not charged and does not appear in usage.
+
+```bash
+curl https://xellter.example.com/v1/x/search \
+  -H "Authorization: Bearer $XELLTER_KEY" -H 'Content-Type: application/json' \
+  -d '{"query":"latest Rust release"}'
+```
+
+**`POST /v1/systemone`** — System One models, served by a preset whose category is `systemone`. They
+are fetched from their own catalogue endpoint and priced like any other model, and they never mix
+into a chat pool: `/v1/systemone` is the only path that reaches them.
 
 ## Documentation
 

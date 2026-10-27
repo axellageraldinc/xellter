@@ -12,7 +12,7 @@ Two decisions, both forced by the same thing: the panel was not pleasant to
 use, and it lived behind a path that nobody remembered.
 
 **The path.** The panel was at `/admin/` and its API at `/admin/api/`. The
-service already had a public subdomain (`xellter.wongjvm.my.id`) that served
+service already had a public subdomain (`xellter.example.com`) that served
 the API and nothing else. The owner wanted the panel on that subdomain, with
 no path to type.
 
