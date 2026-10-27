@@ -1,6 +1,6 @@
-# CI for every PR (see ~/AGENTS.md, "CI", and ~/infra/docs/adr/0001-github-hosted-ci.md).
-# Security rules: read-only token, `pull_request` only (never `pull_request_target`),
-# no secrets, third-party actions pinned to a full commit SHA.
+# CI for every PR. Security rules: read-only token, `pull_request` only (never
+# `pull_request_target`), no secrets, third-party actions pinned to a full commit SHA.
+# Must pass with no network and no paid API keys: every upstream is faked in the tests.
 name: CI
 on:
   pull_request:
