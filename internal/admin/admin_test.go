@@ -673,3 +673,41 @@ func TestAdminUsageKeysAndSession(t *testing.T) {
 		t.Fatalf("session needs a client and an id: %d", rec.Code)
 	}
 }
+
+// A client that was renamed or deleted leaves its old traffic in the log. That
+// traffic is not a client any more, and the drill-down says so instead of
+// listing a name the owner does not recognise.
+func TestUsageMarksAClientThatNoLongerExists(t *testing.T) {
+	a := newTestApp(t)
+	h := New(a)
+	c := sessionCookie(t, a)
+	a.St.Log(store.Request{TS: time.Now().UnixMilli(), Client: "old-name", Preset: "text", Model: "cheap-b",
+		Upstream: "babu/main", OK: true, Billing: "balance", InTok: 100, OutTok: 10, Key: "main", Session: "s1"})
+	a.St.Log(store.Request{TS: time.Now().UnixMilli(), Client: "babu", Preset: "text", Model: "cheap-b",
+		Upstream: "babu/main", OK: true, Billing: "balance", InTok: 200, OutTok: 20, Key: "main", Session: "s2"})
+	a.St.Flush()
+
+	rec := do(t, h, c, http.MethodGet, "/api/usage/drill?window=24h", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("drill: %d %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		Rows []struct {
+			Client  string `json:"client"`
+			Removed bool   `json:"removed"`
+		}
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]bool{}
+	for _, r := range out.Rows {
+		byName[r.Client] = r.Removed
+	}
+	if !byName["old-name"] {
+		t.Fatal("the old client must be marked as no longer a client")
+	}
+	if byName["babu"] {
+		t.Fatal("a client that exists must not be marked")
+	}
+}

@@ -52,6 +52,9 @@ type usageRow struct {
 	Cached       int64   `json:"cached_tok"`
 	RTKSaved     int64   `json:"rtk_saved"`
 	Cost         float64 `json:"cost_idr"`
+	// Removed marks a client that is no longer in the configuration: its old
+	// traffic is still in the log, but it is not a client any more.
+	Removed bool `json:"removed,omitempty"`
 }
 
 // drillWindow reads the window query parameter. The page offers 24 h and 30 d;
@@ -160,13 +163,24 @@ func (h *Handler) usageDrill(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cfg := h.a.Cfg()
+		known := map[string]bool{}
+		for _, cl := range cfg.Clients {
+			known[cl.Name] = true
+		}
 		seen := map[string]bool{}
 		for _, u := range raw {
-			rows = append(rows, usageRow{
+			row := usageRow{
 				Key: u.Client, Label: u.Client, Client: u.Client,
 				Requests: u.Requests, Errors: u.Errors, InTok: u.InTok, OutTok: u.OutTok,
 				Cached: u.Cached, RTKSaved: u.RTKSaved, Cost: u.Cost,
-			})
+			}
+			// The log keeps the name the client had when the request was served. A client
+			// that was renamed or deleted leaves its old traffic behind, and that
+			// traffic is not a client any more: it is marked, not listed as one.
+			if !known[u.Client] {
+				row.Removed = true
+			}
+			rows = append(rows, row)
 			seen[u.Client] = true
 		}
 		for _, cl := range cfg.Clients {

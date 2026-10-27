@@ -100,12 +100,22 @@ export type ClientRow = {
 
 export type Alert = { level: 'info' | 'warn' | 'bad'; text: string; client?: string }
 
-export type PlanWindow = { n: string; used_rp: number; budget_rp: number; resets_at: string }
+export type PlanWindow = {
+  budget_rp: number
+  used_rp: number
+  remaining_rp: number
+  used_frac: number
+  resets_at: string
+}
 
 export type Account = {
+  name?: string
+  tier?: string
   plan?: string
   plan_source?: string
-  windows?: PlanWindow[]
+  quota_key?: string
+  /** The plan windows, keyed by their name: `week`, `month`. */
+  windows?: Record<string, PlanWindow>
   estimated_spend?: number[]
   plan_budget?: number[]
   balance_idr?: number
@@ -178,6 +188,8 @@ export type UsageRow = {
   rtk_saved: number
   cost_idr: number
   billing?: string
+  /** The client is no longer in the configuration; this is its old traffic. */
+  removed?: boolean
 }
 
 export type UsageSeriesPoint = {

@@ -5,10 +5,10 @@ import { api } from '@/lib/api'
 import type { Usage } from '@/lib/types'
 import { idr, num } from '@/lib/format'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Badge } from '@/components/ui/badge'
+import { Card, CardHeader, CardTitle } from '@/components/ui/card'
 import { Table, TBody, TD, TH, THead, TR, Empty } from '@/components/ui/table'
 import { Stat, StatRow } from '@/components/stat'
-import { Chart } from '@/components/chart'
 import { Page } from '@/components/shell'
 import { useToast } from '@/components/ui/toast'
 import { BillingBadge } from '@/components/billing-badge'
@@ -122,15 +122,6 @@ export function UsagePage() {
         />
       </StatRow>
 
-      <Card className="mb-4">
-        <CardHeader>
-          <CardTitle>Requests over time</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <Chart data={data?.series ?? []} unit={window === '30d' ? 'day' : 'hour'} />
-        </CardContent>
-      </Card>
-
       <Card>
         <CardHeader>
           <CardTitle>
@@ -147,7 +138,7 @@ export function UsagePage() {
                 <TH className="text-right">Requests</TH>
                 <TH className="text-right">Errors</TH>
                 <TH className="text-right">Tokens in / out</TH>
-                <TH className="text-right">Cached</TH>
+                <TH className="text-right">Cache hit</TH>
                 <TH className="text-right">RTK saved</TH>
                 <TH className="text-right">Rp at list price</TH>
               </TR>
@@ -161,11 +152,14 @@ export function UsagePage() {
                       ? () => nav(at({ preset: r.preset || r.key }))
                       : null
                 return (
-                  <TR key={i} clickable={!!drill} onClick={drill ?? undefined}>
+                  <TR key={i} clickable={!!drill && !r.removed} onClick={drill && !r.removed ? drill : undefined}>
                     <TD>
                       <span className="flex items-center gap-2">
-                        <span className="mono">{r.label || r.key}</span>
+                        <span className={r.removed ? 'mono text-text-muted line-through' : 'mono'}>
+                          {r.label || r.key}
+                        </span>
                         {r.billing && <BillingBadge billing={r.billing} />}
+                        {r.removed && <Badge tone="neutral">no longer a client</Badge>}
                       </span>
                     </TD>
                     <TD className="tabular text-right">{num(r.requests)}</TD>
@@ -175,7 +169,9 @@ export function UsagePage() {
                     <TD className="tabular text-right whitespace-nowrap">
                       {num(r.in_tok)} / {num(r.out_tok)}
                     </TD>
-                    <TD className="tabular text-right text-text-muted">{num(r.cached_tok)}</TD>
+                    <TD className="tabular text-right text-text-muted">
+                      {r.in_tok > 0 ? ((r.cached_tok / r.in_tok) * 100).toFixed(0) + '%' : '—'}
+                    </TD>
                     <TD className="tabular text-right text-text-muted">{num(r.rtk_saved)}</TD>
                     <TD className="tabular text-right whitespace-nowrap">Rp {idr(r.cost_idr)}</TD>
                   </TR>

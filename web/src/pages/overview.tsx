@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { AlertTriangle, CheckCircle2, Coins, RefreshCw, Wallet, Zap } from 'lucide-react'
 import { api } from '@/lib/api'
 import type { Overview, Usage } from '@/lib/types'
-import { idr, num, pl } from '@/lib/format'
+import { idr, left, num, pl } from '@/lib/format'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -12,6 +12,16 @@ import { Stat, StatRow } from '@/components/stat'
 import { Chart } from '@/components/chart'
 import { Page } from '@/components/shell'
 import { useToast } from '@/components/ui/toast'
+
+/** The plan windows, shortest first: the five-hour one, then the week, then the month. */
+const WINDOW_ORDER = ['five_hour', '5h', 'week', 'month']
+
+const WINDOW_LABEL: Record<string, string> = {
+  five_hour: '5-hour window',
+  '5h': '5-hour window',
+  week: 'This week',
+  month: 'This month',
+}
 
 /** Overview is the landing page: is anything wrong, what happened today, and the plan. */
 export function OverviewPage() {
@@ -141,13 +151,14 @@ export function OverviewPage() {
                     {plan.plan_source === 'kenari' ? 'live from kenari' : 'estimated'}
                   </Badge>
                 </div>
-                {plan.windows?.length ? (
-                  plan.windows.map((w) => {
+                {plan.windows && Object.keys(plan.windows).length > 0 ? (
+                  WINDOW_ORDER.filter((n) => plan.windows?.[n]).map((name) => {
+                    const w = plan.windows![name]
                     const pct = w.budget_rp > 0 ? Math.min(100, (w.used_rp / w.budget_rp) * 100) : 0
                     return (
-                      <div key={w.n}>
+                      <div key={name}>
                         <div className="mb-1 flex justify-between text-xs">
-                          <span className="text-text-secondary">{w.n}</span>
+                          <span className="text-text-secondary">{WINDOW_LABEL[name] ?? name}</span>
                           <span className="tabular text-text-muted">
                             Rp {idr(w.used_rp)} of {idr(w.budget_rp)}
                           </span>
@@ -158,6 +169,9 @@ export function OverviewPage() {
                             style={{ width: `${pct}%` }}
                           />
                         </div>
+                        {w.resets_at && !w.resets_at.startsWith('0001') && (
+                          <div className="mt-1 text-xs text-text-muted">Resets {left(w.resets_at)}</div>
+                        )}
                       </div>
                     )
                   })
@@ -165,6 +179,12 @@ export function OverviewPage() {
                   <p className="text-xs text-text-muted">
                     kenari has not reported the plan windows yet. Add the account key to read them.
                   </p>
+                )}
+                {plan.balance_idr !== undefined && (
+                  <div className="flex justify-between border-t border-border pt-3 text-xs">
+                    <span className="text-text-secondary">Balance</span>
+                    <span className="tabular font-medium">Rp {idr(plan.balance_idr)}</span>
+                  </div>
                 )}
               </>
             ) : (
