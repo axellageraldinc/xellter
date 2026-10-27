@@ -39,6 +39,25 @@ nothing there.
   from kenari and sit next to xellter's own accounting.
 - **Panel.** Overview, Clients, Usage, Config file. Login: username + password (scrypt) + TOTP.
 
+## The panel
+
+Three screens, one per job: what is happening now, what a client may call, what it spent.
+
+**Overview** — uptime, 24-hour requests, the plan budget and the balance next to xellter's own
+accounting, and one row per client.
+
+![Overview](docs/screenshots/overview.png)
+
+**A client** — its kenari keys with their live state, and its presets; the preset shows the models
+it may call, why the order is what it is, and the model it is serving right now.
+
+![A client and its presets](docs/screenshots/client.png)
+
+**Usage** — per model, preset, key or client, with the price of each and the split between plan,
+pay-as-you-go and free.
+
+![Usage](docs/screenshots/usage.png)
+
 ## Run
 
 ```bash
@@ -58,68 +77,118 @@ Upgrading an old config:
 ./bin/xellter migrate -config xellter.yaml -write   # old file kept as xellter.yaml.pre-rewrite
 ```
 
-```bash
-curl http://127.0.0.1:8480/v1/chat/completions \
-  -H "Authorization: Bearer $(cat data/demo.key)" -H 'Content-Type: application/json' \
-  -d '{"model":"text","messages":[{"role":"user","content":"hello"}]}'
+## API
+
+Base URL `https://xellter.example.com/v1` (locally `http://127.0.0.1:8480/v1`). Every call carries
+the client's key as a bearer token, `Authorization: Bearer $XELLTER_KEY`; there is no other
+authentication on the data plane.
+
+`Content-Type: application/json` on a request; the answer is kenari's own JSON, relayed. xellter
+never translates a protocol and never rewrites a field except `model` (see chat) and
+`stream_options.include_usage` on a streamed chat request.
+
+### Errors
+
+One shape on every endpoint except `/v1/messages`, which keeps the Anthropic shape a client of that
+protocol expects:
+
+```json
+{"error":{"message":"unknown model \"nope\"","type":"xellter_error","code":"model_not_found"}}
 ```
 
-`X-Xellter-Model` names the real model that answered; `X-Xellter-Attempt` the attempt number.
+```json
+{"type":"error","error":{"type":"model_not_found","message":"unknown model \"nope\""}}
+```
 
-## Endpoints
+| Status | `code` | When |
+|---|---|---|
+| 400 | `bad_request` | a body that cannot be read, an empty one, a bad `range` |
+| 401 | `invalid_api_key` | missing or unknown key; a disabled client answers 403 |
+| 404 | `model_not_found` | the name is neither a preset of this client nor a model in its pools |
+| 404 | `no_search_key` | `/v1/x/search` from a client without a key for that service |
+| 404 | `no_session` | `/v1/session` for a session that has no traffic yet |
+| 405 | `method_not_allowed` | a known path with the wrong method, or any other path |
+| 503 | `upstream_unavailable` | every attempt failed; carries `Retry-After` |
 
-| Method and path | Answers |
-|---|---|
-| `POST /v1/chat/completions`, `/v1/responses`, `/v1/messages` | chat, passed through unchanged (OpenAI chat, OpenAI Responses, Anthropic messages) |
-| `POST /v1/systemone` | System One, passed through as-is to a `systemone` preset |
-| `POST /v1/x/search` | the X search, passed through as-is to the key the client keeps for that service |
-| `POST /v1/images/*`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/videos`, `/v1/music` | media |
-| `GET /v1/videos/{id}` | a video job, through the key that created it |
-| `GET /v1/models`, `/v1/models/{id}` | the client's presets and the real models in its pools, with their prices |
-| `GET /v1/session` | the model this session is pinned to, and what it has cost |
-| `GET /v1/usage?range=24h\|30d` | traffic per model and billing kind (only successful requests count) |
-| `GET /v1/usage/keys`, `/v1/usage/models` | traffic per kenari key name, per preset and model |
-| `GET /v1/account/balance`, `/v1/account/quota` | kenari's balance and plan windows |
-| `GET /healthz` | catalog size, age and degraded flag |
+A path that is not one of the endpoints below is refused with 405/404 and **never forwarded**. It
+would otherwise reach kenari as a model call, and its failure would count against every model of
+the preset (ADR 0024).
 
-Anything else is refused with **404** and never forwarded: a request for an endpoint xellter does
-not have would otherwise reach kenari as a model call, and its failure would be counted against
-every model of the preset (ADR 0024).
+### Response headers
 
-## Integrate
+| Header | On | Meaning |
+|---|---|---|
+| `X-Xellter-Model` | chat, System One, media | the real model that answered, not the preset you asked for |
+| `X-Xellter-Attempt` | chat, System One, media, search | `1`, or `2` after the single retry |
+| `X-Xellter-Attempts` | a failed call | how many attempts were spent before giving up |
+| `Retry-After` | 503, 429 | seconds to wait |
 
-Any OpenAI-compatible client works. Point it at the gateway, give it the client key, and set the
-model to a preset name:
+### Chat — `POST /v1/chat/completions`, `/v1/responses`, `/v1/messages`
+
+The body is forwarded unchanged except `model`, which must be a **preset name**, not a kenari model.
+The three paths speak OpenAI chat, OpenAI Responses and Anthropic messages respectively; xellter
+treats them alike and returns what kenari returned, streaming included.
 
 ```bash
 curl https://xellter.example.com/v1/chat/completions \
-  -H "Authorization: Bearer $XELLTER_KEY" \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"chat","messages":[{"role":"user","content":"hello"}]}'
+  -H "Authorization: Bearer $XELLTER_KEY" -H 'Content-Type: application/json' \
+  -H 'X-Xellter-Session: chat-42' \
+  -d '{"model":"text","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-- **The model you ask for is the preset, not a kenari model.** List what a client may ask for with
-  `GET /v1/models`; the entry is the preset, `data[].models` are the real models behind it.
-- **`X-Xellter-Session` keeps one model for the conversation.** Send a stable id (a chat id, a
-  thread id); without it the pin follows a hash of the body. `GET /v1/session?session=<id>` says
-  what that session is using and what it has cost.
-- **`X-Xellter-Model` on the response** names the real model that answered; `X-Xellter-Attempt` is
-  the attempt number (1, or 2 after one retry).
-- **Usage** (`GET /v1/usage?range=24h|30d`) is priced from the catalogue and split by billing kind
-  (`plan`, `payg`, `free`), in the shape kenari's own usage endpoint uses.
-- **Streaming** is copied through unbuffered; the prompt and the response are never logged or stored.
+```json
+{
+  "id": "chatcmpl-...", "object": "chat.completion", "created": 1793104835,
+  "model": "claude-haiku-5-5",
+  "choices": [{"index": 0, "message": {"role": "assistant", "content": "Hello."}, "finish_reason": "stop"}],
+  "usage": {"prompt_tokens": 12, "completion_tokens": 4, "total_tokens": 16}
+}
+```
 
-### Custom endpoints
+Response headers: `X-Xellter-Model: claude-haiku-5-5`, `X-Xellter-Attempt: 1`.
 
-Two endpoints have no analogue in an OpenAI client, and both are passed through untouched — xellter
-rewrites no field in the body:
+`X-Xellter-Session` (or `X-Session-Id`, or `X-Claude-Code-Session-Id`) pins one model for the
+conversation. Without it the pin follows `prompt_cache_key`, then `user`, then a hash of the opening
+messages. Send your own id and you can ask about it later with `/v1/session`.
 
-**`POST /v1/x/search`** — the X (Twitter) search, which kenari bills per call from the account
-balance. It is served by a key marked `capability: search`, never by a model key: a capability key is
-never probed, never joins a pool and never serves a model call, so a pay-as-you-go key is only spent
-on the calls the client asked for. kenari calls a 503 "failed to return a usable answer, not charged,
-retry", so xellter retries up to three times. A successful search is logged as one paid row
-(`x/search`, Rp 100 at the time of writing); a failed one is not charged and does not appear in usage.
+### Media — `POST /v1/images/*`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/videos`, `/v1/music`
+
+Same contract: `model` is a preset of that category, the body goes through untouched, the answer is
+kenari's (JSON for images and speech, SSE for music, multipart in, JSON out for transcriptions).
+`X-Xellter-Model` names the model that served it.
+
+### System One — `POST /v1/systemone`
+
+A custom endpoint: kenari publishes System One on a catalogue of its own, so it is a category of its
+own and **only this path reaches it**. `model` is a preset whose category is `systemone`; the body
+and the answer are kenari's, passed through as-is. A systemone preset is refused on every other
+path, and this path refuses every other category.
+
+```bash
+curl https://xellter.example.com/v1/systemone \
+  -H "Authorization: Bearer $XELLTER_KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"classify","input":"the battery dies in an hour"}'
+```
+
+### X search — `POST /v1/x/search`
+
+A custom endpoint: the X (Twitter) search is a service kenari bills per call from the account
+balance, not a model, so nothing is ranked and no preset is involved. The request and the answer are
+kenari's own, forwarded byte for byte — xellter adds no field and reads none. The call is served by
+the client's key marked `capability: search`:
+
+```yaml
+keys:
+  - name: main
+    key_env: KENARI_KEY_DEMO_MAIN
+  - name: X-search
+    key_env: KENARI_KEY_DEMO_X_SEARCH
+    capability: search        # never probed, never in a pool, never serves a model
+```
+
+A capability key exists because xellter asks kenari which models a key may call, and a
+pay-as-you-go key must not be charged for that curiosity. The key is spent only on the calls the
+client actually made.
 
 ```bash
 curl https://xellter.example.com/v1/x/search \
@@ -127,9 +196,138 @@ curl https://xellter.example.com/v1/x/search \
   -d '{"query":"latest Rust release"}'
 ```
 
-**`POST /v1/systemone`** — System One models, served by a preset whose category is `systemone`. They
-are fetched from their own catalogue endpoint and priced like any other model, and they never mix
-into a chat pool: `/v1/systemone` is the only path that reaches them.
+```json
+{"answer":"- @someone: Rust 1.95 is out ...","citations":[{"url":"https://x.com/..."}],"cost_micro_idr":100000000}
+```
+
+kenari documents a `503` here as "failed to return a usable answer, not charged, retry", so xellter
+retries up to three times (700 ms, then 1.8 s apart) and reports the attempts in
+`X-Xellter-Attempt`. A `429` is retried the same way. Every other status is the answer and goes back
+to the client untouched, error included. One successful search is logged as one paid row
+(`x/search`, Rp 100 at the time of writing) and appears in `/v1/usage`; a failed one is not charged
+and therefore not counted.
+
+### Models — `GET /v1/models`, `GET /v1/models/{id}`
+
+The list a client needs to pick a model: its presets first (`"preset": true`), then the real kenari
+models its pools can reach, with the catalogue price of each.
+
+```json
+{
+  "object": "list",
+  "data": [
+    {"id": "text", "object": "model", "owned_by": "xellter", "modality": "chat", "preset": true,
+     "description": "balanced over 1 models", "context_length": 1000000,
+     "tool_call": true, "vision": true, "reasoning": true},
+    {"id": "claude-haiku-5-5", "object": "model", "owned_by": "kenari", "modality": "chat",
+     "context_length": 1000000, "tool_call": true, "vision": true, "reasoning": true,
+     "pricing": {"currency": "IDR", "unit": "micro_idr_per_1m_tokens",
+                 "input": 2500000000, "output": 12500000000, "cache_read": 250000000,
+                 "cache_write": null}}
+  ]
+}
+```
+
+A preset advertises what its whole pool can do: the smallest context window any model in it has, and
+a capability only if every model has it. Media models carry `lines` (per image, per second, per 1k
+characters) instead of token prices. `/v1/models/{id}` returns the single item, or 404.
+
+### Session — `GET /v1/session?session=<id>`
+
+Which real model that conversation is using, what it has cost, and every model it has tried.
+
+```json
+{
+  "object": "session", "session": "demo-01", "client": "demo", "preset": "text",
+  "model": "agnes-2-5-flash:free", "vendor": "agnes", "billing": "free",
+  "context_window": 512000, "modalities": "text+image", "tool_call": true, "pinned_at": 0,
+  "requests": 5, "errors": 0, "in_tok": 245484, "out_tok": 6011, "cached_tok": 0,
+  "cost_idr": 390.5375, "last_model": "agnes-2-5-flash:free",
+  "models": ["claude-haiku-5-5", "agnes-2-5-flash:free"]
+}
+```
+
+`model` is the live pin; `last_model` is what the log last recorded. `billing` is `free`, `plan` or
+`balance`. The id comes from `?session=` or from the same headers a normal request uses; a session
+with no traffic answers 404 `no_session`.
+
+### Usage — `GET /v1/usage?range=24h|30d`
+
+Kenari's own usage shape, filled from xellter's request log, so a client written against kenari
+reads it unchanged. `range` is `24h` (since midnight, the default) or `30d`; anything else is a 400.
+Only successful requests count — a failed attempt never reached a model.
+
+```json
+{
+  "object": "usage.summary", "start": 1793059200, "end": 1793104809,
+  "data": [
+    {"billing_kind": "free", "model": "agnes-2-5-flash:free", "requests": 8,
+     "prompt_tokens": 555295, "completion_tokens": 8776, "cached_prompt_tokens": 0,
+     "cache_write_prompt_tokens": 0, "catalog_micro_idr": 0, "cost_micro_idr": 0},
+    {"billing_kind": "plan", "model": "claude-haiku-5-5", "requests": 5,
+     "prompt_tokens": 138955, "completion_tokens": 2662, "cached_prompt_tokens": 0,
+     "cache_write_prompt_tokens": 0, "catalog_micro_idr": 380662500, "cost_micro_idr": 0}
+  ],
+  "total": {"requests": 15, "prompt_tokens": 846587, "completion_tokens": 14038,
+            "cached_prompt_tokens": 0, "cache_write_prompt_tokens": 0,
+            "catalog_micro_idr": 380662500, "cost_micro_idr": 0}
+}
+```
+
+`catalog_micro_idr` is the list price of that traffic at the price of the moment; `cost_micro_idr` is
+what was actually paid, so it is `0` for a free model and for plan-covered traffic, and equal to the
+catalogue price for pay-as-you-go. Rows are sorted by requests, then model.
+
+### Usage per key and per model
+
+```bash
+GET /v1/usage/keys            # split by the kenari key that served it
+GET /v1/usage/models?preset=text
+```
+
+```json
+{"object":"usage.keys","start":1793059200,"end":1793104843,
+ "data":[{"api_key":"…0c13","client":"demo","requests":15,"errors":2,"in_tok":846587,
+          "out_tok":14038,"cached_tok":0,"rtk_saved":55959,"cost_idr":380.6625}]}
+```
+
+`api_key` is the key's hint, never the key. Same `range` rule; `usage/models` filters by `preset`
+when given.
+
+### Account — `GET /v1/account/balance`, `GET /v1/account/quota`
+
+Kenari's account state, answered from what xellter already keeps rather than asking kenari per call.
+
+```json
+{"object":"account.balance","currency":"IDR","available_micro_idr":0,
+ "balance_micro_idr":0,"reserved_micro_idr":0}
+```
+
+```json
+{"alert_pct":50,"coupon":null,
+ "plan":{"name":"Kreator","windows":{"week":{"budget_rp":150000,"used_rp":50000,
+         "remaining_rp":100000,"used_frac":0.3333,"resets_at":"2026-11-02T00:00:00Z"}}}}
+```
+
+`plan` is absent until an account key is configured: without one xellter cannot read the windows.
+Money is micro-Rupiah throughout (`1_000_000` micro = Rp 1).
+
+### Health — `GET /healthz`
+
+No key, no client. For a load balancer or a monitor.
+
+```json
+{"ok":true,"models":120,"catalog_age_s":31,"degraded":false}
+```
+
+`503` with `{"ok":false,"reason":"catalog not loaded"}` until the first catalogue sync lands;
+`degraded` means the last sync failed and the snapshot is stale.
+
+### Panel
+
+The panel is at the root of the host and its JSON API at `/api`; it is not the data plane. It
+answers only for the `Host` values in `server.admin_hosts` and needs a login (password + TOTP), so a
+public name serves `/v1/*` and `/healthz` and returns 404 for everything else.
 
 ## Documentation
 
