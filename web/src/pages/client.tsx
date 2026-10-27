@@ -63,10 +63,6 @@ export function ClientDetailPage() {
             <Activity />
             Usage
           </Button>
-          <Button variant="outline" size="sm" onClick={() => setAdding(missing[0]?.category ?? 'chat')}>
-            <Plus />
-            Add preset
-          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -271,8 +267,11 @@ export function ClientDetailPage() {
         <h2 className="text-sm font-semibold tracking-tight text-text">Presets</h2>
         {missing.length > 0 && (
           <Select onValueChange={(c) => setAdding(c as Category)}>
-            <SelectTrigger className="w-auto">
-              <SelectValue placeholder="Add a preset" />
+            <SelectTrigger className="w-auto" aria-label="Add a preset">
+              <span className="flex items-center gap-1.5">
+                <Plus className="size-4" />
+                Add preset
+              </span>
             </SelectTrigger>
             <SelectContent>
               {missing.map((c) => (
