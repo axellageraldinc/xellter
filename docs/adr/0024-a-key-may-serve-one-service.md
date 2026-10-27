@@ -26,6 +26,10 @@
   The path decides what category may serve it; a path that maps to no category serves nothing. A failed
   forward can no longer take a whole pool out of a preset.
 - **`/v1/systemone` is a known path** and maps to the `systemone` category.
+- **A failure belongs to the model only when the model answered it.** A request the caller cancelled
+  (a closed tab, a stopped stream) is not a failure of the model and not of the key: it is logged as
+  "cancelled by the client" and leaves both untouched. Counting it evicted healthy models and opened
+  the key's breaker after a few interruptions.
 - **A key may declare a capability** (`capability: search`). Such a key:
   - is never probed,
   - never takes part in model routing (it is not in the pool of any preset),

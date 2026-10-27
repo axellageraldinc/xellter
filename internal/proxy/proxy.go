@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -451,6 +452,12 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 			s.st.Log(row)
 			last = f
 			s.Logf("attempt %d %s/%s on %s failed (try %d): status=%d %s", attempts, plan.Requested, at.Model.ID, at.Key.Name, try, f.status, f.reason)
+			// A request the caller cancelled is not a failure of the model: the client
+			// went away (a closed tab, a stopped stream). Counting it would evict
+			// healthy models after three interruptions.
+			if r.Context().Err() != nil {
+				return
+			}
 			if plan.Preset != "" && s.rt.Failed(cl.Name, plan.Preset, at.Model.ID, s.Now()) {
 				// Requirement 16: three errors inside the window take the model out of this preset only, and a
 				// session pinned to it moves on (eviction beats stickiness).
@@ -543,6 +550,11 @@ func (s *Server) fail(at route.Attempt, res sendResult, cfg *config.Config) *fai
 	defer res.cancel()
 	now := s.Now()
 	if res.err != nil {
+		// A request the caller cancelled is not the key's failure and not the
+		// model's: the client went away. The key keeps its state.
+		if errors.Is(res.err, context.Canceled) {
+			return &failure{status: 0, reason: "cancelled by the client", retry: false}
+		}
 		v := at.Key.Failure(at.Model.ID, 0, nil, 0, now)
 		return &failure{status: 0, reason: "network: " + trimErr(res.err), retry: v.Retry}
 	}

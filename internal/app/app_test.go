@@ -75,7 +75,7 @@ func newFake(t testing.TB) *fake {
 		io.WriteString(w, modelsJSON)
 	})
 	mux.HandleFunc("/api/public/pricing", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"free_tier":{"daily":50,"rpm":5,"next":{"daily":1000,"rpm":10},"plan":{"daily":0,"rpm":25},"threshold_idr":10000},"usd_idr_rate":17500,
+		fmt.Fprintf(w, `{"free_tier":{"daily":5000,"rpm":500,"next":{"daily":1000,"rpm":10},"plan":{"daily":0,"rpm":25},"threshold_idr":10000},"usd_idr_rate":17500,
 		"items":[{"model":"promo-d","promo":{"percent_off":90,"starts_at":%d,"ends_at":%d,"original":{}},"upcoming_price":null}]}`, time.Now().Add(-time.Hour).Unix(), end)
 	})
 	mux.HandleFunc("/api/plans", func(w http.ResponseWriter, r *http.Request) {
