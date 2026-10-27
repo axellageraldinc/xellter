@@ -262,9 +262,11 @@ them all and reports the moment of the last run.
 | Method and path | Answers |
 |---|---|
 | `POST /v1/chat/completions`, `/v1/responses`, `/v1/messages` | chat, passed through as-is (OpenAI chat, OpenAI Responses, Anthropic messages) |
+| `POST /v1/systemone` | System One, passed through as-is |
 | `POST /v1/images/*`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/videos`, `/v1/music` | media, passed through |
+| `POST /v1/x/search` | the X search, passed through as-is to the key the client keeps for that service |
 | `GET /v1/videos/{id}` | a video job, always through the key that created it |
-| `GET /v1/models`, `/v1/models/{id}` | the client's presets plus the real models in its pools |
+| `GET /v1/models`, `/v1/models/{id}` | the client's presets plus the real models in its pools, with their catalogue prices |
 | `GET /v1/session` | what this session is using right now |
 | `GET /v1/usage?range=24h\|30d` | the client's traffic per model and billing kind, in kenari's shape; only successful requests count |
 | `GET /v1/usage/keys` | the same traffic split by the kenari key name that served it |
@@ -274,6 +276,10 @@ them all and reports the moment of the last run.
 
 No protocol translation: a body is forwarded to kenari with only `model` rewritten (and
 `stream_options.include_usage` added for streamed chat completions).
+
+A path that is none of these is refused with 404: it is not forwarded, because a request for an
+endpoint xellter does not have would otherwise be sent upstream as a model call, and its failure
+would be counted against every model of the preset (ADR 0024).
 
 ### `GET /v1/session`
 

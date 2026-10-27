@@ -73,9 +73,15 @@ type Routing struct {
 // Upstream is one kenari API key of a client. Only a name and the secret
 // name are configurable: xellter detects the account, the plan and the limits
 // by itself (ADR 0012).
+//
+// A key may declare a Capability: a service of kenari that is not a model
+// ("search" for the X search endpoint). Such a key is never probed and never
+// serves a model call; it serves its own endpoint only. That is what keeps a
+// pay-as-you-go search key from being drained by xellter's own probing.
 type Upstream struct {
-	Name   string `yaml:"name" json:"name"`
-	KeyEnv string `yaml:"key_env" json:"key_env"`
+	Name       string `yaml:"name" json:"name"`
+	KeyEnv     string `yaml:"key_env" json:"key_env"`
+	Capability string `yaml:"capability" json:"capability,omitempty"` // "" (a model key) | search
 }
 
 // Client is an app that calls xellter (Babu, aixell, polifin, ...). It has one
@@ -105,6 +111,11 @@ type Preset struct {
 
 // Categories are the endpoint kinds a preset can serve, in display order.
 var Categories = []string{"chat", "images", "videos", "audio_speech", "audio_transcription", "music", "systemone"}
+
+// KeyCapabilities are the kenari services a key may be dedicated to. A key with
+// a capability serves that service only; it is never probed and never used for
+// a model call.
+var KeyCapabilities = []string{"search"}
 
 // PresetName is the name xellter suggests for a new preset of a category. It
 // is a suggestion, not a rule: the owner may name a preset anything (ADR 0021).
@@ -334,6 +345,9 @@ func (c *Config) Validate() error {
 				bad("secret name %s is used by both %s and %s/%s", u.KeyEnv, other, cl.Name, u.Name)
 			}
 			envSeen[u.KeyEnv] = cl.Name + "/" + u.Name
+			if u.Capability != "" && !contains(KeyCapabilities, u.Capability) {
+				bad("client %q key %q: capability must be one of %v", cl.Name, u.Name, KeyCapabilities)
+			}
 		}
 		cats := map[string]string{} // category -> preset name, to catch a second preset of a kind
 		for name, p := range cl.Presets {

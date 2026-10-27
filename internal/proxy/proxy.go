@@ -160,6 +160,8 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.quota(w, r)
 	case r.Method == http.MethodGet && strings.HasPrefix(p, "/v1/videos/"):
 		s.job(w, r, cl, p)
+	case r.Method == http.MethodPost && p == "/v1/x/search":
+		s.search(w, r, cl)
 	case r.Method == http.MethodPost:
 		s.call(w, r, cl)
 	default:
@@ -169,20 +171,22 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listModels(w http.ResponseWriter, r *http.Request, cl *config.Client, p string) {
 	presets, real := s.rt.Models(cl)
+	now := s.Now()
 	// The list answers in the OpenAI shape, plus the fields a client needs to pick a model sensibly. Without
 	// context_length a client falls back to its own default, which is how a preset looked like a 1M-token model.
 	type item struct {
-		ID            string `json:"id"`
-		Object        string `json:"object"`
-		Created       int64  `json:"created"`
-		OwnedBy       string `json:"owned_by"`
-		Modality      string `json:"modality,omitempty"`
-		Description   string `json:"description,omitempty"`
-		Preset        bool   `json:"preset,omitempty"`
-		ContextLength int    `json:"context_length,omitempty"`
-		ToolCall      bool   `json:"tool_call,omitempty"`
-		Vision        bool   `json:"vision,omitempty"`
-		Reasoning     bool   `json:"reasoning,omitempty"`
+		ID            string   `json:"id"`
+		Object        string   `json:"object"`
+		Created       int64    `json:"created"`
+		OwnedBy       string   `json:"owned_by"`
+		Modality      string   `json:"modality,omitempty"`
+		Description   string   `json:"description,omitempty"`
+		Preset        bool     `json:"preset,omitempty"`
+		ContextLength int      `json:"context_length,omitempty"`
+		ToolCall      bool     `json:"tool_call,omitempty"`
+		Vision        bool     `json:"vision,omitempty"`
+		Reasoning     bool     `json:"reasoning,omitempty"`
+		Pricing       *pricing `json:"pricing,omitempty"`
 	}
 	var data []item
 	for _, n := range presets {
@@ -219,6 +223,7 @@ func (s *Server) listModels(w http.ResponseWriter, r *http.Request, cl *config.C
 			m := snap.Models[id]
 			it.Modality, it.ContextLength = m.Endpoint, m.Context
 			it.ToolCall, it.Vision, it.Reasoning = m.ToolCall, m.Vision, m.Reasoning
+			it.Pricing = priceOf(m, now)
 		}
 		data = append(data, it)
 	}
@@ -237,6 +242,63 @@ func (s *Server) listModels(w http.ResponseWriter, r *http.Request, cl *config.C
 }
 
 // ---- request body handling ----
+
+// pricing is what a model costs, in the shape a client reads: Rupiah per 1M
+// tokens, in the micro-Rupiah unit the rest of the API uses. A model that is
+// free has no price; a model that is priced per unit (an image, a second of
+// audio) carries its lines instead of token prices.
+type pricing struct {
+	Currency   string   `json:"currency"`
+	Unit       string   `json:"unit"`
+	Input      *float64 `json:"input"`
+	Output     *float64 `json:"output"`
+	CacheRead  *float64 `json:"cache_read"`
+	CacheWrite *float64 `json:"cache_write"`
+	Lines      []line   `json:"lines,omitempty"`
+}
+
+type line struct {
+	Unit    string  `json:"unit"`
+	Variant string  `json:"variant,omitempty"`
+	Micro   float64 `json:"micro_idr"`
+}
+
+// micro turns a Rupiah price into the micro-Rupiah the API publishes.
+func micro(idr float64) *float64 {
+	v := idr * 1e6
+	return &v
+}
+
+// priceOf is the catalogue price of a model right now: the token prices for a
+// chat-like model, the unit lines for a media model. It is nil when the
+// catalogue publishes no price at all.
+func priceOf(m *catalog.Model, now time.Time) *pricing {
+	if m == nil {
+		return nil
+	}
+	if m.Endpoint == "chat" || m.Endpoint == "systemone" {
+		// A chat model is priced per token: input, output and the cache read. The
+		// unit lines of the catalogue do not say which is which, so the three
+		// fields are used instead. The catalogue holds Rupiah per 1M tokens; the
+		// API publishes micro-Rupiah, so the numbers are scaled.
+		in, out, cached := m.Effective(now, 0)
+		p := &pricing{Currency: "IDR", Unit: "micro_idr_per_1m_tokens"}
+		if m.Free || (in == 0 && out == 0) {
+			return p
+		}
+		p.Input, p.Output, p.CacheRead = micro(in), micro(out), micro(cached)
+		return p
+	}
+	// Media is priced per unit: an image, a second of audio, a song.
+	if len(m.Lines) > 0 {
+		out := &pricing{Currency: "IDR", Unit: m.Lines[0].Unit}
+		for _, l := range m.Lines {
+			out.Lines = append(out.Lines, line{Unit: l.Unit, Variant: l.Variant, Micro: l.IDR * 1e6})
+		}
+		return out
+	}
+	return nil
+}
 
 type reqBody struct {
 	raw       []byte

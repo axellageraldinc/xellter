@@ -190,11 +190,21 @@ func (r *Router) Plan(cl *config.Client, requested, session, path string, now ti
 	if requested == "" {
 		return nil, &Error{400, "bad_request", "missing model", 0}
 	}
+	// A preset serves the endpoints of its category and nothing else, and an
+	// endpoint xellter does not have is served by nothing. An unknown path is
+	// refused instead of being served by whichever category happens to match: a
+	// request for an endpoint xellter does not have would otherwise be forwarded
+	// upstream as a model call, and its failure would be counted against every
+	// model of the preset (ADR 0020).
+	want := modalityOfPath(path)
+	if want == "" {
+		return nil, &Error{404, "not_found", fmt.Sprintf("%s is not an endpoint xellter serves", path), 0}
+	}
 	sh, isPreset := cl.Presets[requested]
 	if !isPreset {
-		return r.pinModel(cl, requested, session, now)
+		return r.pinModel(cl, requested, session, want, now)
 	}
-	if want := modalityOfPath(path); want != "" && !servesCategory(want, sh.Category) {
+	if !servesCategory(want, sh.Category) {
 		return nil, &Error{400, "bad_request", fmt.Sprintf("%s is a %s preset; this endpoint serves %s", requested, sh.Category, want), 0}
 	}
 	rk := r.Rankings()[rank.Key(cl.Name, requested)]
@@ -226,7 +236,8 @@ func (r *Router) Plan(cl *config.Client, requested, session, path string, now ti
 }
 
 // pinModel handles a request that names a real model instead of a preset.
-func (r *Router) pinModel(cl *config.Client, id, session string, now time.Time) (*Plan, *Error) {
+// category is what the endpoint serves.
+func (r *Router) pinModel(cl *config.Client, id, session, category string, now time.Time) (*Plan, *Error) {
 	snap := r.cat.Snapshot()
 	m := snap.Models[id]
 	if m == nil {
@@ -242,6 +253,10 @@ func (r *Router) pinModel(cl *config.Client, id, session string, now time.Time) 
 	}
 	if !allowed {
 		return nil, &Error{403, "model_not_allowed", fmt.Sprintf("client %q may not call %q; add it to one of its presets or use the preset name", cl.Name, id), 0}
+	}
+	// A named model serves the endpoints of its own kind, and no other path.
+	if category != m.Endpoint {
+		return nil, &Error{400, "bad_request", fmt.Sprintf("%s is a %s model; this endpoint serves %s", id, m.Endpoint, category), 0}
 	}
 	p := &Plan{Requested: id, Modality: m.Endpoint, Session: session, Model: id}
 	reasons := map[string]int{}
@@ -495,6 +510,8 @@ func modalityOfPath(p string) string {
 	switch {
 	case strings.HasPrefix(p, "/v1/chat/completions"), strings.HasPrefix(p, "/v1/responses"), strings.HasPrefix(p, "/v1/messages"):
 		return "chat"
+	case strings.HasPrefix(p, "/v1/systemone"):
+		return "systemone"
 	case strings.HasPrefix(p, "/v1/images/"):
 		return "images"
 	case strings.HasPrefix(p, "/v1/audio/speech"):

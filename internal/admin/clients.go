@@ -97,7 +97,8 @@ type keyRow struct {
 	LastError    string    `json:"last_error"`
 	LastOK       time.Time `json:"last_ok"`
 	Tier         string    `json:"tier"`
-	State        string    `json:"state"` // ready | paused | no secret | unchecked
+	State        string    `json:"state"`      // ready | paused | no secret | unchecked
+	Capability   string    `json:"capability"` // "" (a model key) | search
 }
 
 // presetRow is the summary of one preset a client holds.
@@ -205,13 +206,16 @@ func (h *Handler) keyRow(k *upstream.Key, now time.Time) keyRow {
 	row := keyRow{
 		Name: st.Label, Hint: keyHint(k), HasSecret: st.HasSecret, Probed: k.Probed(), Unrestricted: st.Unrestricted,
 		Allowed: len(st.Learned), Blocked: len(st.Blocked), CooldownEnd: st.CooldownEnd, BreakerEnd: st.BreakerEnd,
-		LastError: st.LastError, LastOK: st.LastOK, Tier: st.Tier,
+		LastError: st.LastError, LastOK: st.LastOK, Tier: st.Tier, Capability: k.Capability(),
 	}
 	switch {
 	case !row.HasSecret:
 		row.State = "no secret"
 	case now.Before(row.CooldownEnd) || now.Before(row.BreakerEnd):
 		row.State = "paused"
+	case row.Capability != "":
+		// A key dedicated to a service is never probed: there is no model list to learn.
+		row.State = "ready"
 	case !row.Probed:
 		row.State = "unchecked"
 	default:
@@ -232,8 +236,12 @@ func keyHint(k *upstream.Key) string {
 
 func (h *Handler) keyRows(cl *config.Client, now time.Time) []keyRow {
 	byName := map[string]*upstream.Key{}
-	for _, k := range h.a.Pool.ClientKeys(cl.Name) {
-		byName[k.Label()] = k
+	// Every key of the client, including the ones dedicated to a service: the panel must show
+	// them, or the owner cannot see what the client is made of.
+	for _, k := range h.a.Pool.Keys() {
+		if k.Owner() == cl.Name {
+			byName[k.Label()] = k
+		}
 	}
 	out := make([]keyRow, 0, len(cl.Keys))
 	for _, u := range cl.Keys {

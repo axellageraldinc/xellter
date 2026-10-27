@@ -145,6 +145,12 @@ func (a *App) ProbeKeys(ctx context.Context) {
 			a.readAccount(ctx, k)
 			continue
 		}
+		if k.Capability() != "" {
+			// A key dedicated to one service is never probed: the probe asks for a chat model, which
+			// such a key may not call, and a pay-as-you-go key must not be billed for xellter's own
+			// curiosity. It is used for its service only.
+			continue
+		}
 		body := []byte(`{"model":"xellter-probe","max_tokens":1,"messages":[{"role":"user","content":"."}]}`)
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, cfg.Kenari.BaseURL+"/v1/chat/completions", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")

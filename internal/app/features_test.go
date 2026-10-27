@@ -94,6 +94,78 @@ func TestProbeLearnsAllowListWithoutBilling(t *testing.T) {
 	t.Fatal("pro-c should remain routable through the unrestricted key")
 }
 
+// A client may hold a key dedicated to one service (the X search). Such a key is
+// never probed and never serves a model call: it is pay-as-you-go, and xellter must
+// not spend it on its own curiosity. The search endpoint uses it, and only it.
+func TestSearchKeyIsNeverProbedAndNeverServesAModel(t *testing.T) {
+	e := setup(t, func(c *config.Config) {
+		c.Clients[0].Keys = append(c.Clients[0].Keys, config.Upstream{Name: "X", KeyEnv: "KEY_X", Capability: "search"})
+	})
+	// The secret exists, so the key is in the pool.
+	e.a.Pool.Reload(e.a.Cfg(), map[string]string{
+		"KEY_PLAN": "secret-plan", "KEY_TOPUP": "secret-topup", "KEY_LOCKED": "secret-locked",
+		"KEY_DIRECT": "secret-direct", "KEY_CODED": "secret-coded", "KENARI_ACCOUNT_KEY": "secret-account",
+		"KEY_X": "secret-x",
+	}, nil)
+
+	// The probe asks every key for a chat model. The search key must not be asked.
+	e.a.ProbeKeys(context.Background())
+	for _, c := range e.f.calls {
+		if c.Auth == "Bearer secret-x" {
+			t.Fatalf("the search key was probed: %+v", c)
+		}
+	}
+
+	// A model call must never land on the search key either.
+	e.f.calls = nil
+	r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "text"))
+	if r.StatusCode != 200 {
+		t.Fatalf("the chat call failed: %d", r.StatusCode)
+	}
+	for _, c := range e.f.calls {
+		if c.Auth == "Bearer secret-x" {
+			t.Fatalf("the search key served a model call: %+v", c)
+		}
+	}
+
+	// The search endpoint uses that key, and only that key.
+	e.f.calls = nil
+	r, body := e.post(t, e.keyCl, "/v1/x/search", `{"query":"news"}`)
+	if r.StatusCode != 200 {
+		t.Fatalf("the search call failed: %d %s", r.StatusCode, body)
+	}
+	if len(e.f.calls) != 1 || e.f.calls[0].Auth != "Bearer secret-x" {
+		t.Fatalf("the search must go to the search key: %+v", e.f.calls)
+	}
+	if !strings.Contains(body, "@someone") {
+		t.Fatalf("the answer must be the upstream's: %s", body)
+	}
+}
+
+// A client without a search key is told so, instead of a model call being forwarded.
+func TestSearchWithoutAKeyIsRefused(t *testing.T) {
+	e := setup(t, nil)
+	r, body := e.post(t, e.keyCl, "/v1/x/search", `{"query":"news"}`)
+	if r.StatusCode != 404 {
+		t.Fatalf("status = %d, want 404: %s", r.StatusCode, body)
+	}
+}
+
+// A preset must not answer an endpoint xellter does not serve. A chat preset used to
+// answer any path, so a request for an unknown endpoint was forwarded as a model call
+// and its failure was counted against every model of the preset.
+func TestUnknownEndpointDoesNotReachTheModel(t *testing.T) {
+	e := setup(t, nil)
+	e.f.calls = nil
+	r, body := e.post(t, e.keyCl, "/v1/not-an-endpoint", fmt.Sprintf(chatBody, "text"))
+	if r.StatusCode != 404 {
+		t.Fatalf("status = %d, want 404: %s", r.StatusCode, body)
+	}
+	if len(e.f.calls) != 0 {
+		t.Fatalf("nothing must reach the upstream: %+v", e.f.calls)
+	}
+}
+
 func TestAccountQuotaFromUnrestrictedKeyIsRead(t *testing.T) {
 	e := setup(t, nil)
 	reset := time.Now().Add(48 * time.Hour).UTC().Format(time.RFC3339)

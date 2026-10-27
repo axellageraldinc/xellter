@@ -29,6 +29,7 @@ export type KeyRow = {
   last_ok: string
   tier: string
   state: string
+  capability: string
 }
 
 export type Candidate = {

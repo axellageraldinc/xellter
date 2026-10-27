@@ -30,6 +30,7 @@ type Key struct {
 	cfg      config.Upstream
 	acct     *Account
 	readOnly bool      // the account key: it reads plan and balance, it never serves requests
+	capable  string    // the kenari service this key is dedicated to ("" = a model key, "search" = the X search endpoint)
 	cooldown time.Time // key unusable until (rejected key)
 	fails    int       // consecutive failures
 	breaker  time.Time
@@ -119,7 +120,7 @@ func (p *Pool) Reload(cfg *config.Config, secrets map[string]string, st *store.S
 			a.mu.Unlock()
 		}
 		k.mu.Lock()
-		k.cfg, k.secret, k.acct, k.label, k.client, k.readOnly = u, secrets[u.KeyEnv], a, u.Name, e.client, e.readOnly
+		k.cfg, k.secret, k.acct, k.label, k.client, k.readOnly, k.capable = u, secrets[u.KeyEnv], a, u.Name, e.client, e.readOnly, u.Capability
 		k.mu.Unlock()
 		next = append(next, k)
 		by[e.id] = k
@@ -127,13 +128,29 @@ func (p *Pool) Reload(cfg *config.Config, secrets map[string]string, st *store.S
 	p.keys, p.by, p.accts = next, by, accts
 }
 
-// ClientKeys returns the keys that belong to a client.
+// ClientKeys returns the keys that belong to a client and may serve a model
+// call. A key dedicated to a capability (the search endpoint) is not one of
+// them: it never takes part in model routing.
 func (p *Pool) ClientKeys(client string) []*Key {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	var out []*Key
 	for _, k := range p.keys {
-		if k.Owner() == client && client != "" {
+		if k.Owner() == client && client != "" && k.Capability() == "" {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// ClientCapabilityKeys returns the keys of a client that are dedicated to one
+// capability, in configuration order.
+func (p *Pool) ClientCapabilityKeys(client, capability string) []*Key {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	var out []*Key
+	for _, k := range p.keys {
+		if k.Owner() == client && client != "" && k.Capability() == capability {
 			out = append(out, k)
 		}
 	}
@@ -203,6 +220,14 @@ func (k *Key) ReadOnly() bool {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return k.readOnly
+}
+
+// Capability reports the kenari service this key is dedicated to ("" = a model
+// key). A key with a capability is never probed and never serves a model call.
+func (k *Key) Capability() string {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.capable
 }
 
 // Account returns the key's account.

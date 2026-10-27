@@ -92,6 +92,11 @@ and the models a key may call by itself.
 |---|---|
 | `name` | `[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}`, unique inside the client |
 | `key_env` | name of the secret holding the value, `UPPER_SNAKE`; must be unique across the whole file. `xellter key add` derives it from client and key name |
+| `capability` | the service this key is dedicated to: `search` for the X search endpoint. Empty (the default) means a model key |
+
+A key with a capability serves that service and nothing else (ADR 0024). It is never probed, never
+takes part in model routing, and never serves a model call: a pay-as-you-go key must not be billed
+for xellter's own curiosity. The panel shows the service next to the key.
 
 The value lives in `data/secrets.env` (0600), never in the YAML.
 

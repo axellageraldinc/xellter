@@ -161,6 +161,11 @@ func newFake(t testing.TB) *fake {
 		rec(w, r)
 		io.WriteString(w, `{"text":"hello"}`)
 	})
+	mux.HandleFunc("/v1/x/search", func(w http.ResponseWriter, r *http.Request) {
+		c, _ := rec(w, r)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"answer":"- @someone: a post https://x.com/someone/status/1","citations":[{"url":"https://x.com/someone/status/1","title":"@someone"}],"cost_micro_idr":100000000,"auth":"`+c.Auth+`"}`)
+	})
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
 	return f

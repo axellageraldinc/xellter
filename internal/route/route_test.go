@@ -220,6 +220,28 @@ func TestPresetCategoryMustMatchTheEndpoint(t *testing.T) {
 	}
 }
 
+// An endpoint xellter does not serve is refused, not forwarded. A chat preset used to answer any path, so a
+// request for an endpoint xellter has was sent upstream as a model call: its failure was counted against
+// every model of the preset, and three such failures took the whole pool out for hours.
+func TestUnknownEndpointIsRefused(t *testing.T) {
+	r, cl := setup("a", "b", "c")
+	_, err := r.Plan(cl, "text", "s", "/v1/x/search", t0)
+	if err == nil {
+		t.Fatal("an endpoint xellter does not serve must be refused")
+	}
+	if err.Status != 404 {
+		t.Fatalf("status = %d, want 404", err.Status)
+	}
+	// The same holds for a model named directly.
+	if _, err := r.Plan(cl, "a", "s", "/v1/x/search", t0); err == nil {
+		t.Fatal("a model must not be callable on an endpoint xellter does not serve")
+	}
+	// The chat path is untouched.
+	if _, err := r.Plan(cl, "text", "s", "/v1/chat/completions", t0); err != nil {
+		t.Fatalf("the chat path must still work: %v", err)
+	}
+}
+
 // A client may name a model that is in one of its own pools, and nothing else.
 func TestDirectModelMustBeInAPool(t *testing.T) {
 	r, cl := setup("a")

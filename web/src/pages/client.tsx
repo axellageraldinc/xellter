@@ -147,8 +147,16 @@ export function ClientDetailPage() {
                         </span>
                       </TD>
                       <TD className="text-text-secondary">
-                        {k.unrestricted ? 'All models' : k.allowed ? `${num(k.allowed)} models` : k.probed ? 'none' : '—'}
-                        {k.blocked > 0 && <span className="ml-2 text-xs text-warning-text">{k.blocked} blocked now</span>}
+                        {k.capability ? (
+                          <span title="This key serves one service only. It is never probed and never used for a model call.">
+                            {k.capability === 'search' ? 'X search only' : k.capability}
+                          </span>
+                        ) : (
+                          <>
+                            {k.unrestricted ? 'All models' : k.allowed ? `${num(k.allowed)} models` : k.probed ? 'none' : '—'}
+                            {k.blocked > 0 && <span className="ml-2 text-xs text-warning-text">{k.blocked} blocked now</span>}
+                          </>
+                        )}
                       </TD>
                       <TD className="text-right">
                         <div className="flex justify-end gap-1">
