@@ -57,8 +57,9 @@ func optimizationOptions() []option {
 	return out
 }
 
-// categoryOption is one preset a client may hold: the category, the fixed
-// preset name it maps to, and how the panel names it.
+// categoryOption is one preset a client may hold: the category and how the
+// panel names it. The preset itself is named by the owner (ADR 0021), so the
+// suggested name is only a starting point.
 type categoryOption struct {
 	Category string `json:"category"`
 	Preset   string `json:"preset"`
@@ -252,7 +253,9 @@ func (h *Handler) presetRows(cl *config.Client) []presetRow {
 	for n := range cl.Presets {
 		names = append(names, n)
 	}
-	sort.Slice(names, func(i, j int) bool { return presetOrder(names[i]) < presetOrder(names[j]) })
+	sort.Slice(names, func(i, j int) bool {
+		return presetOrder(cl.Presets[names[i]].Category, names[i]) < presetOrder(cl.Presets[names[j]].Category, names[j])
+	})
 	rows := make([]presetRow, 0, len(names))
 	for _, n := range names {
 		p := cl.Presets[n]
@@ -271,10 +274,12 @@ func (h *Handler) presetRows(cl *config.Client) []presetRow {
 	return rows
 }
 
-// presetOrder sorts presets by category, in the display order of the plan.
-func presetOrder(name string) string {
+// presetOrder sorts presets by category, in the display order of the plan, and
+// by name inside a category. The preset name is the owner's own (ADR 0021), so
+// the category is what decides the order, not the name.
+func presetOrder(category, name string) string {
 	for i, c := range config.Categories {
-		if config.PresetName(c) == name {
+		if c == category {
 			return fmt.Sprintf("%02d", i)
 		}
 	}
@@ -402,8 +407,19 @@ func findClient(cfg *config.Config, name string) *config.Client {
 	return nil
 }
 
-// clients creates, updates, rotates or deletes one client.
+// clients lists the clients on a GET, and creates, updates, rotates or deletes
+// one on a POST.
 func (h *Handler) clients(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		cfg := h.a.Cfg()
+		now := time.Now()
+		jok(w, map[string]any{
+			"clients":       h.clientRows(cfg, now, 24*time.Hour),
+			"purposes":      purposeOptions(),
+			"optimizations": optimizationOptions(),
+		})
+		return
+	}
 	var in struct {
 		Action   string `json:"action"` // create | update | rotate | delete
 		Name     string `json:"name"`
@@ -666,6 +682,7 @@ type presetView struct {
 	Optimization      string               `json:"optimization"`
 	OptimizationLabel string               `json:"optimization_label"`
 	Models            []string             `json:"models"`
+	AutoModels        []string             `json:"auto_models"` // free and promo models xellter added on its own
 	Ranking           *rank.Ranking        `json:"ranking"`
 	Evictions         map[string]time.Time `json:"evictions"`
 }
@@ -691,14 +708,26 @@ func (h *Handler) clientDetail(w http.ResponseWriter, r *http.Request) {
 	for n := range cl.Presets {
 		names = append(names, n)
 	}
-	sort.Slice(names, func(i, j int) bool { return presetOrder(names[i]) < presetOrder(names[j]) })
+	sort.Slice(names, func(i, j int) bool {
+		return presetOrder(cl.Presets[names[i]].Category, names[i]) < presetOrder(cl.Presets[names[j]].Category, names[j])
+	})
 	presets := make([]presetView, 0, len(names))
 	for _, n := range names {
 		p := cl.Presets[n]
+		own := map[string]bool{}
+		for _, id := range p.Models {
+			own[id] = true
+		}
+		auto := []string{}
+		for _, id := range rank.AutoPool(cfg, h.a.Cat.Snapshot(), h.a.Pool, cl, p.Category, now) {
+			if !own[id] {
+				auto = append(auto, id)
+			}
+		}
 		presets = append(presets, presetView{
 			Name: n, Category: p.Category, Label: categoryLabel[p.Category],
 			Optimization: p.Optimization, OptimizationLabel: optimizationLabel[p.Optimization],
-			Models: append([]string{}, p.Models...), Ranking: rk[rank.Key(cl.Name, n)],
+			Models: append([]string{}, p.Models...), AutoModels: auto, Ranking: rk[rank.Key(cl.Name, n)],
 			Evictions: h.a.Rt.Evictions(cl.Name, n, now),
 		})
 	}
@@ -720,8 +749,9 @@ func (h *Handler) clientDetail(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) presets(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Client       string   `json:"client"`
-		Action       string   `json:"action"` // save | delete
+		Action       string   `json:"action"` // save | delete | rename
 		Preset       string   `json:"preset"`
+		NewName      string   `json:"new_name"`
 		Category     string   `json:"category"`
 		Optimization string   `json:"optimization"`
 		Models       []string `json:"models"`
@@ -736,22 +766,20 @@ func (h *Handler) presets(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 404, "no such client")
 		return
 	}
-	name := in.Preset
+	name := strings.TrimSpace(in.Preset)
 	if name == "" {
-		name = config.PresetName(in.Category)
-	}
-	if name == "" {
-		jerr(w, 422, "send a preset name or a category")
+		jerr(w, 422, "send a preset name")
 		return
 	}
 	switch in.Action {
 	case "save":
 		category := in.Category
 		if category == "" {
+			// A preset written before presets could be renamed carries its category in its name.
 			category = config.CategoryOfPreset(name)
 		}
 		if category == "" {
-			jerr(w, 422, fmt.Sprintf("%q is not a preset name; use one of text, image, video, tts, stt, music, systemone", name))
+			jerr(w, 422, fmt.Sprintf("%q has no category; send one of %v", name, config.Categories))
 			return
 		}
 		opt := in.Optimization
@@ -769,6 +797,25 @@ func (h *Handler) presets(w http.ResponseWriter, r *http.Request) {
 			models = append(models, m)
 		}
 		cl.Presets[name] = config.Preset{Category: category, Optimization: opt, Models: models}
+	case "rename":
+		newName := strings.TrimSpace(in.NewName)
+		if newName == "" {
+			jerr(w, 422, "send the new preset name")
+			return
+		}
+		old, ok := cl.Presets[name]
+		if !ok {
+			jerr(w, 404, "no such preset")
+			return
+		}
+		if _, taken := cl.Presets[newName]; taken {
+			jerr(w, 409, fmt.Sprintf("this client already has a preset named %q", newName))
+			return
+		}
+		// The preset keeps its category, its optimization and its pool: only the name the
+		// client asks for changes (ADR 0021).
+		delete(cl.Presets, name)
+		cl.Presets[newName] = old
 	case "delete":
 		if _, ok := cl.Presets[name]; !ok {
 			jerr(w, 404, "no such preset")
@@ -776,7 +823,7 @@ func (h *Handler) presets(w http.ResponseWriter, r *http.Request) {
 		}
 		delete(cl.Presets, name)
 	default:
-		jerr(w, 400, "action must be save or delete")
+		jerr(w, 400, "action must be save, rename or delete")
 		return
 	}
 	if err := h.a.Apply(&next); err != nil {

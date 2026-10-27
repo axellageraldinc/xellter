@@ -22,6 +22,7 @@ import (
 	"github.com/axellageraldinc/xellter/internal/auth"
 	"github.com/axellageraldinc/xellter/internal/config"
 	"github.com/axellageraldinc/xellter/internal/proxy"
+	"github.com/axellageraldinc/xellter/internal/rank"
 	"github.com/axellageraldinc/xellter/internal/store"
 )
 
@@ -92,9 +93,15 @@ func serve(args []string) error {
 	a.Start(ctx)
 
 	mux := http.NewServeMux()
-	mux.Handle("/admin/", admin.New(a))
-	mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/admin/", http.StatusFound) })
-	mux.Handle("/", a.Px)
+	// The panel is the site: it answers everything that is not the API. The API
+	// and the proxy are mounted on it, so one service serves the panel and
+	// /v1 (ADR 0023).
+	panel := admin.New(a)
+	mux.Handle("/api/", panel)
+	mux.HandleFunc("/api", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/api/", http.StatusFound) })
+	mux.Handle("/v1/", a.Px)
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { a.Px.ServeHTTP(w, r) })
+	mux.Handle("/", panel)
 	srv := &http.Server{Addr: a.Cfg().Server.Listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 15 * time.Minute}
 	log.Println(a.Describe())
 	errc := make(chan error, 1)
@@ -160,8 +167,11 @@ func explain(args []string) error {
 	sort.Strings(names)
 	for _, n := range names {
 		r := a.Rt.Rankings()[n]
+		// The pool is everything the preset may route over: the list, the reserve
+		// behind it, and the models that were left out with a reason.
+		pool := len(r.Candidates) + len(r.Reserve) + len(r.Rejected)
 		fmt.Printf("\n== %s / %s (%s, %s, purpose %s)  models in the pool: %d  routed against: %d\n",
-			r.Client, r.Preset, r.Category, r.Optimization, r.Purpose, len(r.Candidates)+len(r.Rejected), len(r.Candidates))
+			r.Client, r.Preset, r.Category, r.Optimization, r.Purpose, pool, len(r.Candidates))
 		for i, c := range r.Candidates {
 			fmt.Printf("%2d. %-34s %-8s Rp%-9.2f quality %.2f (%s)  %s\n", i+1, c.Model, c.Billing, c.CostIDR, c.Bench, c.BenchSource, c.Reason)
 		}
@@ -171,11 +181,23 @@ func explain(args []string) error {
 		for _, x := range r.Rejected {
 			fmt.Printf("    x %-32s %s\n", x.Model, x.Why)
 		}
+		if len(r.Reserve) > 0 {
+			fmt.Printf("    (%d models wait in the reserve: %s)\n", len(r.Reserve), reserveNames(r.Reserve))
+		}
 		if len(r.Unranked) > 0 {
 			fmt.Printf("    (%d models have no quality evidence: %s)\n", len(r.Unranked), strings.Join(r.Unranked, ", "))
 		}
 	}
 	return nil
+}
+
+// reserveNames lists the models that wait in the reserve.
+func reserveNames(list []rank.Candidate) string {
+	out := make([]string, 0, len(list))
+	for _, c := range list {
+		out = append(out, c.Model)
+	}
+	return strings.Join(out, ", ")
 }
 
 // migrateCmd converts a pre-rewrite configuration file. It prints the result unless -write is given, and it

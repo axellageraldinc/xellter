@@ -1,4 +1,7 @@
-// Package admin serves the dashboard UI and its JSON API under /admin.
+// Package admin serves the dashboard UI and its JSON API.
+//
+// The panel is the site: it is served at the root and its API at /api. The
+// proxy owns /v1, so the two never meet.
 //
 // Access rules: the Host header must be in server.admin_hosts (so a public
 // hostname that only fronts /v1 never exposes the panel), every API call needs
@@ -26,24 +29,30 @@ import (
 	"github.com/axellageraldinc/xellter/internal/config"
 )
 
-//go:embed ui
+//go:embed ui/dist
 var uiFS embed.FS
 
 const cookieName = "xl_session"
 
-// Handler is the admin HTTP handler (mount it at /admin/).
+// Handler is the admin HTTP handler.
 type Handler struct {
-	a   *app.App
-	mux *http.ServeMux
-	ui  http.Handler
+	a     *app.App
+	mux   *http.ServeMux
+	ui    http.Handler // the built files
+	files fs.FS
 }
 
 // New builds the admin handler.
 func New(a *app.App) *Handler {
-	sub, _ := fs.Sub(uiFS, "ui")
-	h := &Handler{a: a, mux: http.NewServeMux(), ui: http.StripPrefix("/admin/", http.FileServer(http.FS(sub)))}
-	api := func(p string, f http.HandlerFunc) { h.mux.HandleFunc("/admin/api/"+p, h.guard(f)) }
-	h.mux.HandleFunc("/admin/api/login", h.login)
+	files, _ := fs.Sub(uiFS, "ui/dist")
+	h := &Handler{
+		a:     a,
+		mux:   http.NewServeMux(),
+		ui:    http.StripPrefix("/", http.FileServer(http.FS(files))),
+		files: files,
+	}
+	api := func(p string, f http.HandlerFunc) { h.mux.HandleFunc("/api/"+p, h.guard(f)) }
+	h.mux.HandleFunc("/api/login", h.login)
 	api("logout", h.logout)
 	api("logout-all", h.logoutAll)
 	api("me", h.me)
@@ -68,7 +77,9 @@ func New(a *app.App) *Handler {
 	api("requests", h.requests)
 	api("bench", h.benchInfo)
 	api("bench/refresh", h.benchRefresh)
-	h.mux.HandleFunc("/admin/", h.static)
+	// The panel is a single-page app: every path that is not the API is
+	// answered with the shell, so a deep link works.
+	h.mux.HandleFunc("/", h.static)
 	return h
 }
 
@@ -88,9 +99,44 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
 
-func (h *Handler) static(w http.ResponseWriter, r *http.Request) {
+// shell serves the panel itself: the index file, whatever the path was.
+func (h *Handler) shell(w http.ResponseWriter, r *http.Request) {
+	b, err := fs.ReadFile(h.files, "index.html")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
+	w.Write(b)
+}
+
+// static serves the panel's files. A path that is not a file is the panel
+// itself: the panel is a single-page app, so a deep link like /clients/babu
+// must load the shell and let the page work out the rest.
+func (h *Handler) static(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/")
+	if name == "" || !h.exists(name) {
+		h.shell(w, r)
+		return
+	}
+	if strings.HasPrefix(name, "assets/") {
+		// The file names carry a content hash, so they can be cached hard.
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "no-cache")
+	}
 	h.ui.ServeHTTP(w, r)
+}
+
+// exists reports whether the built panel has that file.
+func (h *Handler) exists(name string) bool {
+	f, err := h.files.Open(name)
+	if err != nil {
+		return false
+	}
+	f.Close()
+	return true
 }
 
 func (h *Handler) clientIP(r *http.Request) string {
@@ -168,7 +214,9 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	tok, hash := auth.NewToken()
 	ttl := time.Duration(h.a.Cfg().Server.SessionHours) * time.Hour
 	h.a.St.PutSession(hash, time.Now().Add(ttl), h.clientIP(r), r.UserAgent())
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: tok, Path: "/admin", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: h.secure(r), MaxAge: int(ttl.Seconds())})
+	// The cookie covers the whole site: the panel is served at the root and its
+	// API at /api, so a cookie scoped to one path would never be sent back.
+	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: tok, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: h.secure(r), MaxAge: int(ttl.Seconds())})
 	jok(w, map[string]any{"ok": true})
 }
 
@@ -176,7 +224,7 @@ func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(cookieName); err == nil {
 		h.a.St.DeleteSession(auth.HashToken(c.Value))
 	}
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/admin", MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1})
 	jok(w, map[string]any{"ok": true})
 }
 

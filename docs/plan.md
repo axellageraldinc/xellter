@@ -1,7 +1,7 @@
 # Plan and phases
 
 Status: **the ranking/routing rewrite is done** — `./scripts/ci.sh` is green and the running service
-uses the new engine. `docs/rewrite-plan.md` is the accepted design; ADRs 0017–0020 record the
+uses the new engine. `docs/rewrite-plan.md` is the accepted design; ADRs 0017–0023 record the
 decisions. Rollout and tuning continue (see "Next").
 
 ## Rewrite phases
@@ -12,8 +12,17 @@ decisions. Rollout and tuning continue (see "Next").
 | 1 | New config schema: seven `routing` knobs, purpose, explicit pools, one preset per category, retired-key refusal, `xellter migrate` | done |
 | 2 | Ranking: reference cost per category, three optimizations, the two cost pools for Cheapest, purpose scoring with fallback, `unranked`, reasons for every candidate and rejection | done |
 | 3 | Routing: round-robin ring over the top ten, session pin, retry once, per-preset 3-strike eviction with cooldown, 5-minute refresh, Recalculate | done |
-| 4 | Panel: client detail with purpose, keys and one card per preset; vendor-grouped model picker with family checkbox and the price line; Serving now; eviction list; Left out by reason; usage drill-down; `GET /v1/session`, `/v1/usage/keys`, `/v1/usage/models` | done |
+| 4 | Panel: client detail with purpose, keys and one card per preset; vendor-grouped model picker with family checkbox and the price line; Serving now; eviction list; Left out by reason; usage drill-down; `GET /v1/session`, `/v1/usage/keys`, `/v1/models` | done |
 | 5 | Benchmark sources: Arena multi-leaderboard, SWE-bench Verified, Aider polyglot, Open ASR; name matching with aliases; `unranked` labelling | done for fetching, matching and the chat arenas; the media arenas are stored but not yet read by the ranking (see Known gaps) |
+
+## Owner-requested changes (2026-10-27)
+
+| Change | Decision | Status |
+|---|---|---|
+| The panel was rebuilt | React, Vite, Tailwind and shadcn/ui on the ui-ux-pro-max token architecture; a clean neutral console look, light and dark, mobile-first | done (ADR 0023) |
+| The panel moved to the site root | the panel is served at `/`, its API at `/api`, the proxy keeps `/v1`; the session cookie covers `/` | done (ADR 0023) |
+| Presets are named by the owner | the name is the model the app asks for; the category says what it serves; one preset per category still holds | done (ADR 0021) |
+| Free and discounted models are always in the pool | every free model and every running promo of the category is added to every preset of that category, and leaves it again when the promo ends | done (ADR 0022) |
 
 ## Earlier phases (first build)
 
@@ -25,7 +34,7 @@ decisions. Rollout and tuning continue (see "Next").
 | P3 Auto-rank | free/plan/promo rules, tier quotas, plan ledger, weighted score, quality gate | done, superseded by phase 2 |
 | P4 Dashboard + login | panel, scrypt + TOTP login, config history + rollback | done |
 | P5 RTK | diff / grep / ls / log / truncate filters | done; now always on with fixed thresholds |
-| P7 Client-centric model | clients own kenari keys; account key for real plan numbers; panel on Tabler | done; preset generation replaced by explicit pools |
+| P7 Client-centric model | clients own kenari keys; account key for real plan numbers; panel on Tabler | done; the panel was rebuilt in React (ADR 0023) |
 | P6 Hardening + rollout | systemd unit, Tailscale exposure, REGISTRY, secret scan, clients moved one at a time | in progress |
 
 ## Deliberately not done
@@ -37,10 +46,11 @@ decisions. Rollout and tuning continue (see "Next").
 | An RTK knob or switch | RTK is always on, all filters, fixed thresholds (ADR 0017). No config key, no request header |
 | Human-typed quality scores (`benchmarks:` map) | the owner does not maintain numbers that go stale. Every score is fetched and matched onto catalog ids (ADR 0018) |
 | A weights/quality-gate/strategy vocabulary | one optimization per preset replaces weights, `min_quality`, `rr_band`, `max_candidates`, `strategy` and `mode` (ADR 0017) |
-| Generated or seeded presets | the owner creates one preset per category and ticks its models; nothing appears by itself |
+| Generated or seeded presets | the owner creates one preset per category and names it; nothing appears by itself (ADR 0021) |
 | A round-robin band | equal scores are adjacent in the ring, so ties rotate without a knob (ADR 0020) |
 | Persisting evictions | a restart forgiving a model is the safe direction |
 | A model or judge producing a score | scoring is a deterministic function of the catalog, the account state and the leaderboard snapshot (ADR 0016) |
+| A switch for the free and discounted models | they are always in the pool (ADR 0022); a knob would only decide whether the owner's rule is followed |
 
 Client-level `passthrough`, `daily_budget_idr` and `seeded` are not even refused: they are silently
 ignored, so an old file still loads. Retired sections and preset keys are refused by name, pointing at

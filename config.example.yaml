@@ -5,7 +5,7 @@
 server:
   listen: 127.0.0.1:8480          # put `tailscale serve` / a reverse proxy in front
   data_dir: data                  # SQLite, catalog cache, secrets, config history (relative to this file)
-  admin_hosts: [localhost, 127.0.0.1, my-host.my-tailnet.ts.net]  # Host headers allowed to open /admin
+  admin_hosts: [localhost, 127.0.0.1, my-host.my-tailnet.ts.net]  # Host headers allowed to open the panel
   trusted_proxy: true             # honour X-Forwarded-For/Proto from the proxy in front
 
 kenari:
@@ -35,10 +35,11 @@ clients:
     keys:                         # kenari API keys of this client (values live in data/secrets.env)
       - name: main
         key_env: KENARI_KEY_BABU_MAIN
-    presets:                      # one entry per category; the name is fixed by the category
+    presets:                      # one entry per category; the name is the model's name (ADR 0021)
       text:                       # chat   | image: images | video: videos
         category: chat            # tts: audio_speech | stt: audio_transcription
         optimization: balanced    # music: music | systemone: systemone
         models: []                # the pool, picked in the panel; the optimization only orders it
     # A second preset of the same category is refused: a client holds one of each.
+    # Every free and discounted model of the category is in the pool on its own (ADR 0022).
     # optimization: cheapest | balanced | best_quality

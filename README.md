@@ -7,14 +7,16 @@ three errors. One static Go binary, SQLite, no runtime dependencies.
 
 ## The three optimizations
 
-A preset is an **explicit pool of models** (ticked in the panel) plus **one optimization**. Ranking
-only orders the pool; it never adds or removes a model.
+A preset is a **pool of models** plus **one optimization**, and the preset has a name of your own.
+Ranking only orders the pool; it never removes a model for being cheap, expensive or unknown. Every
+free model and every model whose promo is running is in the pool of every preset of that category,
+whether you tick it or not, and leaves it again when the promo ends.
 
 | Optimization | Order | The list |
 |---|---|---|
 | Cheapest | reference cost ascending, nothing else | half free + half plan-covered (5 + 5 at the default `top_models: 10`), each half by its own cost |
 | Balanced | 50 % cost score, 50 % benchmark | top 10 (the default) |
-| Best Quality | benchmark of the category only, floor at the pool median | top 10, models with no evidence excluded |
+| Best Quality | benchmark of the category only, floor at the pool median | top 10, models with no evidence excluded (a free or discounted model is never excluded for that) |
 
 Cost is one number: the price of one reference request (for chat, 4 000 input tokens of which 70 %
 are cache reads, plus 600 output tokens), promos included. Text quality comes from public
@@ -44,7 +46,7 @@ install -d -m 700 data
 ./bin/xellter admin init -credentials-out data/FIRST-LOGIN.txt
 ./bin/xellter client add -name babu -out data/babu.key
 echo 'kn-...' | ./bin/xellter key add -client babu -name main
-./bin/xellter serve                            # http://127.0.0.1:8480/admin/
+./bin/xellter serve                            # http://127.0.0.1:8480/
 ```
 
 Then open the panel, create the presets this client needs (one per category) and tick their models.

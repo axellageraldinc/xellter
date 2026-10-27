@@ -13,8 +13,11 @@ admin panel ──▶ app.Apply(config) ──▶ hot reload of pool, router, pr
 
 The rewrite that produced this shape is [docs/rewrite-plan.md](rewrite-plan.md); the decisions are
 ADR [0017](adr/0017-three-optimizations.md), [0018](adr/0018-client-purpose-changes-text-scoring.md),
-[0019](adr/0019-explicit-model-pools-and-vendor-families.md) and
-[0020](adr/0020-round-robin-top-ten-with-per-preset-eviction.md).
+[0019](adr/0019-explicit-model-pools-and-vendor-families.md),
+[0020](adr/0020-round-robin-top-ten-with-per-preset-eviction.md),
+[0021](adr/0021-preset-names-are-the-owners.md),
+[0022](adr/0022-free-and-discounted-models-are-always-in-the-pool.md) and
+[0023](adr/0023-the-panel-is-the-site.md).
 
 ## Components
 
@@ -25,13 +28,14 @@ ADR [0017](adr/0017-three-optimizations.md), [0018](adr/0018-client-purpose-chan
 | `internal/store` | SQLite (modernc, no CGO): request log, usage aggregates, leaderboard rows, admin sessions, video job -> key |
 | `internal/upstream` | per-key and per-account limits: rpm, free quota, plan ledger, cooldown, breaker, learned allow list |
 | `internal/rank` | pure ranking of one preset: pool -> rejections -> cost/quality -> top list, with reasons |
-| `internal/route` | rankings cache, round-robin ring, session pin, per-preset eviction, key ordering |
+| `internal/route` | rankings cache, effective pools, round-robin ring, session pin, per-preset eviction, key ordering |
 | `internal/proxy` | data plane: auth, body rewrite, streaming relay, usage accounting, read-only endpoints |
 | `internal/rtk` | tool-output compression, always on |
 | `internal/bench` | public leaderboards -> one 0..1 value per model and arena |
 | `internal/auth` | admin login: scrypt + TOTP + recovery codes |
-| `internal/admin` | `/admin` API + embedded UI (plain JS on vendored Tabler, no build step, no CDN) |
+| `internal/admin` | the panel: `/api` JSON API + the embedded React app (built by Vite, no CDN) |
 | `internal/app` | wiring, `Apply` hot reload, background loops |
+| `web` | the panel's source: React, Vite, Tailwind, shadcn/ui; built into `internal/admin/ui/dist` |
 
 ## Catalog (`internal/catalog`)
 
@@ -132,11 +136,15 @@ reason.
 
 ### Pool and rejections
 
-The pool is exactly `preset.models` — the ids the owner ticked in the panel. Ranking never adds a
-model and never removes one for being new, cheap, expensive or unknown. A model is rejected only
-when it cannot serve: not in the catalog, of another endpoint, subscriber-only without a plan,
-sunsetting inside `routing.avoid_sunset_days`, no key of this client may call it, or outside the top
-list.
+The pool is `preset.models` — the ids the owner ticked in the panel — plus every free model and
+every model whose promo is running of that category (ADR 0022). The added models are the ones the
+client's own keys may call and that are usable; they leave the pool on their own when the promo
+ends or kenari drops the model. Ranking never removes a model for being new, cheap, expensive or
+unknown, and never removes a free or discounted one for want of quality evidence.
+
+A model is rejected only when it cannot serve: not in the catalog, of another endpoint,
+subscriber-only without a plan, sunsetting inside `routing.avoid_sunset_days`, or no key of this
+client may call it. A model that is merely outside the top list is a *reserve*, not a rejection.
 
 ### Billing class
 
@@ -286,6 +294,10 @@ counters. `/v1/usage` remains per model with `billing_kind` (`free`, `plan`, `pa
 
 ## Panel (`internal/admin`)
 
+The panel is the site: it is served at the root of its host and its JSON API is at `/api` (ADR 0023).
+The proxy keeps `/v1`, and `/healthz` is the proxy's. A deep link such as `/clients/babu` loads the
+panel shell and the page works out the rest.
+
 Routes: **Overview**, **Clients**, **Usage**, **Config file**. There is no Settings page: the few
 remaining knobs live in `xellter.yaml` and the Config tab edits that file (ADR 0012, 0014).
 
@@ -293,7 +305,7 @@ remaining knobs live in `xellter.yaml` and the Config tab edits that file (ADR 0
 |---|---|
 | Overview | status banner with alerts, 24 h requests / failures / cost at list price / characters saved by RTK, kenari plan windows and balance, hourly chart, per-client table, Refresh catalog |
 | Clients | one row per client: purpose, key names, presets, 24 h requests and cost; New client (name, purpose, optional kenari key) and the xellter key shown once |
-| Client detail | purpose and enabled; kenari keys with probe state and the models they may call (add, rename, replace, remove); one card per preset: optimization, pool picker grouped by vendor with a family checkbox and a price line, "Serving now" (rank, model, billing, score, why), the eviction list with the moment each model returns, and "Left out" grouped by reason; Look up a session; New xellter key; Recalculate; Delete client |
+| Client detail | purpose and enabled; kenari keys with probe state and the models they may call (add, rename, remove); one card per preset: its name (renameable), optimization, pool picker grouped by vendor with a family checkbox and a price line, the free and discounted models xellter added on its own, "Serving now" (rank, model, billing, score, why), the eviction list with the moment each model returns, and "Left out" grouped by reason; Look up a session; New xellter key; Recalculate; Delete client |
 | Usage | 24 h or 30 d; all clients -> one client -> its presets -> the models in a preset; totals, chart, and kenari's own plan windows and balance next to xellter's numbers |
 | Config file | the YAML, checked and applied on save, with earlier versions restorable |
 
@@ -301,11 +313,16 @@ The model picker row is the requirement: name, billing class, context size, moda
 and `In … Out … CR … CW …` in IDR; free and plan-covered rows show list prices greyed so the pool
 can be compared, and a price the catalog does not publish is `—`.
 
-Admin API: `overview`, `clients`, `client`, `presets`, `keys`, `keys/reset`, `keys/probe`,
-`account-key`, `ranking`, `recompute`, `catalog/models`, `catalog/refresh`, `usage`, `usage/drill`,
-`usage/keys`, `session`, `requests`, `bench`, `bench/refresh`, `config`, `rollback`, `login`,
-`logout`, `logout-all`, `me`. Writes need the `X-Xellter` header; the login cookie is HttpOnly and
-SameSite=Strict; `Host` must match `server.admin_hosts`.
+Admin API (under `/api`): `overview`, `clients`, `client`, `presets`, `keys`, `keys/reset`,
+`keys/probe`, `account-key`, `ranking`, `recompute`, `catalog/models`, `catalog/refresh`, `usage`,
+`usage/drill`, `usage/keys`, `session`, `requests`, `bench`, `bench/refresh`, `config`, `rollback`,
+`login`, `logout`, `logout-all`, `me`. Writes need the `X-Xellter` header; the login cookie is
+HttpOnly, SameSite=Strict and scoped to `/`; `Host` must match `server.admin_hosts`.
+
+The panel's source is `web/`: React, Vite, Tailwind and shadcn/ui. `npm run build` writes
+`internal/admin/ui/dist`, which the Go binary embeds, so the shipped service is still one file and
+the browser still loads nothing from a CDN. The design tokens are the three layers of the
+ui-ux-pro-max reference: primitive, semantic, component (`web/src/styles/tokens.css`).
 
 ## State
 

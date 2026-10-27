@@ -61,6 +61,12 @@ type Router struct {
 	rankings atomic.Pointer[map[string]*rank.Ranking]
 	computed atomic.Int64 // unix ms of the last Recompute
 
+	// pools is the effective pool of every preset: the models the owner ticked
+	// plus the free and promo models xellter added (ADR 0022). It is rebuilt
+	// with the rankings, so the request path never recomputes it.
+	poolsMu sync.RWMutex
+	pools   map[string][]string
+
 	rrMu sync.Mutex
 	rr   map[string]uint64 // per client+preset rotation counter
 
@@ -101,13 +107,33 @@ func (r *Router) Recompute(now time.Time) {
 	if snap == nil {
 		return
 	}
-	in := rank.Inputs{Cfg: r.cfg.Load(), Snap: snap, Pool: r.pool, Now: now}
+	cfg := r.cfg.Load()
+	in := rank.Inputs{Cfg: cfg, Snap: snap, Pool: r.pool, Now: now}
 	if r.st != nil {
 		in.Bench, _ = r.st.Bench()
 	}
 	m := rank.All(in)
 	r.rankings.Store(&m)
 	r.computed.Store(now.UnixMilli())
+	// The effective pool of every preset is rebuilt here, so the request path
+	// only reads it (ADR 0022).
+	pools := make(map[string][]string, len(m))
+	for i := range cfg.Clients {
+		cl := &cfg.Clients[i]
+		for name, sh := range cl.Presets {
+			pools[rank.Key(cl.Name, name)] = rank.EffectivePool(cfg, snap, r.pool, cl, sh, now)
+		}
+	}
+	r.poolsMu.Lock()
+	r.pools = pools
+	r.poolsMu.Unlock()
+}
+
+// effectivePool returns the cached pool of a preset.
+func (r *Router) effectivePool(client, preset string) []string {
+	r.poolsMu.RLock()
+	defer r.poolsMu.RUnlock()
+	return r.pools[rank.Key(client, preset)]
 }
 
 // Rankings returns the latest rankings.
@@ -138,10 +164,11 @@ func (r *Router) Models(cl *config.Client) (presets []string, real []string) {
 		return
 	}
 	// A client may always name a model that is in one of its own preset pools: that is how a caller pins a
-	// concrete model without a separate allow list.
+	// concrete model without a separate allow list. The pool includes the free and promo models xellter
+	// added on its own (ADR 0022).
 	own := map[string]bool{}
-	for _, sh := range cl.Presets {
-		for _, id := range sh.Models {
+	for name := range cl.Presets {
+		for _, id := range r.effectivePool(cl.Name, name) {
 			own[id] = true
 		}
 	}
@@ -206,8 +233,8 @@ func (r *Router) pinModel(cl *config.Client, id, session string, now time.Time) 
 		return nil, &Error{404, "model_not_found", fmt.Sprintf("unknown model %q", id), 0}
 	}
 	allowed := false
-	for _, sh := range cl.Presets {
-		for _, mid := range sh.Models {
+	for name := range cl.Presets {
+		for _, mid := range r.effectivePool(cl.Name, name) {
 			if mid == id {
 				allowed = true
 			}

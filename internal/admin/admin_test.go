@@ -91,7 +91,7 @@ func sessionCookie(t *testing.T, a *app.App) *http.Cookie {
 	a.Auth = auth.NewAuthenticator(&rec, filepath.Join(a.Cfg().Server.DataDir, "login-state.json"), filepath.Join(a.Cfg().Server.DataDir, "recovery-used.json"))
 	tok, hash := auth.NewToken()
 	a.St.PutSession(hash, time.Now().Add(time.Hour), "127.0.0.1", "test")
-	return &http.Cookie{Name: cookieName, Value: tok, Path: "/admin"}
+	return &http.Cookie{Name: cookieName, Value: tok, Path: "/"}
 }
 
 // do drives one admin API call.
@@ -127,7 +127,7 @@ func TestConfigPutRejectsBothConfigAndYAML(t *testing.T) {
 	c := sessionCookie(t, a)
 
 	// read the current config the way the skill's recipe does
-	rec := do(t, h, c, http.MethodGet, "/admin/api/config", nil)
+	rec := do(t, h, c, http.MethodGet, "/api/config", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET config: %d %s", rec.Code, rec.Body)
 	}
@@ -144,7 +144,7 @@ func TestConfigPutRejectsBothConfigAndYAML(t *testing.T) {
 
 	// patch one knob and send the whole response back
 	got.Config.Routing.TopModels = 7
-	rec = do(t, h, c, http.MethodPut, "/admin/api/config", map[string]any{"config": got.Config, "yaml": *got.YAML})
+	rec = do(t, h, c, http.MethodPut, "/api/config", map[string]any{"config": got.Config, "yaml": *got.YAML})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("PUT with both fields: got %d %s, want 400", rec.Code, rec.Body)
 	}
@@ -163,7 +163,7 @@ func TestConfigPutAppliesARoutingKnob(t *testing.T) {
 	cur := cloneCfg(t, a.Cfg())
 	cur.Routing.TopModels = 7
 	cur.Routing.EvictErrors = 4
-	rec := do(t, h, c, http.MethodPut, "/admin/api/config", map[string]any{"config": cur})
+	rec := do(t, h, c, http.MethodPut, "/api/config", map[string]any{"config": cur})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PUT config: %d %s", rec.Code, rec.Body)
 	}
@@ -190,7 +190,7 @@ func TestConfigPutRefusesARetiredSection(t *testing.T) {
 	a := newTestApp(t)
 	h := New(a)
 	c := sessionCookie(t, a)
-	rec := do(t, h, c, http.MethodPut, "/admin/api/config", map[string]any{"yaml": "rules:\n  sticky_minutes: 5\n"})
+	rec := do(t, h, c, http.MethodPut, "/api/config", map[string]any{"yaml": "rules:\n  sticky_minutes: 5\n"})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("retired section: %d %s", rec.Code, rec.Body)
 	}
@@ -208,26 +208,48 @@ func TestConfigPutValidatesAPreset(t *testing.T) {
 
 	cur := cloneCfg(t, a.Cfg())
 	cur.Clients[0].Presets["text"] = config.Preset{Category: "chat", Optimization: "nonsense", Models: []string{"a"}}
-	rec := do(t, h, c, http.MethodPut, "/admin/api/config", map[string]any{"config": cur})
+	rec := do(t, h, c, http.MethodPut, "/api/config", map[string]any{"config": cur})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("bad optimization: %d %s", rec.Code, rec.Body)
 	}
 	if a.Cfg().Clients[0].Presets["text"].Optimization == "nonsense" {
 		t.Fatal("an invalid config was applied")
 	}
-	// a made-up preset name is refused too
+	// A preset of the owner's own name is accepted, as long as it states its category
+	// and replaces the preset of that category the client already holds.
 	cur = cloneCfg(t, a.Cfg())
-	cur.Clients[0].Presets["budget"] = config.Preset{Category: "chat", Optimization: "balanced"}
-	rec = do(t, h, c, http.MethodPut, "/admin/api/config", map[string]any{"config": cur})
-	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "not a preset name") {
+	cur.Clients[0].Presets["my-fast-text"] = cur.Clients[0].Presets["text"]
+	delete(cur.Clients[0].Presets, "text")
+	rec = do(t, h, c, http.MethodPut, "/api/config", map[string]any{"config": cur})
+	if rec.Code != http.StatusOK {
 		t.Fatalf("custom preset name: %d %s", rec.Code, rec.Body)
+	}
+	if _, ok := a.Cfg().Clients[0].Presets["my-fast-text"]; !ok {
+		t.Fatal("the preset of the owner's own name was not applied")
+	}
+	// a preset without a category is refused
+	cur = cloneCfg(t, a.Cfg())
+	cur.Clients[0].Presets["budget"] = config.Preset{Optimization: "balanced"}
+	rec = do(t, h, c, http.MethodPut, "/api/config", map[string]any{"config": cur})
+	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "no category") {
+		t.Fatalf("preset without a category: %d %s", rec.Code, rec.Body)
+	}
+	// the preset of the owner's own name is renamed back, and the edit that follows applies
+	cur = cloneCfg(t, a.Cfg())
+	p := cur.Clients[0].Presets["my-fast-text"]
+	p.Optimization = "balanced"
+	cur.Clients[0].Presets["text"] = p
+	delete(cur.Clients[0].Presets, "my-fast-text")
+	rec = do(t, h, c, http.MethodPut, "/api/config", map[string]any{"config": cur})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rename back: %d %s", rec.Code, rec.Body)
 	}
 	// a valid edit applies and is reversible
 	cur = cloneCfg(t, a.Cfg())
-	p := cur.Clients[0].Presets["text"]
+	p = cur.Clients[0].Presets["text"]
 	p.Optimization, p.Models = "cheapest", []string{"cheap-b", "pro-c"}
 	cur.Clients[0].Presets["text"] = p
-	if rec := do(t, h, c, http.MethodPut, "/admin/api/config", map[string]any{"config": cur}); rec.Code != http.StatusOK {
+	if rec := do(t, h, c, http.MethodPut, "/api/config", map[string]any{"config": cur}); rec.Code != http.StatusOK {
 		t.Fatalf("valid config rejected: %d %s", rec.Code, rec.Body)
 	}
 	if got := a.Cfg().Clients[0].Presets["text"]; got.Optimization != "cheapest" || len(got.Models) != 2 {
@@ -235,12 +257,12 @@ func TestConfigPutValidatesAPreset(t *testing.T) {
 	}
 	// and rollback restores the previous version
 	var list struct{ History []string }
-	rec = do(t, h, c, http.MethodGet, "/admin/api/config", nil)
+	rec = do(t, h, c, http.MethodGet, "/api/config", nil)
 	_ = json.Unmarshal(rec.Body.Bytes(), &list)
 	if len(list.History) == 0 {
 		t.Fatal("no history kept")
 	}
-	if rec := do(t, h, c, http.MethodPost, "/admin/api/rollback", map[string]string{"id": list.History[0]}); rec.Code != http.StatusOK {
+	if rec := do(t, h, c, http.MethodPost, "/api/rollback", map[string]string{"id": list.History[0]}); rec.Code != http.StatusOK {
 		t.Fatalf("rollback: %d %s", rec.Code, rec.Body)
 	}
 	if got := a.Cfg().Clients[0].Presets["text"].Optimization; got != "balanced" {
@@ -252,11 +274,11 @@ func TestConfigPutValidatesAPreset(t *testing.T) {
 func TestOverviewAndRankingNeedASession(t *testing.T) {
 	a := newTestApp(t)
 	h := New(a)
-	if rec := do(t, h, nil, http.MethodGet, "/admin/api/overview", nil); rec.Code != http.StatusUnauthorized {
+	if rec := do(t, h, nil, http.MethodGet, "/api/overview", nil); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("no session: %d", rec.Code)
 	}
 	c := sessionCookie(t, a)
-	rec := do(t, h, c, http.MethodGet, "/admin/api/overview", nil)
+	rec := do(t, h, c, http.MethodGet, "/api/overview", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("overview: %d %s", rec.Code, rec.Body)
 	}
@@ -283,12 +305,12 @@ func TestOverviewAndRankingNeedASession(t *testing.T) {
 		t.Fatalf("preset rows: %+v", ov.Clients[0].Presets)
 	}
 	// the ranking endpoint answers in the new shape
-	rec = do(t, h, c, http.MethodGet, "/admin/api/ranking?client=babu&preset=text", nil)
+	rec = do(t, h, c, http.MethodGet, "/api/ranking?client=babu&preset=text", nil)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "candidates") {
 		t.Fatalf("ranking: %d %s", rec.Code, rec.Body)
 	}
 	// a state change without the X-Xellter header is refused
-	req := httptest.NewRequest(http.MethodPost, "/admin/api/recompute", strings.NewReader("{}"))
+	req := httptest.NewRequest(http.MethodPost, "/api/recompute", strings.NewReader("{}"))
 	req.Host = "localhost"
 	req.AddCookie(c)
 	rr := httptest.NewRecorder()
@@ -297,7 +319,7 @@ func TestOverviewAndRankingNeedASession(t *testing.T) {
 		t.Fatalf("state change without X-Xellter: %d", rr.Code)
 	}
 	// a state change with it works
-	if rec := do(t, h, c, http.MethodPost, "/admin/api/recompute", map[string]any{}); rec.Code != http.StatusOK {
+	if rec := do(t, h, c, http.MethodPost, "/api/recompute", map[string]any{}); rec.Code != http.StatusOK {
 		t.Fatalf("recompute: %d %s", rec.Code, rec.Body)
 	}
 }
@@ -306,18 +328,18 @@ func TestOverviewAndRankingNeedASession(t *testing.T) {
 func TestAdminHostAllowlist(t *testing.T) {
 	a := newTestApp(t)
 	h := New(a)
-	req := httptest.NewRequest(http.MethodGet, "/admin/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Host = "xellter.example.com"
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("the panel must be invisible on other hostnames: %d", rec.Code)
 	}
-	req = httptest.NewRequest(http.MethodGet, "/admin/", nil)
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Host = "localhost"
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "xellter admin") {
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "xellter") {
 		t.Fatalf("the UI shell must be served: %d", rec.Code)
 	}
 }
@@ -328,7 +350,7 @@ func TestClientDetailShowsTheRankingPerPreset(t *testing.T) {
 	a := newTestApp(t)
 	h := New(a)
 	c := sessionCookie(t, a)
-	rec := do(t, h, c, http.MethodGet, "/admin/api/client?name=babu", nil)
+	rec := do(t, h, c, http.MethodGet, "/api/client?name=babu", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("client detail: %d %s", rec.Code, rec.Body)
 	}
@@ -382,7 +404,7 @@ func TestClientDetailShowsTheRankingPerPreset(t *testing.T) {
 	if len(d.Optimizations) != 3 {
 		t.Fatalf("the three optimizations: %+v", d.Optimizations)
 	}
-	if rec := do(t, h, c, http.MethodGet, "/admin/api/client?name=nobody", nil); rec.Code != http.StatusNotFound {
+	if rec := do(t, h, c, http.MethodGet, "/api/client?name=nobody", nil); rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown client: %d", rec.Code)
 	}
 }
@@ -393,7 +415,7 @@ func TestCatalogModelsForAPreset(t *testing.T) {
 	a := newTestApp(t)
 	h := New(a)
 	c := sessionCookie(t, a)
-	rec := do(t, h, c, http.MethodGet, "/admin/api/catalog/models?client=babu&category=chat", nil)
+	rec := do(t, h, c, http.MethodGet, "/api/catalog/models?client=babu&category=chat", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("catalog: %d %s", rec.Code, rec.Body)
 	}
@@ -445,7 +467,7 @@ func TestCatalogModelsForAPreset(t *testing.T) {
 		t.Fatalf("cheap-b: %+v", g)
 	}
 	// an image model is not in a chat dropdown
-	rec = do(t, h, c, http.MethodGet, "/admin/api/catalog/models?category=images", nil)
+	rec = do(t, h, c, http.MethodGet, "/api/catalog/models?category=images", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("catalog images: %d", rec.Code)
 	}
@@ -456,7 +478,7 @@ func TestPresetSaveAndDelete(t *testing.T) {
 	a := newTestApp(t)
 	h := New(a)
 	c := sessionCookie(t, a)
-	rec := do(t, h, c, http.MethodPost, "/admin/api/presets", map[string]any{
+	rec := do(t, h, c, http.MethodPost, "/api/presets", map[string]any{
 		"client": "babu", "action": "save", "preset": "text", "category": "chat", "optimization": "cheapest",
 		"models": []string{"cheap-b", "pro-c", "cheap-b", ""},
 	})
@@ -468,22 +490,44 @@ func TestPresetSaveAndDelete(t *testing.T) {
 		t.Fatalf("the pool was not saved (duplicates and blanks dropped): %+v", p)
 	}
 	rk := a.Rt.Rankings()["babu/text"]
-	if rk == nil || len(rk.Candidates) != 2 || rk.Candidates[0].Model != "cheap-b" {
+	if rk == nil || len(rk.Candidates) == 0 {
 		t.Fatalf("the ranking must follow the new pool: %+v", rk)
 	}
-	// a made-up name is refused
-	rec = do(t, h, c, http.MethodPost, "/admin/api/presets", map[string]any{"client": "babu", "action": "save", "preset": "budget"})
-	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "not a preset name") {
-		t.Fatalf("custom preset name: %d %s", rec.Code, rec.Body)
+	// A preset of the owner's own name is accepted when it states its category and
+	// replaces the preset of that category the client already holds.
+	rec = do(t, h, c, http.MethodPost, "/api/presets", map[string]any{"client": "babu", "action": "delete", "preset": "text"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete preset: %d %s", rec.Code, rec.Body)
+	}
+	rec = do(t, h, c, http.MethodPost, "/api/presets", map[string]any{"client": "babu", "action": "save", "preset": "my-fast-text", "category": "chat", "optimization": "balanced"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("a preset of the owner's own name: %d %s", rec.Code, rec.Body)
+	}
+	if _, ok := a.Cfg().Clients[0].Presets["my-fast-text"]; !ok {
+		t.Fatal("the preset was not saved")
+	}
+	// a preset without a category is refused
+	rec = do(t, h, c, http.MethodPost, "/api/presets", map[string]any{"client": "babu", "action": "save", "preset": "budget"})
+	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "no category") {
+		t.Fatalf("preset without a category: %d %s", rec.Code, rec.Body)
+	}
+	// a preset of the owner's own name can be renamed, keeping its category and pool
+	rec = do(t, h, c, http.MethodPost, "/api/presets", map[string]any{"client": "babu", "action": "rename", "preset": "my-fast-text", "new_name": "my-quick-text"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rename preset: %d %s", rec.Code, rec.Body)
+	}
+	renamed, ok := a.Cfg().Clients[0].Presets["my-quick-text"]
+	if !ok || renamed.Category != "chat" {
+		t.Fatalf("the rename did not keep the preset: %+v", a.Cfg().Clients[0].Presets)
 	}
 	// delete removes the card
-	if rec := do(t, h, c, http.MethodPost, "/admin/api/presets", map[string]any{"client": "babu", "action": "delete", "preset": "image"}); rec.Code != http.StatusOK {
+	if rec := do(t, h, c, http.MethodPost, "/api/presets", map[string]any{"client": "babu", "action": "delete", "preset": "image"}); rec.Code != http.StatusOK {
 		t.Fatalf("delete preset: %d %s", rec.Code, rec.Body)
 	}
 	if _, ok := a.Cfg().Clients[0].Presets["image"]; ok {
 		t.Fatal("the preset was not deleted")
 	}
-	if rec := do(t, h, c, http.MethodPost, "/admin/api/presets", map[string]any{"client": "babu", "action": "delete", "preset": "image"}); rec.Code != http.StatusNotFound {
+	if rec := do(t, h, c, http.MethodPost, "/api/presets", map[string]any{"client": "babu", "action": "delete", "preset": "image"}); rec.Code != http.StatusNotFound {
 		t.Fatalf("deleting it twice: %d", rec.Code)
 	}
 }
@@ -494,14 +538,14 @@ func TestRecomputeOneClient(t *testing.T) {
 	h := New(a)
 	c := sessionCookie(t, a)
 	before := a.Rt.Computed()
-	rec := do(t, h, c, http.MethodPost, "/admin/api/recompute?client=babu", map[string]any{})
+	rec := do(t, h, c, http.MethodPost, "/api/recompute?client=babu", map[string]any{})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("recompute: %d %s", rec.Code, rec.Body)
 	}
 	if !a.Rt.Computed().After(before) && !a.Rt.Computed().Equal(before) {
 		t.Fatal("the rankings were not recomputed")
 	}
-	if rec := do(t, h, c, http.MethodPost, "/admin/api/recompute?client=nobody", map[string]any{}); rec.Code != http.StatusNotFound {
+	if rec := do(t, h, c, http.MethodPost, "/api/recompute?client=nobody", map[string]any{}); rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown client: %d", rec.Code)
 	}
 }
@@ -526,7 +570,7 @@ func TestUsageDrillDown(t *testing.T) {
 		{"window=24h&client=babu&preset=text", "model", 1},
 	}
 	for _, l := range levels {
-		rec := do(t, h, c, http.MethodGet, "/admin/api/usage/drill?"+l.query, nil)
+		rec := do(t, h, c, http.MethodGet, "/api/usage/drill?"+l.query, nil)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("%s: %d %s", l.query, rec.Code, rec.Body)
 		}
@@ -563,10 +607,10 @@ func TestUsageDrillDown(t *testing.T) {
 		}
 	}
 	// the wrong window and an unknown client are refused
-	if rec := do(t, h, c, http.MethodGet, "/admin/api/usage/drill?window=7d", nil); rec.Code != http.StatusBadRequest {
+	if rec := do(t, h, c, http.MethodGet, "/api/usage/drill?window=7d", nil); rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad window: %d", rec.Code)
 	}
-	if rec := do(t, h, c, http.MethodGet, "/admin/api/usage/drill?window=24h&client=nobody", nil); rec.Code != http.StatusNotFound {
+	if rec := do(t, h, c, http.MethodGet, "/api/usage/drill?window=24h&client=nobody", nil); rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown client: %d", rec.Code)
 	}
 }
@@ -580,7 +624,7 @@ func TestAdminUsageKeysAndSession(t *testing.T) {
 		Billing: "balance", InTok: 10, Key: "main", Session: "s1", RTKSaved: 42})
 	a.St.Flush()
 
-	rec := do(t, h, c, http.MethodGet, "/admin/api/usage/keys?client=babu", nil)
+	rec := do(t, h, c, http.MethodGet, "/api/usage/keys?client=babu", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("usage keys: %d %s", rec.Code, rec.Body)
 	}
@@ -595,11 +639,11 @@ func TestAdminUsageKeysAndSession(t *testing.T) {
 	if len(keys) != 1 || keys[0].APIKey != "main" || keys[0].Requests != 1 || keys[0].RTKSaved != 42 {
 		t.Fatalf("key rows: %+v", keys)
 	}
-	if rec := do(t, h, c, http.MethodGet, "/admin/api/usage/keys", nil); rec.Code != http.StatusBadRequest {
+	if rec := do(t, h, c, http.MethodGet, "/api/usage/keys", nil); rec.Code != http.StatusBadRequest {
 		t.Fatalf("a key breakdown needs a client: %d", rec.Code)
 	}
 
-	rec = do(t, h, c, http.MethodGet, "/admin/api/session?client=babu&id=s1", nil)
+	rec = do(t, h, c, http.MethodGet, "/api/session?client=babu&id=s1", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("session: %d %s", rec.Code, rec.Body)
 	}
@@ -619,13 +663,13 @@ func TestAdminUsageKeysAndSession(t *testing.T) {
 	if s.Session.Session != "s1" || s.Session.Preset != "text" || s.Session.Requests != 1 || s.Session.LastModel != "cheap-b" {
 		t.Fatalf("session: %+v", s.Session)
 	}
-	if rec := do(t, h, c, http.MethodGet, "/admin/api/session?client=babu&id=nope", nil); rec.Code != http.StatusNotFound {
+	if rec := do(t, h, c, http.MethodGet, "/api/session?client=babu&id=nope", nil); rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown session: %d", rec.Code)
 	}
-	if rec := do(t, h, c, http.MethodGet, "/admin/api/session?client=nobody&id=s1", nil); rec.Code != http.StatusNotFound {
+	if rec := do(t, h, c, http.MethodGet, "/api/session?client=nobody&id=s1", nil); rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown client: %d", rec.Code)
 	}
-	if rec := do(t, h, c, http.MethodGet, "/admin/api/session", nil); rec.Code != http.StatusBadRequest {
+	if rec := do(t, h, c, http.MethodGet, "/api/session", nil); rec.Code != http.StatusBadRequest {
 		t.Fatalf("session needs a client and an id: %d", rec.Code)
 	}
 }

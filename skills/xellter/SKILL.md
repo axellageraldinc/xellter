@@ -14,15 +14,16 @@ metadata:
 
 xellter is one OpenAI/Anthropic-compatible endpoint in front of kenari.id. It owns the clients (the
 apps that call it), their kenari keys and their presets. An app asks for a preset name (`text`,
-`image`, `video`, `tts`, `stt`, `music`, `systemone`) as the model; xellter picks a real model from
-that preset's pool for every request.
+`image`, `video`, `tts`, `stt`, `music`, `systemone`, or a name of the owner's own) as the model;
+xellter picks a real model from that preset's pool for every request.
 
 Repo: `~/apps/xellter`. Docs: `docs/architecture.md`, `docs/configuration.md`, `docs/adr/` (read the
-newest ADR, 0017–0020, before changing the design). Accepted design: `docs/rewrite-plan.md`.
+newest ADR, 0017–0023, before changing the design). Accepted design: `docs/rewrite-plan.md`.
 
-The one rule that decides most questions: **a preset is an explicit pool of models plus one
-optimization.** Nothing is generated, nothing is added, nothing is removed. If a model is not ticked,
-it is not used; if it is ticked, it is used unless it cannot serve.
+The one rule that decides most questions: **a preset is a pool of models plus one optimization, and
+a preset is named by the owner.** Nothing is generated, nothing is seeded. A paid model is used only
+because it is ticked; a free or discounted model of the category is always in the pool, and leaves
+it again when its promo ends (ADR 0022).
 
 ## When to Use
 
@@ -73,9 +74,10 @@ plan windows and balance; it never serves a request.
 
 ## Create a preset
 
-Panel -> the client -> **Add preset**: pick a category. It starts empty and Balanced.
+Panel -> the client -> **Add preset**: give it a name and pick a category. It starts empty and
+Balanced. The name is the model the app asks for, so it is yours to choose (ADR 0021).
 
-| Category | Preset name | Serves |
+| Category | Suggested name | Serves |
 |---|---|---|
 | chat | `text` | `/v1/chat/completions`, `/v1/responses`, `/v1/messages` |
 | images | `image` | `/v1/images/*` |
@@ -85,9 +87,20 @@ Panel -> the client -> **Add preset**: pick a category. It starts empty and Bala
 | music | `music` | `/v1/music` |
 | systemone | `systemone` | kenari's System One models; no API path is mapped to this category yet, so it cannot serve `/v1/chat/completions` |
 
-**One preset per category.** The name is fixed by the category, so a second text preset cannot be
-expressed; validation refuses it. "Add preset" only offers the categories the client does not have
-yet.
+**One preset per category.** The category is the limit, not the name: a second text preset cannot
+be expressed and validation refuses it. "Add preset" only offers the categories the client does not
+have yet.
+
+**Renaming** a preset changes the model name the app asks for. The apps must be updated. The preset
+keeps its category, its optimization and its pool.
+
+## The free and discounted models
+
+Every free model and every model whose promo is running is in the pool of every preset of that
+category, whether you tick it or not (ADR 0022). The panel shows them in their own list on the
+preset card, and they leave the pool on their own: a promo that ends, or a model kenari drops, is
+out at the next ranking. A free model is never left out for want of a quality score; it is served
+last instead.
 
 ## Choose an optimization
 
@@ -155,7 +168,7 @@ errors, tokens and cost. This is the same data `GET /v1/session` returns to the 
 ## The `routing` knobs
 
 All seven live in `xellter.yaml` under `routing`. The panel does not edit them (it only displays the
-refresh interval on a client page), so a change is a config edit or a `PUT /admin/api/config`.
+refresh interval on a client page), so a change is a config edit or a `PUT /api/config`.
 
 | Knob | Default | Change it when |
 |---|---|---|
@@ -233,5 +246,5 @@ untouched.
 - Keys of one kenari account share its limits, and there is only one account.
 - The request log stores metadata only: never prompts, never responses.
 - xellter never asks a model to score another model, and the owner never types a quality number.
-  Quality is downloaded from public leaderboards (`GET /admin/api/bench` shows what matched).
+  Quality is downloaded from public leaderboards (`GET /api/bench` shows what matched).
 - Tests never call the network or a paid API; run `./scripts/ci.sh`.

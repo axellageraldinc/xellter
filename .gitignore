@@ -16,3 +16,11 @@ FIRST-LOGIN*.txt
 node_modules/
 __pycache__/
 .worktrees/
+
+# The built panel is committed: the Go binary embeds it, so `go build` must
+# work without node. `npm run build` in web/ rewrites it.
+!internal/admin/ui/dist/
+!internal/admin/ui/dist/assets/
+
+# TypeScript build info
+web/tsconfig.tsbuildinfo

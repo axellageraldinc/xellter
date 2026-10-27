@@ -669,3 +669,149 @@ func unitFor(category string) string {
 	}
 	return "token_1m"
 }
+
+// promoChat is a paid model whose promo is running.
+func promoChat(id string, off float64, ends time.Time) *catalog.Model {
+	m := chat(id, 100, 300)
+	m.Promo = &catalog.Promo{PercentOff: off, StartsAt: now.Add(-time.Hour), EndsAt: ends}
+	return m
+}
+
+// A free model and a discounted model are in the pool of every preset, whether
+// the owner ticked them or not (ADR 0022).
+func TestFreeAndPromoModelsAreAlwaysInThePool(t *testing.T) {
+	f := fixture(chat("paid-a", 100, 300), freeChat("free-a:free"), promoChat("promo-b", 90, now.Add(24*time.Hour)))
+	// the owner ticked only the paid model
+	f.preset("paid-a")
+
+	for _, opt := range []string{"cheapest", "balanced", "best_quality"} {
+		f.optimize(opt)
+		r := f.rank(nil)
+		inPool := false
+		for _, s := range r.Candidates {
+			if s.Model == "free-a:free" {
+				inPool = true
+			}
+		}
+		if !inPool {
+			t.Errorf("%s: the free model must be served: %v", opt, order(r))
+		}
+		inPool = false
+		for _, s := range r.Candidates {
+			if s.Model == "promo-b" {
+				inPool = true
+			}
+		}
+		if !inPool {
+			t.Errorf("%s: the discounted model must be served: %v", opt, order(r))
+		}
+	}
+}
+
+// A model that is no longer free and no longer discounted leaves the pool: the
+// pool follows the catalog, not a snapshot of it.
+func TestAModelThatStopsBeingFreeLeavesThePool(t *testing.T) {
+	m := chat("was-free", 100, 300)
+	f := fixture(m)
+	f.preset("paid-a")
+	// the model is paid and has no promo: it is not added to the pool
+	f.snap.Models["was-free"] = m
+	f.optimize("balanced")
+	r := f.rank(nil)
+	for _, s := range r.Candidates {
+		if s.Model == "was-free" {
+			t.Fatalf("a paid model without a promo must not be added: %v", order(r))
+		}
+	}
+}
+
+// A promo that has ended leaves the pool, and a model that kenari drops leaves
+// it too.
+func TestEndedPromoAndRemovedModelLeaveThePool(t *testing.T) {
+	ended := promoChat("promo-ended", 90, now.Add(-time.Hour))
+	f := fixture(chat("paid-a", 100, 300), ended)
+	f.preset("paid-a")
+	f.optimize("balanced")
+	r := f.rank(nil)
+	for _, s := range r.Candidates {
+		if s.Model == "promo-ended" {
+			t.Fatalf("a model whose promo has ended must not be added: %v", order(r))
+		}
+	}
+	// a model that leaves the catalog is reported, not served
+	f2 := fixture(chat("paid-a", 100, 300))
+	f2.preset("paid-a", "gone")
+	f2.optimize("balanced")
+	r2 := f2.rank(nil)
+	if rejected(r2, "gone") == "" {
+		t.Fatalf("a model that is not in the catalog must be reported: %+v", r2.Rejected)
+	}
+}
+
+// The owner's own models keep their place: a free model does not push them out.
+func TestFreeModelsDoNotPushOutTheOwnersModels(t *testing.T) {
+	f := fixture(chat("paid-a", 100, 300), chat("paid-b", 200, 600), freeChat("free-a:free"))
+	f.preset("paid-a", "paid-b")
+	f.optimize("cheapest")
+	r := f.rank(func(in *Inputs) { in.Top = 2 })
+	got := order(r)
+	if len(got) != 2 {
+		t.Fatalf("the list must hold two models: %v", got)
+	}
+	if got[0] != "free-a:free" {
+		t.Fatalf("the free model is the cheapest and comes first: %v", got)
+	}
+	if got[1] != "paid-a" {
+		t.Fatalf("the owner's own model must keep a place: %v", got)
+	}
+}
+
+// The effective pool is the owner's models plus the free and discounted ones,
+// without duplicates.
+func TestEffectivePoolHasNoDuplicates(t *testing.T) {
+	f := fixture(chat("paid-a", 100, 300), freeChat("free-a:free"))
+	// the owner ticked the free model as well
+	f.preset("paid-a", "free-a:free")
+	pool := EffectivePool(f.cfg, f.snap, f.pool, f.cl, f.cl.Presets["text"], now)
+	seen := map[string]int{}
+	for _, id := range pool {
+		seen[id]++
+	}
+	if seen["free-a:free"] != 1 {
+		t.Fatalf("a model may be in the pool once only: %v", pool)
+	}
+	if seen["paid-a"] != 1 {
+		t.Fatalf("the owner's model must be in the pool: %v", pool)
+	}
+}
+
+// A free model with no quality evidence is served last, not left out: it is in
+// the pool and the router reaches it through the reserve.
+func TestFreeModelWithoutEvidenceIsNotLeftOut(t *testing.T) {
+	f := fixture(chat("paid-a", 100, 300), freeChat("free-a:free"))
+	f.preset("paid-a")
+	f.optimize("best_quality")
+	f.bench(map[string]float64{"paid-a": 0.8})
+	r := f.rank(func(in *Inputs) { in.Top = 1 })
+	// the list holds one model; the free one is not rejected for want of evidence
+	if why := rejected(r, "free-a:free"); why != "" {
+		t.Fatalf("a free model must not be rejected: %q", why)
+	}
+	served := false
+	for _, s := range r.Candidates {
+		if s.Model == "free-a:free" {
+			served = true
+		}
+	}
+	if !served {
+		reserved := false
+		for _, s := range r.Reserve {
+			if s.Model == "free-a:free" {
+				reserved = true
+			}
+		}
+		if !reserved {
+			t.Fatalf("a free model must be in the list or the reserve: %+v %+v", r.Candidates, r.Reserve)
+		}
+	}
+}

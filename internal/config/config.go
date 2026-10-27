@@ -38,7 +38,7 @@ type Server struct {
 	Listen       string   `yaml:"listen" json:"listen"`
 	DataDir      string   `yaml:"data_dir" json:"data_dir"`
 	SecretsFile  string   `yaml:"secrets_file" json:"secrets_file"`
-	AdminHosts   []string `yaml:"admin_hosts" json:"admin_hosts"` // Host header values allowed to reach /admin
+	AdminHosts   []string `yaml:"admin_hosts" json:"admin_hosts"` // Host header values allowed to reach the panel
 	MaxBodyMB    int      `yaml:"max_body_mb" json:"max_body_mb"`
 	LogRetention int      `yaml:"log_retention_days" json:"log_retention_days"`
 	TrustedProxy bool     `yaml:"trusted_proxy" json:"trusted_proxy"` // honour X-Forwarded-Proto/For (tailscale serve, cloudflared)
@@ -93,8 +93,10 @@ type Client struct {
 }
 
 // Preset is a virtual model exposed to clients: a chosen pool of real models
-// plus the rule that orders them. The name is fixed per category (text, image,
-// video, tts, stt, music, systemone), so a client cannot hold two of a kind.
+// plus the rule that orders them. The name is the owner's own (ADR 0021): it is
+// the model name the client asks for, so it must be unique inside a client. The
+// category is what says what kind of model it serves, and a client holds at
+// most one preset per category.
 type Preset struct {
 	Category     string   `yaml:"category" json:"category"`         // chat | images | videos | audio_speech | audio_transcription | music | systemone
 	Optimization string   `yaml:"optimization" json:"optimization"` // cheapest | balanced | best_quality
@@ -104,7 +106,8 @@ type Preset struct {
 // Categories are the endpoint kinds a preset can serve, in display order.
 var Categories = []string{"chat", "images", "videos", "audio_speech", "audio_transcription", "music", "systemone"}
 
-// PresetName is the preset name of a category.
+// PresetName is the name xellter suggests for a new preset of a category. It
+// is a suggestion, not a rule: the owner may name a preset anything (ADR 0021).
 func PresetName(category string) string {
 	return map[string]string{
 		"chat": "text", "images": "image", "videos": "video", "audio_speech": "tts",
@@ -112,7 +115,10 @@ func PresetName(category string) string {
 	}[category]
 }
 
-// CategoryOfPreset is the inverse of PresetName ("" when the name is unknown).
+// CategoryOfPreset is the category of the old fixed preset names. It is used to
+// fill the category of a config written before presets could be renamed, and
+// to recognise those names in the migration; a new preset states its category
+// instead.
 func CategoryOfPreset(name string) string {
 	for _, c := range Categories {
 		if PresetName(c) == name {
@@ -335,18 +341,30 @@ func (c *Config) Validate() error {
 			if !nameRe.MatchString(name) {
 				bad("%s: invalid name", where)
 			}
-			want := CategoryOfPreset(name)
-			if want == "" {
-				bad("%s: not a preset name; use one of text, image, video, tts, stt, music, systemone", where)
+			category := p.Category
+			if category == "" {
+				// A preset written before presets could be renamed still carries the fixed name; that
+				// name is its category. A new preset must state its category.
+				category = CategoryOfPreset(name)
+				if category == "" {
+					bad("%s: no category; state one of %v", where, Categories)
+					continue
+				}
+			}
+			if !contains(Categories, category) {
+				bad("%s: category must be one of %v", where, Categories)
 				continue
 			}
-			if p.Category != "" && p.Category != want {
-				bad("%s: must be of category %s", where, want)
+			// The old fixed names keep their meaning, so a preset called "text" is a text
+			// preset. Any other name is the owner's own and states its category.
+			if legacy := CategoryOfPreset(name); legacy != "" && legacy != category {
+				bad("%s: %q is a %s preset; pick another name for a %s preset", where, name, legacy, category)
+				continue
 			}
-			if other, dup := cats[want]; dup {
-				bad("%s: a client may hold only one %s preset (already %q)", where, want, other)
+			if other, dup := cats[category]; dup {
+				bad("%s: a client may hold only one %s preset (already %q)", where, category, other)
 			}
-			cats[want] = name
+			cats[category] = name
 			if !contains(Optimizations, p.Optimization) {
 				bad("%s: optimization must be one of %v", where, Optimizations)
 			}

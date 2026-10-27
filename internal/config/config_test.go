@@ -24,8 +24,9 @@ func TestMinimalYAMLWorksAndDefaultsFill(t *testing.T) {
 	}
 }
 
-// Preset names are fixed per category, so a client can hold at most one of a kind, and a new client gets an
-// empty Balanced pool to fill in the panel.
+// A preset may carry any name the owner likes, but the old fixed names keep
+// their meaning, so a config written before presets could be renamed still
+// loads. A client holds at most one preset per category.
 func TestPresetNamesCoverEveryCategory(t *testing.T) {
 	want := map[string]string{
 		"chat": "text", "images": "image", "videos": "video", "audio_speech": "tts",
@@ -49,6 +50,23 @@ func TestPresetNamesCoverEveryCategory(t *testing.T) {
 	if CategoryOfPreset("budget") != "" || PresetName("telepathy") != "" {
 		t.Fatal("unknown categories and presets must not map to anything")
 	}
+
+	// A preset of the owner's own name loads, and so does one of the old names
+	// without a category.
+	own, err := Parse([]byte("clients:\n  - name: x\n    presets:\n      my-fast-text: {category: chat, optimization: cheapest}\n"))
+	if err != nil {
+		t.Fatalf("a preset of the owner's own name was refused: %v", err)
+	}
+	if _, ok := own.Clients[0].Presets["my-fast-text"]; !ok {
+		t.Fatal("the preset was not kept")
+	}
+	old, err := Parse([]byte("clients:\n  - name: x\n    presets:\n      text: {optimization: balanced}\n"))
+	if err != nil {
+		t.Fatalf("a preset of an old name without a category was refused: %v", err)
+	}
+	if got := old.Clients[0].Presets["text"].Category; got != "chat" {
+		t.Fatalf("the old name must still mean chat, got %q", got)
+	}
 }
 
 func TestValidationCatchesMistakes(t *testing.T) {
@@ -59,8 +77,9 @@ func TestValidationCatchesMistakes(t *testing.T) {
 		"duplicate client":         "clients:\n  - {name: x}\n  - {name: x}\n",
 		"bad purpose":              "clients:\n  - {name: x, purpose: telepathy}\n",
 		"bad preset name":          "clients:\n  - name: x\n    presets:\n      'a b': {category: chat, optimization: balanced}\n",
-		"preset name of no kind":   "clients:\n  - name: x\n    presets:\n      budget: {category: chat, optimization: balanced}\n",
+		"preset of no category":    "clients:\n  - name: x\n    presets:\n      budget: {optimization: balanced}\n",
 		"preset of the wrong kind": "clients:\n  - name: x\n    presets:\n      text: {category: images, optimization: balanced}\n",
+		"two presets of one kind":  "clients:\n  - name: x\n    presets:\n      text: {category: chat, optimization: balanced}\n      mine: {category: chat, optimization: balanced}\n",
 		"bad optimization":         "clients:\n  - name: x\n    presets:\n      text: {category: chat, optimization: cheapestest}\n",
 		"model listed twice":       "clients:\n  - name: x\n    presets:\n      text: {category: chat, optimization: balanced, models: [a, a]}\n",
 		"empty model id":           "clients:\n  - name: x\n    presets:\n      text: {category: chat, optimization: balanced, models: ['  ']}\n",

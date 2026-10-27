@@ -488,12 +488,13 @@ func TestStreamingAndUsageAccounting(t *testing.T) {
 	}
 	e.a.St.Flush()
 	rows, _ := e.a.St.Recent(5, "")
-	// no plan was reported by kenari in this fixture, so the traffic is payg
-	if len(rows) == 0 || rows[0].InTok != 1000 || rows[0].OutTok != 50 || rows[0].Billing != "payg" || !rows[0].OK {
+	// A free model is in the pool of every preset (ADR 0022), so the cheapest preset
+	// serves it: the traffic is free, not payg.
+	if len(rows) == 0 || rows[0].InTok != 1000 || rows[0].OutTok != 50 || rows[0].Billing != "free" || !rows[0].OK {
 		t.Fatalf("usage row wrong: %+v", rows)
 	}
-	if rows[0].Cost <= 0 {
-		t.Fatalf("catalog cost should be recorded for plan traffic: %+v", rows[0])
+	if rows[0].Cost != 0 {
+		t.Fatalf("a free model costs nothing: %+v", rows[0])
 	}
 }
 
@@ -550,9 +551,16 @@ func TestModelListShowsOnlyAllowedPresets(t *testing.T) {
 	r, _ := http.DefaultClient.Do(req)
 	var out struct{ Data []struct{ ID string } }
 	json.NewDecoder(r.Body).Decode(&out)
-	// the preset, plus the one model in its pool (a client may name a model it already routes to)
-	if len(out.Data) != 2 || out.Data[0].ID != "text" || out.Data[1].ID != "cheap-b" {
-		t.Fatalf("got %+v", out.Data)
+	// The preset, the model in its pool, and the free and discounted models xellter
+	// added on its own (ADR 0022). A client may name any of them.
+	want := []string{"text", "cheap-b", "free-a:free", "promo-d"}
+	if len(out.Data) != len(want) {
+		t.Fatalf("got %+v, want %v", out.Data, want)
+	}
+	for i, id := range want {
+		if out.Data[i].ID != id {
+			t.Fatalf("got %+v, want %v", out.Data, want)
+		}
 	}
 }
 
@@ -562,14 +570,18 @@ func TestLearnsAllowedModelsFromRestrictedKey(t *testing.T) {
 		c.Clients[0].Keys = c.Clients[0].Keys[:1]
 	})
 	e.f.chat = func(c call, n int) (int, string) {
-		if c.Model == "cheap-b" { // the cheapest model is the one this key may not use
+		if c.Model == "free-a:free" { // the model the cheapest preset serves first is not allowed on this key
 			return 400, `{"error":{"code":"bad_request","message":"model not permitted for this key. Allowed models: pro-c, free-a:free"}}`
 		}
 		return 0, ""
 	}
 	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "text"))
-	if resp.StatusCode != 200 || resp.Header.Get("X-Xellter-Model") != "pro-c" {
-		t.Fatalf("expected pro-c after learning: %d %s", resp.StatusCode, body)
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected a served model after learning: %d %s", resp.StatusCode, body)
+	}
+	// The key may call pro-c and free-a:free, so one of those is served.
+	if got := resp.Header.Get("X-Xellter-Model"); got != "free-a:free" && got != "pro-c" {
+		t.Fatalf("expected a model the key may call, got %q", got)
 	}
 	e.a.Rt.Recompute(time.Now())
 	st := e.a.Pool.Keys()[0].Status(time.Now())

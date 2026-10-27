@@ -30,7 +30,7 @@ clients[]:
 | `data_dir` | `data` | SQLite, catalog cache, secrets, config history. Relative paths resolve against the config file |
 | `secrets_file` | `<data_dir>/secrets.env` | `NAME=value` lines, 0600; written by the panel |
 | `auth_record` | `<data_dir>/auth-record.json` | admin login record (`xellter admin init`) |
-| `admin_hosts` | `[localhost, 127.0.0.1]` | `Host` values allowed to reach `/admin`; globs allowed; anything else is 404. Add the tailnet name |
+| `admin_hosts` | `[localhost, 127.0.0.1]` | `Host` values allowed to reach the panel; globs allowed; anything else is 404. Add the tailnet name |
 | `max_body_mb` | `64` | request body limit (413 above it) |
 | `log_retention_days` | `30` | request-log retention; purged every 6 h |
 | `trusted_proxy` | `true` | honour `X-Forwarded-For` (rate limiting, login) and `X-Forwarded-Proto` (Secure cookie) |
@@ -52,7 +52,7 @@ clients[]:
 The seven knobs that survived the rewrite. Everything a preset or a model decides is not here: the
 optimization lives on the preset, and RTK, retry-once, key cooldown, the breaker and the reference
 request are constants. The panel does not edit `routing`: change it in this file or through
-`PUT /admin/api/config`.
+`PUT /api/config`.
 
 | key | default | meaning |
 |---|---|---|
@@ -97,10 +97,11 @@ The value lives in `data/secrets.env` (0600), never in the YAML.
 
 ### clients[].presets[]
 
-Key = the model name the app sends. The name is fixed by the category, so a second preset of a kind
-cannot be expressed and is refused by validation.
+Key = the model name the app sends. The name is the owner's own (ADR 0021): letters, digits, dot,
+dash and underscore, unique inside the client. The `category` says what the preset serves, and a
+client holds at most one preset per category, so a second preset of a kind is refused.
 
-| Category | Preset name | kenari endpoint |
+| Category | Suggested name | kenari endpoint |
 |---|---|---|
 | `chat` | `text` | `/v1/chat/completions`, `/v1/responses`, `/v1/messages` |
 | `images` | `image` | `/v1/images/*` |
@@ -112,9 +113,14 @@ cannot be expressed and is refused by validation.
 
 | key | meaning |
 |---|---|
-| `category` | optional; must match the name when given, otherwise derived from it |
+| `category` | the kind of model the preset serves; required for a name that is not one of the suggested ones. A config written before ADR 0021 still loads: the old names keep their meaning |
 | `optimization` | `cheapest` \| `balanced` \| `best_quality`; empty means `balanced` |
-| `models` | the pool: explicit catalog model ids, no duplicates, no blanks. The optimization only orders what is listed here; nothing is added or removed automatically |
+| `models` | the pool: explicit catalog model ids, no duplicates, no blanks. The optimization only orders what is listed here |
+
+Every free model and every model whose promo is running is in the pool of every preset of that
+category, whether it is listed here or not (ADR 0022). The added models are the ones the client's
+own keys may call; they leave the pool on their own when the promo ends or kenari drops the model.
+The panel shows them in their own list on the preset card.
 
 A new preset starts with an empty pool and `balanced`. A model id that leaves kenari's catalog is
 reported as `not in the kenari catalog` instead of disappearing from the list.

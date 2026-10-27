@@ -41,8 +41,11 @@ func setupAdmin(t *testing.T) *adminEnv {
 		}
 	})
 	mux := http.NewServeMux()
-	mux.Handle("/admin/", admin.New(ae.a))
-	mux.Handle("/", ae.a.Px)
+	panel := admin.New(ae.a)
+	mux.Handle("/api/", panel)
+	mux.Handle("/v1/", ae.a.Px)
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { ae.a.Px.ServeHTTP(w, r) })
+	mux.Handle("/", panel)
 	ae.srv = httptest.NewServer(mux)
 	t.Cleanup(ae.srv.Close)
 	return ae
@@ -77,7 +80,7 @@ func (ae *adminEnv) do(t *testing.T, cookie *http.Cookie, method, path string, b
 
 func (ae *adminEnv) login(t *testing.T) *http.Cookie {
 	t.Helper()
-	resp, b := ae.do(t, nil, "POST", "/admin/api/login", map[string]string{"username": "axell", "password": ae.pw, "code": auth.TOTPNow(ae.secret, time.Now())})
+	resp, b := ae.do(t, nil, "POST", "/api/login", map[string]string{"username": "axell", "password": ae.pw, "code": auth.TOTPNow(ae.secret, time.Now())})
 	if resp.StatusCode != 200 {
 		t.Fatalf("login: %d %s", resp.StatusCode, b)
 	}
@@ -95,7 +98,7 @@ func (ae *adminEnv) login(t *testing.T) *http.Cookie {
 
 func TestAdminLoginRequiresPasswordAndSecondFactor(t *testing.T) {
 	ae := setupAdmin(t)
-	if r, _ := ae.do(t, nil, "GET", "/admin/api/overview", nil); r.StatusCode != 401 {
+	if r, _ := ae.do(t, nil, "GET", "/api/overview", nil); r.StatusCode != 401 {
 		t.Fatalf("API open without login: %d", r.StatusCode)
 	}
 	bad := []map[string]string{
@@ -104,13 +107,13 @@ func TestAdminLoginRequiresPasswordAndSecondFactor(t *testing.T) {
 		{"username": "other", "password": ae.pw, "code": auth.TOTPNow(ae.secret, time.Now())},
 	}
 	for i, b := range bad {
-		if r, _ := ae.do(t, nil, "POST", "/admin/api/login", b); r.StatusCode != 401 {
+		if r, _ := ae.do(t, nil, "POST", "/api/login", b); r.StatusCode != 401 {
 			t.Fatalf("case %d must be rejected, got %d", i, r.StatusCode)
 		}
 	}
 	// the three failures above used up part of the 5-attempt budget; a valid login still works
 	ck := ae.login(t)
-	if r, b := ae.do(t, ck, "GET", "/admin/api/overview", nil); r.StatusCode != 200 || !strings.Contains(string(b), `"keys"`) {
+	if r, b := ae.do(t, ck, "GET", "/api/overview", nil); r.StatusCode != 200 || !strings.Contains(string(b), `"keys"`) {
 		t.Fatalf("overview: %d %s", r.StatusCode, b)
 	}
 }
@@ -119,13 +122,13 @@ func TestAdminBruteForceIsRateLimited(t *testing.T) {
 	ae := setupAdmin(t)
 	var last int
 	for i := 0; i < 7; i++ {
-		r, _ := ae.do(t, nil, "POST", "/admin/api/login", map[string]string{"username": "axell", "password": "nope nope nope nope", "code": "123456"})
+		r, _ := ae.do(t, nil, "POST", "/api/login", map[string]string{"username": "axell", "password": "nope nope nope nope", "code": "123456"})
 		last = r.StatusCode
 	}
 	if last != 429 {
 		t.Fatalf("expected 429 after repeated failures, got %d", last)
 	}
-	r, _ := ae.do(t, nil, "POST", "/admin/api/login", map[string]string{"username": "axell", "password": ae.pw, "code": auth.TOTPNow(ae.secret, time.Now())})
+	r, _ := ae.do(t, nil, "POST", "/api/login", map[string]string{"username": "axell", "password": ae.pw, "code": auth.TOTPNow(ae.secret, time.Now())})
 	if r.StatusCode != 429 {
 		t.Fatalf("even the right credentials must wait out the lockout, got %d", r.StatusCode)
 	}
@@ -134,13 +137,13 @@ func TestAdminBruteForceIsRateLimited(t *testing.T) {
 func TestAdminHostAllowlistAndCSRF(t *testing.T) {
 	ae := setupAdmin(t)
 	ck := ae.login(t)
-	req, _ := http.NewRequest("GET", ae.srv.URL+"/admin/", nil)
+	req, _ := http.NewRequest("GET", ae.srv.URL+"/", nil)
 	req.Host = "xellter.example.com"
 	resp, _ := http.DefaultClient.Do(req)
 	if resp.StatusCode != 404 {
 		t.Fatalf("panel must be invisible on other hostnames: %d", resp.StatusCode)
 	}
-	req, _ = http.NewRequest("PUT", ae.srv.URL+"/admin/api/config", strings.NewReader(`{}`))
+	req, _ = http.NewRequest("PUT", ae.srv.URL+"/api/config", strings.NewReader(`{}`))
 	req.AddCookie(ck)
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != 403 {
@@ -153,13 +156,13 @@ func TestAdminConfigClientsAndRollback(t *testing.T) {
 	ck := ae.login(t)
 
 	// create a client and give it a kenari key: presets appear on their own, the xellter key works at once
-	resp, b := ae.do(t, ck, "POST", "/admin/api/clients", map[string]any{"action": "create", "name": "polifin"})
+	resp, b := ae.do(t, ck, "POST", "/api/clients", map[string]any{"action": "create", "name": "polifin"})
 	var created struct{ Key string }
 	_ = json.Unmarshal(b, &created)
 	if resp.StatusCode != 200 || !strings.HasPrefix(created.Key, "xl-") {
 		t.Fatalf("create client: %d %s", resp.StatusCode, b)
 	}
-	if r, b := ae.do(t, ck, "POST", "/admin/api/keys", map[string]any{"client": "polifin", "action": "add", "name": "main", "key": "kn-polifin"}); r.StatusCode != 200 {
+	if r, b := ae.do(t, ck, "POST", "/api/keys", map[string]any{"client": "polifin", "action": "add", "name": "main", "key": "kn-polifin"}); r.StatusCode != 200 {
 		t.Fatalf("add key: %d %s", r.StatusCode, b)
 	}
 	ae.a.ProbeKeys(context.Background())
@@ -178,7 +181,7 @@ func TestAdminConfigClientsAndRollback(t *testing.T) {
 		t.Fatalf("a client without presets must not serve: %d", r.StatusCode)
 	}
 	// give it a preset and it serves at once
-	_, b = ae.do(t, ck, "GET", "/admin/api/config", nil)
+	_, b = ae.do(t, ck, "GET", "/api/config", nil)
 	var full struct{ Config map[string]any }
 	_ = json.Unmarshal(b, &full)
 	for _, c := range full.Config["clients"].([]any) {
@@ -187,7 +190,7 @@ func TestAdminConfigClientsAndRollback(t *testing.T) {
 			cl["presets"] = map[string]any{"text": map[string]any{"category": "chat", "optimization": "cheapest", "models": []any{"cheap-b"}}}
 		}
 	}
-	if r, b := ae.do(t, ck, "PUT", "/admin/api/config", map[string]any{"config": full.Config}); r.StatusCode != 200 {
+	if r, b := ae.do(t, ck, "PUT", "/api/config", map[string]any{"config": full.Config}); r.StatusCode != 200 {
 		t.Fatalf("config with a preset: %d %s", r.StatusCode, b)
 	}
 	if r, b := ae.post(t, created.Key, "/v1/chat/completions", `{"model":"text","messages":[{"role":"user","content":"hi"}]}`); r.StatusCode != 200 {
@@ -205,7 +208,7 @@ func TestAdminConfigClientsAndRollback(t *testing.T) {
 	}
 
 	// rotate: old key dies
-	resp, b = ae.do(t, ck, "POST", "/admin/api/clients", map[string]any{"action": "rotate", "name": "polifin"})
+	resp, b = ae.do(t, ck, "POST", "/api/clients", map[string]any{"action": "rotate", "name": "polifin"})
 	var rot struct{ Key string }
 	_ = json.Unmarshal(b, &rot)
 	if r, _ := ae.post(t, created.Key, "/v1/chat/completions", `{"model":"text","messages":[]}`); r.StatusCode != 401 {
@@ -216,7 +219,7 @@ func TestAdminConfigClientsAndRollback(t *testing.T) {
 	}
 
 	// an invalid config is rejected and nothing changes
-	_, b = ae.do(t, ck, "GET", "/admin/api/config", nil)
+	_, b = ae.do(t, ck, "GET", "/api/config", nil)
 	var cur struct {
 		Config  map[string]any
 		History []string
@@ -226,38 +229,52 @@ func TestAdminConfigClientsAndRollback(t *testing.T) {
 		return cur.Config["clients"].([]any)[0].(map[string]any)["presets"].(map[string]any)["text"].(map[string]any)
 	}
 	text()["optimization"] = "nonsense"
-	if r, _ := ae.do(t, ck, "PUT", "/admin/api/config", map[string]any{"config": cur.Config}); r.StatusCode != 422 {
+	if r, _ := ae.do(t, ck, "PUT", "/api/config", map[string]any{"config": cur.Config}); r.StatusCode != 422 {
 		t.Fatalf("invalid config accepted: %d", r.StatusCode)
 	}
 	if ae.a.Cfg().Clients[0].Presets["text"].Optimization == "nonsense" {
 		t.Fatal("invalid config was applied")
 	}
 
-	// a preset name that is not one of the categories is refused
+	// a preset name of the owner's own is accepted, as long as it states its category
 	presetsOf := func(i int) map[string]any {
 		return cur.Config["clients"].([]any)[i].(map[string]any)["presets"].(map[string]any)
 	}
 	text()["optimization"] = "balanced"
 	presetsOf(0)["my-preset"] = map[string]any{"category": "chat", "optimization": "cheapest"}
-	if r, b := ae.do(t, ck, "PUT", "/admin/api/config", map[string]any{"config": cur.Config}); r.StatusCode != 422 || !strings.Contains(string(b), "not a preset name") {
-		t.Fatalf("custom preset name accepted: %d %s", r.StatusCode, b)
+	delete(presetsOf(0), "text")
+	if r, b := ae.do(t, ck, "PUT", "/api/config", map[string]any{"config": cur.Config}); r.StatusCode != 200 {
+		t.Fatalf("a preset of the owner's own name was refused: %d %s", r.StatusCode, b)
 	}
+	if _, ok := ae.a.Cfg().Clients[0].Presets["my-preset"]; !ok {
+		t.Fatal("the renamed preset was not applied")
+	}
+	// a second preset of the same category is still refused
+	presetsOf(0)["text"] = map[string]any{"category": "chat", "optimization": "balanced"}
+	if r, b := ae.do(t, ck, "PUT", "/api/config", map[string]any{"config": cur.Config}); r.StatusCode != 422 {
+		t.Fatalf("two presets of one category accepted: %d %s", r.StatusCode, b)
+	}
+	delete(presetsOf(0), "text")
+	presetsOf(0)["text"] = map[string]any{"category": "chat", "optimization": "balanced"}
 	delete(presetsOf(0), "my-preset")
+	if r, b := ae.do(t, ck, "PUT", "/api/config", map[string]any{"config": cur.Config}); r.StatusCode != 200 {
+		t.Fatalf("the config was not restored: %d %s", r.StatusCode, b)
+	}
 
 	// a valid edit applies live and is reversible
 	text()["optimization"] = "best_quality"
-	if r, b := ae.do(t, ck, "PUT", "/admin/api/config", map[string]any{"config": cur.Config}); r.StatusCode != 200 {
+	if r, b := ae.do(t, ck, "PUT", "/api/config", map[string]any{"config": cur.Config}); r.StatusCode != 200 {
 		t.Fatalf("valid config rejected: %d %s", r.StatusCode, b)
 	}
 	if ae.a.Cfg().Clients[0].Presets["text"].Optimization != "best_quality" {
 		t.Fatal("edit not applied")
 	}
-	_, b = ae.do(t, ck, "GET", "/admin/api/config", nil)
+	_, b = ae.do(t, ck, "GET", "/api/config", nil)
 	_ = json.Unmarshal(b, &cur)
 	if len(cur.History) == 0 {
 		t.Fatal("no history kept")
 	}
-	if r, b := ae.do(t, ck, "POST", "/admin/api/rollback", map[string]string{"id": cur.History[0]}); r.StatusCode != 200 {
+	if r, b := ae.do(t, ck, "POST", "/api/rollback", map[string]string{"id": cur.History[0]}); r.StatusCode != 200 {
 		t.Fatalf("rollback: %d %s", r.StatusCode, b)
 	}
 	if got := ae.a.Cfg().Clients[0].Presets["text"].Optimization; got == "best_quality" {
@@ -265,10 +282,10 @@ func TestAdminConfigClientsAndRollback(t *testing.T) {
 	}
 
 	// ranking and the UI shell are served
-	if r, b := ae.do(t, ck, "GET", "/admin/api/ranking?client=babu&preset=text", nil); r.StatusCode != 200 || !strings.Contains(string(b), "candidates") {
+	if r, b := ae.do(t, ck, "GET", "/api/ranking?client=babu&preset=text", nil); r.StatusCode != 200 || !strings.Contains(string(b), "candidates") {
 		t.Fatalf("ranking: %d %s", r.StatusCode, b)
 	}
-	if r, b := ae.do(t, nil, "GET", "/admin/", nil); r.StatusCode != 200 || !strings.Contains(string(b), "xellter admin") {
+	if r, b := ae.do(t, nil, "GET", "/", nil); r.StatusCode != 200 || !strings.Contains(string(b), "xellter") {
 		t.Fatalf("ui: %d", r.StatusCode)
 	}
 }
@@ -276,7 +293,7 @@ func TestAdminConfigClientsAndRollback(t *testing.T) {
 func TestAdminKeysAndOverview(t *testing.T) {
 	ae := setupAdmin(t)
 	ck := ae.login(t)
-	if r, b := ae.do(t, ck, "POST", "/admin/api/keys", map[string]string{"client": "babu", "action": "add", "name": "spare key", "key": "kn-new-secret"}); r.StatusCode != 200 {
+	if r, b := ae.do(t, ck, "POST", "/api/keys", map[string]string{"client": "babu", "action": "add", "name": "spare key", "key": "kn-new-secret"}); r.StatusCode != 200 {
 		t.Fatalf("add: %d %s", r.StatusCode, b)
 	}
 	found := false
@@ -294,10 +311,10 @@ func TestAdminKeysAndOverview(t *testing.T) {
 	if cfg, _ := os.ReadFile(ae.a.Path); strings.Contains(string(cfg), "kn-new-secret") {
 		t.Fatal("key value leaked into the config file")
 	}
-	if r, _ := ae.do(t, ck, "POST", "/admin/api/keys", map[string]string{"client": "babu", "action": "add", "name": "spare-key", "key": "kn-x"}); r.StatusCode != 422 {
+	if r, _ := ae.do(t, ck, "POST", "/api/keys", map[string]string{"client": "babu", "action": "add", "name": "spare-key", "key": "kn-x"}); r.StatusCode != 422 {
 		t.Fatalf("duplicate key name accepted: %d", r.StatusCode)
 	}
-	_, b := ae.do(t, ck, "GET", "/admin/api/overview", nil)
+	_, b := ae.do(t, ck, "GET", "/api/overview", nil)
 	var ov struct {
 		Alerts  []struct{ Level, Text string }
 		Status  string
@@ -325,19 +342,19 @@ func TestAdminKeysAndOverview(t *testing.T) {
 	if !noKey {
 		t.Fatalf("expected a hint for the client without keys: %+v", ov.Alerts)
 	}
-	if r, b := ae.do(t, ck, "POST", "/admin/api/keys", map[string]string{"client": "babu", "action": "remove", "name": "spare-key"}); r.StatusCode != 200 {
+	if r, b := ae.do(t, ck, "POST", "/api/keys", map[string]string{"client": "babu", "action": "remove", "name": "spare-key"}); r.StatusCode != 200 {
 		t.Fatalf("remove: %d %s", r.StatusCode, b)
 	}
 	if _, ok := ae.a.Secrets()["KENARI_KEY_BABU_SPARE_KEY"]; ok {
 		t.Fatal("removed key must also leave the secrets file")
 	}
-	if r, _ := ae.do(t, ck, "POST", "/admin/api/clients", map[string]string{"action": "delete", "name": "locked"}); r.StatusCode != 200 {
+	if r, _ := ae.do(t, ck, "POST", "/api/clients", map[string]string{"action": "delete", "name": "locked"}); r.StatusCode != 200 {
 		t.Fatalf("client delete: %d", r.StatusCode)
 	}
 	if _, ok := ae.a.Secrets()["KEY_LOCKED"]; ok {
 		t.Fatal("deleting a client must remove its kenari keys from the secrets file")
 	}
-	if r, b := ae.do(t, ck, "POST", "/admin/api/account-key", map[string]string{"key": "kn-account"}); r.StatusCode != 200 || ae.a.Secrets()["KENARI_ACCOUNT_KEY"] != "kn-account" {
+	if r, b := ae.do(t, ck, "POST", "/api/account-key", map[string]string{"key": "kn-account"}); r.StatusCode != 200 || ae.a.Secrets()["KENARI_ACCOUNT_KEY"] != "kn-account" {
 		t.Fatalf("account key: %d %s", r.StatusCode, b)
 	}
 }

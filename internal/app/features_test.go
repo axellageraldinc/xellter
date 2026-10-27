@@ -270,10 +270,12 @@ func TestPurposeChangesHowTheTextPresetIsScored(t *testing.T) {
 			}
 		}
 	})
-	// the stored leaderboards: pro-c is the best coder, cheap-b the best generalist, promo-d has nothing
+	// the stored leaderboards: pro-c is the best coder, cheap-b the best generalist, promo-d is only
+	// rated in general
 	if err := e.a.St.ReplaceAllBench(map[string][]store.BenchRow{
 		"pro-c":   {{Arena: "swebench", Value: 0.9}, {Arena: "text", Value: 0.30}},
 		"cheap-b": {{Arena: "swebench", Value: 0.2}, {Arena: "text", Value: 0.90}},
+		"promo-d": {{Arena: "text", Value: 0.40}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -286,10 +288,15 @@ func TestPurposeChangesHowTheTextPresetIsScored(t *testing.T) {
 	if len(rk.Candidates) == 0 || rk.Candidates[0].Model != "cheap-b" || rk.Candidates[0].BenchSource != "text" {
 		t.Fatalf("a general client must rank on the general arena: %+v", rk.Candidates)
 	}
+	// the discounted model is served even though it is not the owner's own pick (ADR 0022)
+	served := false
 	for _, c := range rk.Candidates {
-		if c.Model == "promo-d" && !containsStr(c.Flags, "general score") {
-			t.Fatalf("a model with no score must be flagged: %+v", c)
+		if c.Model == "promo-d" {
+			served = true
 		}
+	}
+	if !served {
+		t.Fatalf("a discounted model must be served: %+v", rk.Candidates)
 	}
 
 	// the same preset for the coding client
@@ -299,6 +306,12 @@ func TestPurposeChangesHowTheTextPresetIsScored(t *testing.T) {
 	}
 	if len(coded.Candidates) == 0 || coded.Candidates[0].Model != "pro-c" || coded.Candidates[0].BenchSource != "swebench" {
 		t.Fatalf("a coding client must rank on the coding arenas: %+v", coded.Candidates)
+	}
+	// a model with no coding score falls back to the general arena and says so
+	for _, c := range coded.Candidates {
+		if c.Model == "promo-d" && !containsStr(c.Flags, "general score") {
+			t.Fatalf("a model with no coding score must be flagged: %+v", c)
+		}
 	}
 	// and the request path serves that model
 	r, body := e.post(t, "xl-coded", "/v1/chat/completions", fmt.Sprintf(chatBody, "text"))

@@ -1,0 +1,259 @@
+/* xellter panel design tokens.
+ *
+ * Three layers, as the design-system reference describes:
+ *   1. primitive  - raw values, no meaning
+ *   2. semantic   - purpose aliases that point at the primitives
+ *   3. component  - the parts a component reads
+ *
+ * The look is a clean neutral console: one accent colour, quiet greys, no
+ * shadows on flat surfaces, and hairline borders instead. Dark mode is the
+ * same system with the semantic layer swapped, so both themes stay in step.
+ */
+
+/* ------------------------------------------------------------------ *
+ * 1. Primitives
+ * ------------------------------------------------------------------ */
+:root {
+  /* neutrals: a slightly cool grey ramp */
+  --gray-0: #ffffff;
+  --gray-25: #fcfcfd;
+  --gray-50: #f8f9fb;
+  --gray-100: #f1f3f7;
+  --gray-150: #e8ebf0;
+  --gray-200: #dfe3ea;
+  --gray-300: #c8ced9;
+  --gray-400: #9aa3b2;
+  --gray-500: #6b7484;
+  --gray-600: #4d5566;
+  --gray-700: #383f4d;
+  --gray-800: #252b36;
+  --gray-850: #1c212b;
+  --gray-900: #14181f;
+  --gray-950: #0d1015;
+
+  /* accent: one blue, used for actions, focus and selection */
+  --blue-50: #eef4ff;
+  --blue-100: #dbe7ff;
+  --blue-200: #bdd3ff;
+  --blue-300: #8fb5ff;
+  --blue-400: #5b8dfb;
+  --blue-500: #3665f0;
+  --blue-600: #2449d8;
+  --blue-700: #1c39ae;
+  --blue-800: #1a3189;
+  --blue-900: #1a2d6d;
+
+  /* status */
+  --green-50: #ecfdf3;
+  --green-100: #d1fadf;
+  --green-500: #12b76a;
+  --green-600: #039855;
+  --green-700: #027a48;
+  --amber-50: #fffaeb;
+  --amber-100: #fef0c7;
+  --amber-500: #f79009;
+  --amber-600: #dc6803;
+  --amber-700: #b54708;
+  --red-50: #fef3f2;
+  --red-100: #fee4e2;
+  --red-500: #f04438;
+  --red-600: #d92d20;
+  --red-700: #b42318;
+  --violet-50: #f5f3ff;
+  --violet-100: #ede9fe;
+  --violet-500: #7a5af8;
+  --violet-600: #6938ef;
+  --violet-700: #5925dc;
+
+  /* spacing: a 4px scale */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+  --space-16: 4rem;
+
+  /* type */
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+  --font-size-xs: 0.75rem;
+  --font-size-sm: 0.8125rem;
+  --font-size-base: 0.875rem;
+  --font-size-md: 0.9375rem;
+  --font-size-lg: 1.0625rem;
+  --font-size-xl: 1.25rem;
+  --font-size-2xl: 1.5rem;
+  --font-size-3xl: 1.875rem;
+  --line-height-tight: 1.25;
+  --line-height-normal: 1.5;
+  --line-height-relaxed: 1.65;
+
+  /* radius */
+  --radius-xs: 0.25rem;
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.625rem;
+  --radius-xl: 0.875rem;
+  --radius-full: 9999px;
+
+  /* shadow: used sparingly, only for things that float */
+  --shadow-xs: 0 1px 2px rgb(16 24 40 / 0.05);
+  --shadow-sm: 0 1px 3px rgb(16 24 40 / 0.08), 0 1px 2px rgb(16 24 40 / 0.04);
+  --shadow-md: 0 4px 8px -2px rgb(16 24 40 / 0.08), 0 2px 4px -2px rgb(16 24 40 / 0.04);
+  --shadow-lg: 0 12px 16px -4px rgb(16 24 40 / 0.08), 0 4px 6px -2px rgb(16 24 40 / 0.03);
+  --shadow-xl: 0 20px 24px -4px rgb(16 24 40 / 0.08), 0 8px 8px -4px rgb(16 24 40 / 0.03);
+
+  /* motion */
+  --duration-fast: 120ms;
+  --duration-normal: 180ms;
+  --duration-slow: 260ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* ------------------------------------------------------------------ *
+ * 2. Semantic
+ * ------------------------------------------------------------------ */
+:root {
+  --color-canvas: var(--gray-50);
+  --color-surface: var(--gray-0);
+  --color-surface-muted: var(--gray-100);
+  --color-surface-hover: var(--gray-50);
+  --color-surface-sunken: var(--gray-100);
+
+  --color-text: var(--gray-900);
+  --color-text-secondary: var(--gray-600);
+  --color-text-muted: var(--gray-500);
+  --color-text-inverted: var(--gray-0);
+
+  --color-border: var(--gray-200);
+  --color-border-strong: var(--gray-300);
+  --color-border-subtle: var(--gray-150);
+
+  --color-primary: var(--blue-600);
+  --color-primary-hover: var(--blue-700);
+  --color-primary-active: var(--blue-800);
+  --color-primary-soft: var(--blue-50);
+  --color-primary-text: var(--blue-700);
+
+  --color-success: var(--green-600);
+  --color-success-soft: var(--green-50);
+  --color-success-text: var(--green-700);
+  --color-warning: var(--amber-600);
+  --color-warning-soft: var(--amber-50);
+  --color-warning-text: var(--amber-700);
+  --color-danger: var(--red-600);
+  --color-danger-soft: var(--red-50);
+  --color-danger-text: var(--red-700);
+  --color-accent: var(--violet-600);
+  --color-accent-soft: var(--violet-50);
+  --color-accent-text: var(--violet-700);
+
+  --color-focus-ring: var(--blue-500);
+  --color-overlay: rgb(16 24 40 / 0.5);
+
+  --spacing-page: var(--space-8);
+  --spacing-section: var(--space-6);
+  --spacing-component: var(--space-4);
+  --spacing-gutter: var(--space-5);
+
+  --sidebar-width: 15rem;
+  --header-height: 3.5rem;
+}
+
+/* ------------------------------------------------------------------ *
+ * 3. Component tokens
+ * ------------------------------------------------------------------ */
+:root {
+  --button-height: 2.25rem;
+  --button-height-sm: 1.75rem;
+  --button-height-lg: 2.5rem;
+  --button-padding-x: var(--space-3);
+  --button-padding-x-sm: var(--space-2);
+  --button-radius: var(--radius-md);
+  --button-font-size: var(--font-size-base);
+  --button-font-weight: 500;
+
+  --input-height: 2.25rem;
+  --input-padding-x: var(--space-3);
+  --input-padding-y: var(--space-2);
+  --input-radius: var(--radius-md);
+  --input-font-size: var(--font-size-base);
+  --input-border: var(--color-border);
+  --input-border-hover: var(--color-border-strong);
+  --input-focus-ring: 0 0 0 3px var(--blue-100);
+
+  --card-padding: var(--space-5);
+  --card-padding-sm: var(--space-4);
+  --card-radius: var(--radius-lg);
+  --card-border: var(--color-border);
+  --card-shadow: none;
+
+  --badge-padding-x: var(--space-2);
+  --badge-padding-y: 0.0625rem;
+  --badge-radius: var(--radius-sm);
+  --badge-font-size: var(--font-size-xs);
+
+  --dialog-max-width: 34rem;
+  --dialog-max-width-wide: 56rem;
+  --dialog-radius: var(--radius-xl);
+  --dialog-padding: var(--space-6);
+
+  --table-cell-padding-x: var(--space-4);
+  --table-cell-padding-y: var(--space-3);
+  --table-header-bg: var(--color-surface-muted);
+  --table-row-hover-bg: var(--color-surface-hover);
+
+  --toast-radius: var(--radius-md);
+}
+
+/* Dark mode: the semantic layer is swapped, the primitives stay. */
+[data-theme='dark'] {
+  --color-canvas: var(--gray-950);
+  --color-surface: var(--gray-900);
+  --color-surface-muted: var(--gray-850);
+  --color-surface-hover: var(--gray-850);
+  --color-surface-sunken: var(--gray-950);
+
+  --color-text: var(--gray-100);
+  --color-text-secondary: var(--gray-400);
+  --color-text-muted: var(--gray-500);
+  --color-text-inverted: var(--gray-900);
+
+  --color-border: var(--gray-800);
+  --color-border-strong: var(--gray-700);
+  --color-border-subtle: var(--gray-850);
+
+  --color-primary: var(--blue-500);
+  --color-primary-hover: var(--blue-400);
+  --color-primary-active: var(--blue-300);
+  --color-primary-soft: rgb(54 101 240 / 0.14);
+  --color-primary-text: var(--blue-300);
+
+  --color-success: var(--green-500);
+  --color-success-soft: rgb(18 183 106 / 0.14);
+  --color-success-text: var(--green-500);
+  --color-warning: var(--amber-500);
+  --color-warning-soft: rgb(247 144 9 / 0.14);
+  --color-warning-text: var(--amber-500);
+  --color-danger: var(--red-500);
+  --color-danger-soft: rgb(240 68 56 / 0.14);
+  --color-danger-text: var(--red-500);
+  --color-accent: var(--violet-500);
+  --color-accent-soft: rgb(122 90 248 / 0.14);
+  --color-accent-text: var(--violet-500);
+
+  --color-focus-ring: var(--blue-400);
+  --color-overlay: rgb(0 0 0 / 0.6);
+
+  --input-focus-ring: 0 0 0 3px rgb(54 101 240 / 0.3);
+  --card-shadow: none;
+  --shadow-xs: 0 1px 2px rgb(0 0 0 / 0.3);
+  --shadow-sm: 0 1px 3px rgb(0 0 0 / 0.4);
+  --shadow-md: 0 4px 8px -2px rgb(0 0 0 / 0.4);
+  --shadow-lg: 0 12px 16px -4px rgb(0 0 0 / 0.5);
+  --shadow-xl: 0 20px 24px -4px rgb(0 0 0 / 0.5);
+}

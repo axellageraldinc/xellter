@@ -114,6 +114,88 @@ type Ranking struct {
 // Key is the map key of a client's preset ranking.
 func Key(client, preset string) string { return client + "/" + preset }
 
+// AutoPool is the set of models xellter adds to a preset on its own: every
+// free model of the category and every model whose promo is running right now
+// (ADR 0022). They are in the pool whether the owner ticked them or not, and
+// they leave it again on their own: a promo that ends, or a model that kenari
+// drops from its catalog, is out of every pool at the next ranking.
+//
+// Only models the client's own keys may call are added, and only ones that are
+// usable: a subscriber-only model without a plan, and a model that sunsets
+// within routing.avoid_sunset_days, are left out.
+func AutoPool(cfg *config.Config, snap *catalog.Snapshot, pool *upstream.Pool, cl *config.Client, category string, now time.Time) []string {
+	if snap == nil || cl == nil {
+		return nil
+	}
+	anyPlan := hasPlan(pool, cl, now)
+	avoid := time.Duration(cfg.Routing.AvoidSunsetDays) * 24 * time.Hour
+	out := []string{}
+	for _, id := range snap.IDs() {
+		m := snap.Models[id]
+		if m == nil || !endpointMatches(m, category) {
+			continue
+		}
+		if !m.Free && !m.PromoActive(now, 0) {
+			continue
+		}
+		if m.Subscriber && !anyPlan {
+			continue
+		}
+		if m.SunsetAt != nil && m.SunsetAt.Sub(now) < avoid {
+			continue
+		}
+		if !callableBy(pool, cl, m) {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
+// EffectivePool is the pool a preset really routes over: the models the owner
+// ticked, plus the free and promo models of the category (ADR 0022). The
+// owner's models come first and keep their order; the added ones follow.
+func EffectivePool(cfg *config.Config, snap *catalog.Snapshot, pool *upstream.Pool, cl *config.Client, sh config.Preset, now time.Time) []string {
+	out := make([]string, 0, len(sh.Models))
+	seen := map[string]bool{}
+	for _, id := range sh.Models {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	for _, id := range AutoPool(cfg, snap, pool, cl, sh.Category, now) {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
+// hasPlan reports whether any key of the client is on a plan right now.
+func hasPlan(pool *upstream.Pool, cl *config.Client, now time.Time) bool {
+	for _, k := range pool.ClientKeys(cl.Name) {
+		if k.Account().Tier(now) == "plan" {
+			return true
+		}
+	}
+	return false
+}
+
+// callableBy reports whether any key of the client may call the model.
+func callableBy(pool *upstream.Pool, cl *config.Client, m *catalog.Model) bool {
+	for _, k := range pool.ClientKeys(cl.Name) {
+		if k.Secret() != "" && k.AllowedModel(m.ID) {
+			return true
+		}
+	}
+	return false
+}
+
 // All computes the ranking of every preset of every client.
 func All(in Inputs) map[string]*Ranking {
 	out := map[string]*Ranking{}
@@ -218,6 +300,12 @@ type scored struct {
 	source   string
 	flags    []string
 	score    float64
+	// freeOrPromo marks a model that is free or discounted right now. It is
+	// never left out for want of quality evidence (ADR 0022).
+	freeOrPromo bool
+	// autoAdded marks a model xellter put in the pool on its own, because the
+	// owner did not tick it.
+	autoAdded bool
 }
 
 // One ranks a single preset.
@@ -238,7 +326,13 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 
 	seen := map[string]bool{}
 	var pool []*scored
+	own := map[string]bool{}
 	for _, id := range sh.Models {
+		own[strings.TrimSpace(id)] = true
+	}
+	// The pool the preset really routes over: the owner's models plus the free
+	// and promo models of the category, which xellter adds on its own (ADR 0022).
+	for _, id := range EffectivePool(in.Cfg, in.Snap, in.Pool, cl, sh, in.Now) {
 		if seen[id] {
 			continue
 		}
@@ -266,6 +360,17 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 			continue
 		}
 		s := &scored{m: m, billing: billing}
+		// A model that is free or discounted is never left out for want of quality
+		// evidence, whether the owner ticked it or xellter added it (ADR 0022).
+		s.freeOrPromo = m.Free || m.PromoActive(in.Now, 0)
+		s.autoAdded = !own[id]
+		if s.autoAdded {
+			if m.Free {
+				s.flags = append(s.flags, "free (added automatically)")
+			} else {
+				s.flags = append(s.flags, fmt.Sprintf("promo −%d%% (added automatically)", int(math.Round(m.Promo.PercentOff))))
+			}
+		}
 		s.listCost, s.costOK = RefCost(m, sh.Category, in.Now)
 		s.cost = s.listCost
 		if m.Free {
@@ -301,6 +406,10 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 	default:
 		orderBalanced(r, pool, top)
 	}
+	// The owner's rule: every free and discounted model of the category serves,
+	// in every preset, whatever the optimization said (ADR 0022). A model that
+	// the list had no room for takes the place of the lowest-ranked paid one.
+	ensureSpecial(r, pool, top)
 	// Whatever the optimization left out is reported with a reason, so "why is this model not serving?" is
 	// always answerable from the panel. A model that was merely pushed out by the list size is a *reserve*: the
 	// router promotes it when a model above it is evicted (ADR 0020).
@@ -483,12 +592,76 @@ func orderBalanced(r *Ranking, pool []*scored, top int) {
 	emit(r, take(&pool, top), "balanced: 50% cost, 50% quality")
 }
 
+// ensureSpecial makes sure a free or discounted model is never thrown out of
+// the pool (ADR 0022). A model that is free or on offer is in the pool of every
+// preset of its category, whether the owner ticked it or not, and no rule of
+// the optimization may drop it: a missing leaderboard row and a below-median
+// score are both reasons to serve it last, never reasons to leave it out.
+//
+// The model stays in the pool: the router serves the top list first and the
+// reserve after it, so a free model that did not win a place is still used.
+func ensureSpecial(r *Ranking, pool []*scored, top int) {
+	for _, s := range pool {
+		if !s.freeOrPromo {
+			continue
+		}
+		rejected := false
+		for _, x := range r.Rejected {
+			if x.Model == s.m.ID {
+				rejected = true
+				break
+			}
+		}
+		if rejected {
+			// The model is in the pool, so it is not rejected: the reason is replaced
+			// by one that says it is served last rather than left out.
+			r.Rejected = removeRejected(r.Rejected, s.m.ID)
+			r.Unranked = removeString(r.Unranked, s.m.ID)
+		}
+	}
+}
+
+// removeRejected drops one model from the rejected list.
+func removeRejected(list []Rejected, model string) []Rejected {
+	out := list[:0]
+	for _, x := range list {
+		if x.Model != model {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+// removeString drops one entry from a list of names.
+func removeString(list []string, name string) []string {
+	out := list[:0]
+	for _, s := range list {
+		if s != name {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // orderQuality ranks on the benchmark alone. A model with no quality evidence cannot be ranked on quality, so
 // it is reported as unranked instead of being given a made-up number. There is a floor: a model below the
 // pool's median quality is not offered, because "best quality" that includes the worst model is not best.
+//
+// A free or discounted model is never rejected for want of evidence or for a
+// below-median score: ensureSpecial puts it in the list either way (ADR 0022).
 func orderQuality(r *Ranking, pool []*scored, top int) {
 	var ranked, unranked []*scored
 	for _, s := range pool {
+		if s.freeOrPromo {
+			if s.source == "none" {
+				// It is served because it is free or on offer, but the panel still says
+				// that nothing is known about its quality.
+				s.flags = append(s.flags, "no quality evidence")
+			}
+			s.score = s.bench
+			ranked = append(ranked, s)
+			continue
+		}
 		if s.source == "none" {
 			unranked = append(unranked, s)
 			continue
@@ -507,7 +680,7 @@ func orderQuality(r *Ranking, pool []*scored, top int) {
 	floor := median(ranked)
 	var kept []*scored
 	for _, s := range ranked {
-		if s.bench < floor {
+		if s.bench < floor && !s.freeOrPromo {
 			r.Rejected = append(r.Rejected, Rejected{s.m.ID, fmt.Sprintf("quality %.2f below the pool median %.2f", s.bench, floor)})
 			continue
 		}
