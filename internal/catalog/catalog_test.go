@@ -19,7 +19,7 @@ func TestFetchParsesPricesPromosPlansAndTiers(t *testing.T) {
 			return
 		}
 		io.WriteString(w, `{"data":[
-		 {"id":"m","endpoints":["chat"],"owned_by":"o","context_length":64000,"tool_call":true,"reasoning":true,"protocols":["openai-chat"],"modalities":{"input":["text","image"]},"pricing":{"free":false,"input":630000000,"output":2500000000,"cache_read":120000000}},
+		 {"id":"m","endpoints":["chat"],"owned_by":"o","context_length":64000,"tool_call":true,"reasoning":true,"reasoning_toggle":true,"supported_reasoning_levels":["none","low","medium","high"],"protocols":["openai-chat"],"modalities":{"input":["text","image"]},"pricing":{"free":false,"input":630000000,"output":2500000000,"cache_read":120000000}},
 		 {"id":"m:free","endpoints":["chat"],"pricing":{"free":true,"input":null,"output":null}},
 		 {"id":"v","endpoints":["videos"],"pricing":{"free":false,"input":0,"output":0},"pricing_lines":[{"unit":"second","variant":"720p","micro_idr":750000000}],"sunset_at":`+fmt.Sprint(end)+`}]}`)
 	})
@@ -40,6 +40,15 @@ func TestFetchParsesPricesPromosPlansAndTiers(t *testing.T) {
 	m := s.Models["m"]
 	if m.InIDR != 630 || m.OutIDR != 2500 || m.CachedIDR != 120 || !m.Vision || !m.Reasoning || m.Context != 64000 {
 		t.Fatalf("model: %+v", m)
+	}
+	// The reasoning metadata kenari publishes is read (ADR 0026), so a client can be
+	// told which efforts a model takes.
+	if !m.EffortToggle || len(m.EffortLevels) != 4 || m.EffortLevels[0] != "none" {
+		t.Fatalf("the reasoning metadata was not decoded: toggle=%v levels=%v", m.EffortToggle, m.EffortLevels)
+	}
+	// A model that publishes nothing says nothing: an empty list is not "no levels".
+	if len(s.Models["m:free"].EffortLevels) != 0 {
+		t.Fatal("a model that publishes no levels must have none")
 	}
 	if !s.Models["m:free"].Free || s.Models["m:free"].FreeSibling != "m" {
 		t.Fatal("free twin not linked")

@@ -539,6 +539,15 @@ func (k *Key) Failure(model string, status int, body []byte, retryAfter time.Dur
 			blockModel(10 * time.Minute)
 			return Verdict{true, "model unavailable on key", 0}
 		}
+		// A context that does not fit is the caller's history, not a fault of the
+		// model. It must not count towards the model's failure record: evicting a
+		// healthy model because one request was too long would take it out of the
+		// preset for a reason that has nothing to do with the model (ADR 0020,
+		// ADR 0026). The retry is refused too, because the same request will not
+		// fit on the next key either.
+		if code == "context_length_exceeded" || strings.Contains(low, "maximum context length") {
+			return Verdict{false, "context length exceeded", 0}
+		}
 		return Verdict{false, "client error", 0}
 	case status == 0:
 		// A transport failure says nothing about one model, so it counts towards the key's breaker: after a few

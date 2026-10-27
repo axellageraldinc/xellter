@@ -60,7 +60,7 @@ func (f *fake) last() call {
 const modelsJSON = `{"object":"list","data":[
  {"id":"free-a:free","endpoints":["chat"],"owned_by":"x","context_length":128000,"tool_call":true,"protocols":["openai-chat"],"modalities":{"input":["text"]},"pricing":{"free":true,"input":null,"output":null}},
  {"id":"cheap-b","endpoints":["chat"],"owned_by":"x","context_length":128000,"tool_call":true,"protocols":["openai-chat"],"modalities":{"input":["text"]},"pricing":{"free":false,"input":100000000,"output":300000000,"cache_read":10000000}},
- {"id":"pro-c","endpoints":["chat"],"owned_by":"x","context_length":200000,"tool_call":true,"protocols":["openai-chat"],"modalities":{"input":["text","image"]},"pricing":{"free":false,"input":5000000000,"output":20000000000,"cache_read":500000000}},
+ {"id":"pro-c","endpoints":["chat"],"owned_by":"x","context_length":200000,"tool_call":true,"reasoning":true,"reasoning_toggle":true,"supported_reasoning_levels":["none","low","medium","high"],"protocols":["openai-chat"],"modalities":{"input":["text","image"]},"pricing":{"free":false,"input":5000000000,"output":20000000000,"cache_read":500000000}},
  {"id":"promo-d","endpoints":["chat"],"owned_by":"x","context_length":128000,"tool_call":true,"protocols":["openai-chat"],"modalities":{"input":["text"]},"pricing":{"free":false,"input":60000000,"output":250000000}},
  {"id":"img-paid","endpoints":["images"],"owned_by":"x","pricing":{"free":false,"input":0,"output":0},"pricing_lines":[{"unit":"image","micro_idr":300000000}]},
  {"id":"img-free:free","endpoints":["images"],"owned_by":"x","pricing":{"free":true}},

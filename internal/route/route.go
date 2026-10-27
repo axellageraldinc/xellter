@@ -18,6 +18,7 @@ import (
 
 	"github.com/axellageraldinc/xellter/internal/catalog"
 	"github.com/axellageraldinc/xellter/internal/config"
+	"github.com/axellageraldinc/xellter/internal/effort"
 	"github.com/axellageraldinc/xellter/internal/rank"
 	"github.com/axellageraldinc/xellter/internal/store"
 	"github.com/axellageraldinc/xellter/internal/upstream"
@@ -74,6 +75,11 @@ type Router struct {
 	rrMu sync.Mutex
 	rr   map[string]uint64 // per client+preset rotation counter
 
+	// efforts is what each model is known to do with a reasoning effort. It is
+	// written by the proxy as it serves traffic and read here to route a request to
+	// a model that can honour the effort the client asked for (ADR 0026).
+	efforts *effort.Registry
+
 	smu   sync.Mutex
 	pins  map[string]pin // session key -> model
 	evict map[string]*eviction
@@ -93,10 +99,13 @@ type eviction struct {
 
 // New builds a router.
 func New(cfg *config.Config, cat *catalog.Catalog, pool *upstream.Pool, st *store.Store) *Router {
-	r := &Router{cat: cat, pool: pool, st: st, rr: map[string]uint64{}, pins: map[string]pin{}, evict: map[string]*eviction{}}
+	r := &Router{cat: cat, pool: pool, st: st, rr: map[string]uint64{}, pins: map[string]pin{}, evict: map[string]*eviction{}, efforts: effort.NewRegistry()}
 	r.cfg.Store(cfg)
 	return r
 }
+
+// Efforts returns the registry of what each model is known to do with an effort.
+func (r *Router) Efforts() *effort.Registry { return r.efforts }
 
 // SetConfig swaps the configuration and recomputes rankings.
 func (r *Router) SetConfig(c *config.Config) {
@@ -193,6 +202,23 @@ func (r *Router) Models(cl *config.Client) (presets []string, real []string) {
 
 // Plan resolves the requested name for the client into the attempts to try, in order.
 func (r *Router) Plan(cl *config.Client, requested, session, path string, now time.Time) (*Plan, *Error) {
+	return r.PlanEffort(cl, requested, session, path, now, "", false, 0)
+}
+
+// PlanEffort resolves the requested name into the attempts to try, in order, honouring
+// the reasoning effort the client asked for.
+//
+// An effort is a constraint on the model, not a hint: a client that asks for "none"
+// wants an answer that was not thought out first. A model that is known to ignore the
+// effort cannot serve that request, so it is left out of the order and another model of
+// the preset takes it (ADR 0026). A model that is known to REJECT the effort would fail
+// the request outright, so it is left out too; the proxy strips the field for such a
+// model as a second line of defence.
+//
+// A model nobody has measured yet is not excluded: there is no evidence against it, and
+// refusing to serve it would empty the pool. The proxy measures what happens and the
+// next request routes accordingly.
+func (r *Router) PlanEffort(cl *config.Client, requested, session, path string, now time.Time, asked effort.Level, hasEffort bool, bodyTokens int) (*Plan, *Error) {
 	snap := r.cat.Snapshot()
 	if snap == nil {
 		return nil, &Error{503, "catalog_unavailable", "model catalog not loaded yet", 5 * time.Second}
@@ -223,6 +249,8 @@ func (r *Router) Plan(cl *config.Client, requested, session, path string, now ti
 	}
 	p := &Plan{Preset: requested, Requested: requested, Modality: sh.Category, Session: session}
 	order := r.order(cl, rk, session, now)
+	order = r.serveEffort(order, asked, hasEffort)
+	order = r.serveContext(order, snap, bodyTokens)
 	if len(order) == 0 {
 		return nil, &Error{503, "all_evicted", fmt.Sprintf("every model of preset %q is cooling down after errors", requested), 60 * time.Second}
 	}
@@ -243,6 +271,61 @@ func (r *Router) Plan(cl *config.Client, requested, session, path string, now ti
 		return nil, noCapacity(r, cl, snap, now, reasons)
 	}
 	return p, nil
+}
+
+// serveEffort puts the models that can honour the asked-for effort first.
+//
+// The order is kept, not replaced: a model that can honour the effort comes before one
+// that cannot, but a model that cannot is still served if every other model is gone.
+// The caller's request is answered by something rather than by nothing.
+//
+// Only the "none" effort is a routing constraint. A graded effort ("low", "high") asks
+// for more or less thinking, and a model that ignores the grade still answers; failing
+// the call over it would be worse than the inaccuracy (ADR 0026).
+func (r *Router) serveEffort(order []string, asked effort.Level, hasEffort bool) []string {
+	if !hasEffort || asked != effort.None || len(order) < 2 {
+		return order
+	}
+	can, cannot := make([]string, 0, len(order)), make([]string, 0, len(order))
+	for _, id := range order {
+		switch r.efforts.Verdict(id, asked) {
+		case effort.Honours:
+			can = append(can, id)
+		case effort.Ignores, effort.Rejects:
+			cannot = append(cannot, id)
+		default:
+			// Not measured: no evidence against it, so it stays in the first group.
+			can = append(can, id)
+		}
+	}
+	return append(can, cannot...)
+}
+
+// serveContext puts the models whose window can hold the request first.
+//
+// A preset advertises the largest window in its pool (ADR 0026), so a client may send
+// a conversation that fits the pool's best model but not the one the ring happens to
+// pick. The models that can hold the request go first; the ones that cannot stay in
+// the order, because a request that is too big for every model has to fail somewhere,
+// and failing on the model with the biggest window is the friendliest failure.
+//
+// The size is an estimate in tokens, and the window is the model's own. The estimate
+// is rough (four characters per token), so it is used to order, never to refuse: a
+// request is never turned away by the gateway on a guess.
+func (r *Router) serveContext(order []string, snap *catalog.Snapshot, bodyTokens int) []string {
+	if bodyTokens <= 0 || snap == nil || len(order) < 2 {
+		return order
+	}
+	fit, small := make([]string, 0, len(order)), make([]string, 0, len(order))
+	for _, id := range order {
+		m := snap.Models[id]
+		if m == nil || m.Context <= 0 || bodyTokens < m.Context {
+			fit = append(fit, id)
+			continue
+		}
+		small = append(small, id)
+	}
+	return append(fit, small...)
 }
 
 // pinModel handles a request that names a real model instead of a preset.

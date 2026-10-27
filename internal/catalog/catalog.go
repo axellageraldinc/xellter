@@ -42,26 +42,34 @@ type Line struct {
 
 // Model is one catalog entry with prices in IDR.
 type Model struct {
-	ID          string     `json:"id"`
-	Owner       string     `json:"owner"`
-	Endpoint    string     `json:"endpoint"` // chat | images | videos | audio_speech | audio_transcription | music | other
-	Endpoints   []string   `json:"endpoints"`
-	Context     int        `json:"context"`
-	Free        bool       `json:"free"`
-	ToolCall    bool       `json:"tool_call"`
-	Reasoning   bool       `json:"reasoning"`
-	Vision      bool       `json:"vision"`
-	Protocols   []string   `json:"protocols"`
-	InIDR       float64    `json:"in_idr"` // IDR per 1M tokens
-	OutIDR      float64    `json:"out_idr"`
-	CachedIDR   float64    `json:"cached_idr"`      // cache read
-	CacheWrite  float64    `json:"cache_write_idr"` // 0 = kenari publishes no value; shown as — in the panel
-	Lines       []Line     `json:"lines"`
-	Promo       *Promo     `json:"promo,omitempty"`
-	Upcoming    *Upcoming  `json:"upcoming,omitempty"`
-	SunsetAt    *time.Time `json:"sunset_at,omitempty"`
-	Subscriber  bool       `json:"subscriber_only"`
-	FreeSibling string     `json:"-"` // id of the paid twin of a ":free" model
+	ID        string   `json:"id"`
+	Owner     string   `json:"owner"`
+	Endpoint  string   `json:"endpoint"` // chat | images | videos | audio_speech | audio_transcription | music | other
+	Endpoints []string `json:"endpoints"`
+	Context   int      `json:"context"`
+	Free      bool     `json:"free"`
+	ToolCall  bool     `json:"tool_call"`
+	Reasoning bool     `json:"reasoning"`
+	// EffortLevels are the reasoning efforts kenari publishes for this model (its
+	// `supported_reasoning_levels`). Empty means kenari publishes nothing, which is
+	// NOT the same as "no levels": an empty list says nothing about the model, and
+	// measured upstreams accept efforts kenari does not list (ADR 0026).
+	EffortLevels []string `json:"effort_levels,omitempty"`
+	// EffortToggle says the model has a reasoning switch that can be turned off
+	// (kenari's `reasoning_toggle`).
+	EffortToggle bool       `json:"effort_toggle,omitempty"`
+	Vision       bool       `json:"vision"`
+	Protocols    []string   `json:"protocols"`
+	InIDR        float64    `json:"in_idr"` // IDR per 1M tokens
+	OutIDR       float64    `json:"out_idr"`
+	CachedIDR    float64    `json:"cached_idr"`      // cache read
+	CacheWrite   float64    `json:"cache_write_idr"` // 0 = kenari publishes no value; shown as — in the panel
+	Lines        []Line     `json:"lines"`
+	Promo        *Promo     `json:"promo,omitempty"`
+	Upcoming     *Upcoming  `json:"upcoming,omitempty"`
+	SunsetAt     *time.Time `json:"sunset_at,omitempty"`
+	Subscriber   bool       `json:"subscriber_only"`
+	FreeSibling  string     `json:"-"` // id of the paid twin of a ":free" model
 }
 
 // Plan is a kenari subscription.
@@ -225,9 +233,13 @@ type rawModel struct {
 	ContextLength int      `json:"context_length"`
 	ToolCall      bool     `json:"tool_call"`
 	Reasoning     bool     `json:"reasoning"`
-	Protocols     []string `json:"protocols"`
-	SunsetAt      *int64   `json:"sunset_at"`
-	Modalities    struct {
+	// ReasoningToggle says the model can have its reasoning switched off.
+	ReasoningToggle bool `json:"reasoning_toggle"`
+	// SupportedReasoningLevels are the efforts kenari publishes for the model.
+	SupportedReasoningLevels []string `json:"supported_reasoning_levels"`
+	Protocols                []string `json:"protocols"`
+	SunsetAt                 *int64   `json:"sunset_at"`
+	Modalities               struct {
 		Input []string `json:"input"`
 	} `json:"modalities"`
 	Pricing struct {
@@ -273,7 +285,8 @@ func (k *Kenari) Fetch(ctx context.Context) (*Snapshot, error) {
 	s := &Snapshot{Models: map[string]*Model{}, Fetched: time.Now(), USDIDR: 17500}
 	for _, r := range models.Data {
 		m := &Model{ID: r.ID, Owner: r.OwnedBy, Endpoints: r.Endpoints, Context: r.ContextLength, Free: r.Pricing.Free || strings.HasSuffix(r.ID, ":free"),
-			ToolCall: r.ToolCall, Reasoning: r.Reasoning, Protocols: r.Protocols}
+			ToolCall: r.ToolCall, Reasoning: r.Reasoning, Protocols: r.Protocols,
+			EffortToggle: r.ReasoningToggle, EffortLevels: r.SupportedReasoningLevels}
 		m.Endpoint = "other"
 		if len(r.Endpoints) > 0 {
 			m.Endpoint = r.Endpoints[0]

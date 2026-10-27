@@ -25,6 +25,7 @@ decisions. Rollout and tuning continue (see "Next").
 | Free and discounted models are always in the pool | every free model and every running promo of the category is added to every preset of that category, and leaves it again when the promo ends | done (ADR 0022) |
 | Stickiness is a per-preset toggle | a preset keeps one model per session (the default) or routes every turn again; the global `routing.sticky_session` is refused on load | done (ADR 0025) |
 | The usage history was lost | a stray `rm` deleted the live SQLite database, and the service came back as if it had never run: the new database started at request id 1 and the usage page showed nothing. Nothing in the code deleted it | fixed: a daily backup timer snapshots the database, the secrets and the config outside `data/`, and a marker file makes a lost database visible in the log instead of silent |
+| A reasoning effort had to reach the model | the owner set the effort to "none" and the answer came back after nine minutes with 46,773 output tokens: the effort was dropped in the browser and the gateway forwarded it blindly, where 3 of 17 measured models ignore it and 2 reject it with HTTP 400 | done: the gateway measures what each model does with an effort, routes "none" to a model that honours it, serves a refusing model without the field, and advertises the pool's largest context window so the client stops compressing early (ADR 0026) |
 
 ## Earlier phases (first build)
 

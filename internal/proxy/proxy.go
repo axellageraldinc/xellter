@@ -22,6 +22,7 @@ import (
 
 	"github.com/axellageraldinc/xellter/internal/catalog"
 	"github.com/axellageraldinc/xellter/internal/config"
+	"github.com/axellageraldinc/xellter/internal/effort"
 	"github.com/axellageraldinc/xellter/internal/route"
 	"github.com/axellageraldinc/xellter/internal/rtk"
 	"github.com/axellageraldinc/xellter/internal/store"
@@ -39,6 +40,11 @@ type Server struct {
 	Logf    func(string, ...any)
 	Now     func() time.Time
 	clients atomic.Pointer[map[string]*config.Client]
+
+	// efforts is what each model is known to do with a reasoning effort. It is the
+	// same registry the router reads, so a measurement taken while serving one
+	// request changes where the next one goes (ADR 0026).
+	efforts *effort.Registry
 
 	smu   sync.Mutex
 	spend map[string]*daySpend
@@ -68,6 +74,7 @@ func New(cfg *config.Config, cat *catalog.Catalog, pool *upstream.Pool, rt *rout
 		ResponseHeaderTimeout: 0, // enforced per request
 	}
 	s := &Server{cat: cat, pool: pool, rt: rt, st: st, hc: &http.Client{Transport: tr}, Logf: func(string, ...any) {}, Now: time.Now, spend: map[string]*daySpend{}, startedAt: time.Now()}
+	s.efforts = rt.Efforts()
 	s.SetConfig(cfg)
 	return s
 }
@@ -176,18 +183,22 @@ func (s *Server) listModels(w http.ResponseWriter, r *http.Request, cl *config.C
 	// The list answers in the OpenAI shape, plus the fields a client needs to pick a model sensibly. Without
 	// context_length a client falls back to its own default, which is how a preset looked like a 1M-token model.
 	type item struct {
-		ID            string   `json:"id"`
-		Object        string   `json:"object"`
-		Created       int64    `json:"created"`
-		OwnedBy       string   `json:"owned_by"`
-		Modality      string   `json:"modality,omitempty"`
-		Description   string   `json:"description,omitempty"`
-		Preset        bool     `json:"preset,omitempty"`
-		ContextLength int      `json:"context_length,omitempty"`
-		ToolCall      bool     `json:"tool_call,omitempty"`
-		Vision        bool     `json:"vision,omitempty"`
-		Reasoning     bool     `json:"reasoning,omitempty"`
-		Pricing       *pricing `json:"pricing,omitempty"`
+		ID            string `json:"id"`
+		Object        string `json:"object"`
+		Created       int64  `json:"created"`
+		OwnedBy       string `json:"owned_by"`
+		Modality      string `json:"modality,omitempty"`
+		Description   string `json:"description,omitempty"`
+		Preset        bool   `json:"preset,omitempty"`
+		ContextLength int    `json:"context_length,omitempty"`
+		ToolCall      bool   `json:"tool_call,omitempty"`
+		Vision        bool   `json:"vision,omitempty"`
+		Reasoning     bool   `json:"reasoning,omitempty"`
+		// EffortLevels are the reasoning efforts this model can be asked for. They
+		// are what kenari publishes, so a client can offer the right choices
+		// (ADR 0026).
+		EffortLevels []string `json:"effort_levels,omitempty"`
+		Pricing      *pricing `json:"pricing,omitempty"`
 	}
 	var data []item
 	for _, n := range presets {
@@ -195,15 +206,23 @@ func (s *Server) listModels(w http.ResponseWriter, r *http.Request, cl *config.C
 		desc := sh.Optimization + " over " + fmt.Sprint(len(sh.Models)) + " models"
 		it := item{ID: n, Object: "model", Created: s.startedAt.Unix(), OwnedBy: "xellter", Modality: sh.Category,
 			Description: desc, Preset: true}
-		// A preset advertises what its pool can do: the smallest context any model in it has, and whether every
-		// model in it supports a feature. That is the honest answer for a name that may resolve to any of them.
+		// A preset advertises what its pool can do: the largest context any model in
+		// it has, and whether every model in it supports a feature.
+		//
+		// The largest, not the smallest (ADR 0026). A preset is a name that may resolve
+		// to any model in it, so the window it publishes is a promise about the
+		// conversation the client may keep. Publishing the smallest window made clients
+		// compress their history early, for a window the model actually serving them
+		// never had. A conversation that outgrows the served model's real window is
+		// answered with a context-length error, which the client handles by
+		// compressing: the right outcome, for the right reason.
 		if snap := s.cat.Snapshot(); snap != nil {
 			for i, id := range sh.Models {
 				m := snap.Models[id]
 				if m == nil {
 					continue
 				}
-				if i == 0 || (m.Context > 0 && (it.ContextLength == 0 || m.Context < it.ContextLength)) {
+				if i == 0 || m.Context > it.ContextLength {
 					it.ContextLength = m.Context
 				}
 				if i == 0 {
@@ -224,6 +243,7 @@ func (s *Server) listModels(w http.ResponseWriter, r *http.Request, cl *config.C
 			m := snap.Models[id]
 			it.Modality, it.ContextLength = m.Endpoint, m.Context
 			it.ToolCall, it.Vision, it.Reasoning = m.ToolCall, m.Vision, m.Reasoning
+			it.EffortLevels = m.EffortLevels
 			it.Pricing = priceOf(m, now)
 		}
 		data = append(data, it)
@@ -335,11 +355,24 @@ func (s *Server) readBody(w http.ResponseWriter, r *http.Request) (*reqBody, *ro
 
 // encode builds the upstream body for the chosen real model.
 func (b *reqBody) encode(model string, streamUsage bool) ([]byte, error) {
+	return b.encodeWith(model, streamUsage, nil)
+}
+
+// encodeWith builds the upstream body for the chosen real model, with the fields in
+// drop removed first.
+//
+// drop names the top-level fields that must not reach this upstream. A model that
+// answers HTTP 400 to the reasoning field is not asked for it again (ADR 0026): the
+// request is served without it, which is better than failing the call.
+func (b *reqBody) encodeWith(model string, streamUsage bool, drop map[string]bool) ([]byte, error) {
 	if b.multipart {
 		return rewriteMultipart(b.raw, b.boundary, model)
 	}
 	m := make(map[string]json.RawMessage, len(b.json)+1)
 	for k, v := range b.json {
+		if drop[k] {
+			continue
+		}
 		m[k] = v
 	}
 	m["model"], _ = json.Marshal(model)
@@ -349,6 +382,41 @@ func (b *reqBody) encode(model string, streamUsage bool) ([]byte, error) {
 		}
 	}
 	return json.Marshal(m)
+}
+
+// bodyTokens is a rough estimate of how many tokens a request body carries.
+//
+// It is used to order the models of a preset, never to refuse a request: a rough
+// estimate that turned a request away would be worse than a failed one (ADR 0026).
+// Four characters per token is the usual rule of thumb for English text.
+func bodyTokens(b *reqBody) int {
+	if b == nil {
+		return 0
+	}
+	return len(b.raw) / 4
+}
+
+// effortFields returns the top-level fields that carry the reasoning effort, so they
+// can be removed in one step. The nested "reasoning" object is removed as a whole: a
+// model that rejects the effort rejects the object too.
+func effortFields() map[string]bool {
+	return map[string]bool{"reasoning_effort": true, "reasoning": true}
+}
+
+// effortOf reads the reasoning effort a request asks for.
+//
+// The body is parsed again here rather than kept as a map of any: the request body is
+// read once and kept as raw JSON, so decoding the two effort shapes costs one small
+// parse of a body that is already in memory.
+func (s *Server) effortOf(b *reqBody) (effort.Level, bool) {
+	if b == nil || b.json == nil {
+		return "", false
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b.raw, &m); err != nil {
+		return "", false
+	}
+	return effort.Parse(m)
 }
 
 // sessionKey identifies a session: an explicit header wins, then the request body's own keys, then a hash of
@@ -390,7 +458,11 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 		return
 	}
 	session := sessionKey(r, body)
-	plan, perr := s.rt.Plan(cl, body.model, session, r.URL.Path, start)
+	// The effort the client asked for, and whether it asked at all. A request that says
+	// nothing is not a request for "none": an unset effort lets the upstream apply its
+	// own default, which for a hosted reasoning model is often its ceiling (ADR 0026).
+	asked, hasEffort := s.effortOf(body)
+	plan, perr := s.rt.PlanEffort(cl, body.model, session, r.URL.Path, start, asked, hasEffort, bodyTokens(body))
 	if perr != nil {
 		writeErr(w, r.URL.Path, perr.Status, perr.Code, perr.Message, perr.RetryAfter)
 		return
@@ -419,6 +491,13 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 		if dead[at.Model.ID] {
 			continue
 		}
+		// A model that has been measured to reject the effort does not get it again
+		// (ADR 0026). The request is served without the field, which is better than
+		// failing the call over a parameter the client cannot drop.
+		drop := map[string]bool(nil)
+		if hasEffort && s.efforts.Verdict(at.Model.ID, asked) == effort.Rejects {
+			drop = effortFields()
+		}
 		for try := 1; try <= 2; try++ {
 			// The gate is checked once per (model, key): the retry of a model that just failed must not be
 			// refused by the very block that failure created, or requirement 15 could never fire. The key was
@@ -429,7 +508,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 				}
 			}
 			attempts++
-			payload, err := body.encode(at.Model.ID, streamUsage)
+			payload, err := body.encodeWith(at.Model.ID, streamUsage, drop)
 			if err != nil {
 				writeErr(w, r.URL.Path, 400, "bad_request", "cannot encode request: "+err.Error(), 0)
 				return
@@ -446,6 +525,37 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 				return
 			}
 			f := s.fail(at, res, cfg)
+			// A model that answers HTTP 400 to the reasoning field is refusing the
+			// parameter, not the request (ADR 0026). The request is served again without
+			// the field: the call succeeds instead of dying over a parameter the client
+			// cannot drop.
+			//
+			// The refusal is only recorded when the retry WITHOUT the field succeeds.
+			// A 400 can mean several things (a context that does not fit, a body the
+			// provider dislikes), and only the retry tells them apart.
+			if f.status == 400 && hasEffort && drop == nil && !f.contextOverflow {
+				s.Logf("%s refused a request that carried reasoning effort %q; retrying without it", at.Model.ID, asked)
+				dead[at.Model.ID] = true
+				// The same model, once more, with the effort removed.
+				payload, err = body.encodeWith(at.Model.ID, streamUsage, effortFields())
+				if err != nil {
+					writeErr(w, r.URL.Path, 400, "bad_request", "cannot encode request: "+err.Error(), 0)
+					return
+				}
+				res = s.send(r, at, payload, body.ctype, isStream, cfg)
+				if res.err == nil && res.resp.StatusCode < 300 {
+					// The field was the problem: the model is known to reject it, and
+					// the request is served.
+					s.efforts.Record(at.Model.ID, asked, effort.Rejects, s.Now())
+					s.rt.Succeeded(cl.Name, plan.Preset, at.Model.ID)
+					if plan.Preset != "" {
+						s.rt.Pin(cl.Name, plan.Preset, session, at.Model.ID, s.Now())
+					}
+					s.relay(w, r, cl, plan, at, res, row, body, isStream, start, snap)
+					return
+				}
+				f = s.fail(at, res, cfg)
+			}
 			row.Status, row.Err = f.status, f.reason
 			row.LatencyMS = int(s.Now().Sub(start) / time.Millisecond)
 			row.Billing = "payg"
@@ -506,6 +616,10 @@ type failure struct {
 	retry  bool
 	body   []byte
 	header http.Header
+	// contextOverflow says the upstream refused because the request did not fit the
+	// model's window. It is the caller's history, not a fault of the model, so it is
+	// neither retried on another key nor counted against the model (ADR 0026).
+	contextOverflow bool
 }
 
 func (s *Server) send(r *http.Request, at route.Attempt, payload []byte, ctype string, stream bool, cfg *config.Config) sendResult {
@@ -568,7 +682,8 @@ func (s *Server) fail(at route.Attempt, res sendResult, cfg *config.Config) *fai
 			h.Set(k, x)
 		}
 	}
-	return &failure{status: res.resp.StatusCode, reason: v.Reason, retry: v.Retry, body: body, header: h}
+	return &failure{status: res.resp.StatusCode, reason: v.Reason, retry: v.Retry, body: body, header: h,
+		contextOverflow: v.Reason == "context length exceeded"}
 }
 
 func trimErr(err error) string {
@@ -643,6 +758,15 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, cl *config.Client
 	}
 	u := findUsage(head, tail.bytes())
 	row.InTok, row.OutTok, row.CachedTok = u.in, u.out, u.cached
+	// What the model did with the effort the client asked for. This is what the
+	// gateway learns from, and it is the only trustworthy source: no catalog field
+	// says whether a model stops thinking when told to (ADR 0026).
+	if asked, ok := s.effortOf(body); ok {
+		thought := findReasoning(head, tail.bytes())
+		if v := s.efforts.Observe(at.Model.ID, asked, thought, now); v != effort.Unknown {
+			s.Logf("%s %s reasoning effort %q (reasoning in response: %t)", at.Model.ID, v, asked, thought)
+		}
+	}
 	covered := at.Key.Covered(at.Model, snap, now)
 	switch {
 	case at.Model.Free:

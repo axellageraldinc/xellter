@@ -75,6 +75,44 @@ func num(v any) int {
 	return 0
 }
 
+// findReasoning reports whether a response carried any reasoning text.
+//
+// The reasoning of a chat completion is in the message ("reasoning" or
+// "reasoning_content"), and a streamed one is in the deltas. Both are found by
+// scanning for the keys, the way findUsage finds the usage object, so a whole body is
+// never parsed and a stream is never buffered.
+//
+// This is the evidence the gateway uses to learn what a model does with an effort
+// (ADR 0026): a response with reasoning in it is a model that thought.
+func findReasoning(chunks ...[]byte) bool {
+	keys := [][]byte{[]byte(`"reasoning_content"`), []byte(`"reasoning"`)}
+	for _, c := range chunks {
+		for _, key := range keys {
+			rest := c
+			for {
+				i := bytes.Index(rest, key)
+				if i < 0 {
+					break
+				}
+				rest = rest[i+len(key):]
+				j := bytes.IndexByte(rest, ':')
+				if j < 0 || len(bytes.TrimSpace(rest[:j])) != 0 {
+					continue
+				}
+				dec := json.NewDecoder(bytes.NewReader(rest[j+1:]))
+				var v any
+				if dec.Decode(&v) != nil {
+					continue
+				}
+				if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 func boundaryOf(ctype string) string {
 	_, params, err := mime.ParseMediaType(ctype)
 	if err != nil {
