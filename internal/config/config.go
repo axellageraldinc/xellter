@@ -41,13 +41,13 @@ type Config struct {
 // joins the pool of every preset of its category automatically (ADR 0033).
 type LocalModel struct {
 	ID       string `yaml:"id" json:"id"`                           // the name a preset lists and the panel shows
-	Category string `yaml:"category" json:"category"`               // only audio_transcription is supported
+	Category string `yaml:"category" json:"category"`               // audio_transcription or audio_speech
 	BaseURL  string `yaml:"base_url" json:"base_url"`               // server root, e.g. http://127.0.0.1:8490
 	Model    string `yaml:"model,omitempty" json:"model,omitempty"` // name the server knows; defaults to ID
 }
 
 // LocalCategories are the categories a local model can serve.
-var LocalCategories = []string{"audio_transcription"}
+var LocalCategories = []string{"audio_transcription", "audio_speech"}
 
 // Server holds listener and storage settings.
 type Server struct {

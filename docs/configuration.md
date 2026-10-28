@@ -51,7 +51,7 @@ clients[]:
 
 ## local_models[]
 
-Models served from this machine instead of kenari (ADR 0033). Optional; empty by default.
+Models served from this machine instead of kenari (ADR 0033, 0034). Optional; empty by default.
 
 ```yaml
 local_models:
@@ -59,13 +59,16 @@ local_models:
     category: audio_transcription
     base_url: http://127.0.0.1:8490
     model: small-id        # optional: the name the local server knows; defaults to id
+  - id: pocket-tts-id
+    category: audio_speech
+    base_url: http://127.0.0.1:8491
 ```
 
 | key | meaning |
 |---|---|
 | `id` | the name a preset can list and the panel shows (owner `local`); letters, digits, dot, dash, underscore; unique |
-| `category` | only `audio_transcription` is supported |
-| `base_url` | root of an OpenAI-compatible server (`/v1/audio/transcriptions` is appended); `http` or `https` |
+| `category` | `audio_transcription` or `audio_speech` |
+| `base_url` | root of an OpenAI-compatible server (`/v1/audio/transcriptions` or `/v1/audio/speech` is appended); `http` or `https` |
 | `model` | name sent to that server in place of `id` |
 
 A local model is free, needs no key (none is sent), and is in the pool of every preset of its category

@@ -16,12 +16,15 @@ kenari:
   account_key_env: KENARI_ACCOUNT_KEY
 
 # Models served from this machine instead of kenari (ADR 0033). Free, no key, and in the pool of every preset of
-# their category automatically. Only audio_transcription is supported; the server must speak the OpenAI API.
+# their category automatically. Only audio_transcription and audio_speech are supported; the server must speak the OpenAI API.
 # local_models:
 #   - id: maleo-small-id
 #     category: audio_transcription
 #     base_url: http://127.0.0.1:8490
 #     model: small-id               # optional: the name the local server knows
+#   - id: pocket-tts-id
+#     category: audio_speech
+#     base_url: http://127.0.0.1:8491
 
 # Routing is the same for every client and preset. These are the only knobs left.
 routing:

@@ -112,6 +112,33 @@ func TestLocalModelNeverShadowsKenari(t *testing.T) {
 	}
 }
 
+// A local text-to-speech model joins every TTS preset by itself and gets the request body with its own model name
+// and the caller's voice (ADR 0034).
+func TestLocalSpeechModelJoinsTTSPreset(t *testing.T) {
+	l := newLocalServer(t)
+	e := setup(t, func(c *config.Config) {
+		c.LocalModels = []config.LocalModel{{ID: "pocket-tts-id", Category: "audio_speech", BaseURL: l.srv.URL, Model: "pocket-1"}}
+		c.Clients[0].Presets["tts"] = config.Preset{Category: "audio_speech", Optimization: "cheapest"}
+	})
+	req, _ := http.NewRequest("POST", e.px.URL+"/v1/audio/speech", strings.NewReader(`{"model":"tts","input":"Halo","voice":"axel"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+e.keyCl)
+	r, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Body.Close()
+	if r.StatusCode != 200 || r.Header.Get("X-Xellter-Model") != "pocket-tts-id" {
+		t.Fatalf("the local model should serve the TTS preset: %d %q", r.StatusCode, r.Header.Get("X-Xellter-Model"))
+	}
+	if l.hits != 1 || !strings.Contains(l.body, `"pocket-1"`) || !strings.Contains(l.body, `"axel"`) || strings.Contains(l.body, "pocket-tts-id") {
+		t.Fatalf("the local server must see its own model name and the voice: %q", l.body)
+	}
+	if l.auth != "" || l.apiKey != "" {
+		t.Fatalf("a kenari key reached the local server: %q %q", l.auth, l.apiKey)
+	}
+}
+
 func TestLocalModelConfigIsValidated(t *testing.T) {
 	for name, lm := range map[string]config.LocalModel{
 		"bad id":       {ID: "a b", Category: "audio_transcription", BaseURL: "http://127.0.0.1:1"},
