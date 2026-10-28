@@ -401,8 +401,8 @@ func TestClientDetailShowsTheRankingPerPreset(t *testing.T) {
 	if rk.Candidates[0].Reason == "" {
 		t.Fatal("a candidate must explain itself")
 	}
-	if len(d.Optimizations) != 3 {
-		t.Fatalf("the three optimizations: %+v", d.Optimizations)
+	if len(d.Optimizations) != 4 {
+		t.Fatalf("the four optimizations: %+v", d.Optimizations)
 	}
 	if rec := do(t, h, c, http.MethodGet, "/api/client?name=nobody", nil); rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown client: %d", rec.Code)
