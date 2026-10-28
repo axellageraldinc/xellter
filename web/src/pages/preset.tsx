@@ -66,8 +66,16 @@ export function PresetCard({
     models.length !== preset.models.length ||
     [...models].sort().join('\n') !== [...preset.models].sort().join('\n')
   const ranking = preset.ranking
-  const candidates = ranking?.candidates ?? []
   const outNow = new Set((preset.out_of_service ?? []).map((o) => o.model))
+  // What is routed right now: the top list without the models that are out, each one replaced by the next
+  // reserve model, as the router does (ADR 0020). The out models are listed under "Out for now".
+  const candidates = React.useMemo(() => {
+    const top = ranking?.candidates ?? []
+    const live = top.filter((c) => !outNow.has(c.model))
+    const fill = (ranking?.reserve ?? []).filter((c) => !outNow.has(c.model)).slice(0, top.length - live.length)
+    return [...live, ...fill]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ranking, preset.out_of_service])
 
   // The card follows the server when it changes underneath it.
   React.useEffect(() => {
@@ -236,11 +244,6 @@ export function PresetCard({
                     <TD className="tabular text-text-muted">{i + 1}</TD>
                     <TD className="mono">
                       {c.model}
-                      {outNow.has(c.model) && (
-                        <Badge tone="danger" className="ml-2 align-middle">
-                          out
-                        </Badge>
-                      )}
                     </TD>
                     <TD>
                       <BillingBadge billing={c.billing} />
