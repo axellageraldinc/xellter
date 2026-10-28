@@ -79,6 +79,7 @@ CREATE INDEX IF NOT EXISTS req_client_ts ON requests(client, ts);
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, exp INTEGER NOT NULL, ip TEXT, ua TEXT, created INTEGER);
 CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, upstream TEXT NOT NULL, ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS config_history(id TEXT PRIMARY KEY, yaml TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS effort_facts(model TEXT, level TEXT, verdict TEXT, at INTEGER NOT NULL, PRIMARY KEY(model,level));
 DROP TABLE IF EXISTS effort_thinkers;
 CREATE TABLE IF NOT EXISTS model_events(id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, client TEXT, preset TEXT, model TEXT, kind TEXT, reason TEXT, until_ts INTEGER, strikes INTEGER);
@@ -554,6 +555,50 @@ func (s *Store) KVGet(k string) string {
 // KVSet writes a value.
 func (s *Store) KVSet(k, v string) {
 	_, _ = s.db.Exec(`INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v`, k, v)
+}
+
+// KVDel removes a value.
+func (s *Store) KVDel(k string) { _, _ = s.db.Exec(`DELETE FROM kv WHERE k=?`, k) }
+
+// ---- config history (the saved versions of xellter.yaml) ----
+
+// AddHistory keeps one saved version of the config; only the newest 50 are kept.
+func (s *Store) AddHistory(id string, yaml []byte) {
+	_, _ = s.db.Exec(`INSERT OR REPLACE INTO config_history(id, yaml) VALUES(?,?)`, id, string(yaml))
+	_, _ = s.db.Exec(`DELETE FROM config_history WHERE id NOT IN (SELECT id FROM config_history ORDER BY id DESC LIMIT 50)`)
+}
+
+// HasHistory reports whether a version with this id is kept.
+func (s *Store) HasHistory(id string) bool {
+	var n int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM config_history WHERE id=?`, id).Scan(&n)
+	return n > 0
+}
+
+// ListHistory returns the ids of the kept versions, newest first.
+func (s *Store) ListHistory() []string {
+	rows, err := s.db.Query(`SELECT id FROM config_history ORDER BY id DESC`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// GetHistory returns one kept version.
+func (s *Store) GetHistory(id string) ([]byte, error) {
+	var y string
+	if err := s.db.QueryRow(`SELECT yaml FROM config_history WHERE id=?`, id).Scan(&y); err != nil {
+		return nil, err
+	}
+	return []byte(y), nil
 }
 
 // ---- effort refusals (the models that answer HTTP 400 to a reasoning effort) ----

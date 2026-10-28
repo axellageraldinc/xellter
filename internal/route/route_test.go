@@ -46,7 +46,7 @@ func setup(ids ...string) (*Router, *config.Client) {
 	for _, m := range models {
 		snap.Models[m.ID] = m
 	}
-	cat := catalog.New(snapSource{snap: snap}, "")
+	cat := catalog.New(snapSource{snap: snap}, nil)
 	if err := cat.Refresh(context.Background()); err != nil {
 		panic(err)
 	}

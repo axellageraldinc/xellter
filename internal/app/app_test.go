@@ -227,7 +227,7 @@ func setup(t testing.TB, mutate func(*config.Config)) *env {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "xellter.yaml")
-	if err := config.Save(path, cfg); err != nil {
+	if err := config.Save(path, cfg, nil); err != nil {
 		t.Fatal(err)
 	}
 	for k, v := range map[string]string{"KEY_PLAN": "secret-plan", "KEY_TOPUP": "secret-topup", "KEY_LOCKED": "secret-locked", "KEY_DIRECT": "secret-direct", "KEY_CODED": "secret-coded", "KENARI_ACCOUNT_KEY": "secret-account"} {

@@ -9,8 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -177,17 +175,25 @@ type Source interface {
 type Catalog struct {
 	cur   atomic.Pointer[Snapshot]
 	src   Source
-	cache string
+	cache KV
 	onNew func(*Snapshot)
 }
 
-// New creates a catalog; cacheFile (optional) persists the last good snapshot.
-func New(src Source, cacheFile string) *Catalog {
-	c := &Catalog{src: src, cache: cacheFile}
-	if cacheFile != "" {
-		if b, err := os.ReadFile(cacheFile); err == nil {
+// KV is where the catalog keeps its last good snapshot (the store).
+type KV interface {
+	KVGet(k string) string
+	KVSet(k, v string)
+}
+
+const cacheKey = "catalog.snapshot"
+
+// New creates a catalog; cache (optional) persists the last good snapshot.
+func New(src Source, cache KV) *Catalog {
+	c := &Catalog{src: src, cache: cache}
+	if cache != nil {
+		if b := cache.KVGet(cacheKey); b != "" {
 			var s Snapshot
-			if json.Unmarshal(b, &s) == nil && len(s.Models) > 0 {
+			if json.Unmarshal([]byte(b), &s) == nil && len(s.Models) > 0 {
 				s.Degraded = true
 				c.cur.Store(&s)
 			}
@@ -214,13 +220,9 @@ func (c *Catalog) Refresh(ctx context.Context) error {
 		return err
 	}
 	c.cur.Store(s)
-	if c.cache != "" {
+	if c.cache != nil {
 		if b, err := json.Marshal(s); err == nil {
-			_ = os.MkdirAll(filepath.Dir(c.cache), 0o700)
-			tmp := c.cache + ".tmp"
-			if os.WriteFile(tmp, b, 0o600) == nil {
-				_ = os.Rename(tmp, c.cache)
-			}
+			c.cache.KVSet(cacheKey, string(b))
 		}
 	}
 	if c.onNew != nil {

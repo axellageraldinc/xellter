@@ -73,7 +73,7 @@ A failed catalog fetch keeps the last snapshot and marks it degraded (`/healthz`
 ## Configuration and hot reload (`internal/app`)
 
 `xellter.yaml` is the single source of truth. `app.Apply` validates, saves (keeping a history copy
-under `<data_dir>/config-history`), then swaps the config into the pool, the proxy and the router;
+in the database), then swaps the config into the pool, the proxy and the router;
 the router recomputes every ranking. Nothing mutates a published `*config.Config`.
 
 A config file that still carries a retired section (`rules`, `resilience`, `rtk`, `benchmarks`) or a
@@ -363,11 +363,11 @@ ui-ux-pro-max reference: primitive, semantic, component (`web/src/styles/tokens.
 
 | What | Where |
 |---|---|
-| config (clients, keys, presets, routing) | `xellter.yaml` (0600), history in `data/config-history/` |
+| config (clients, keys, presets, routing) | `xellter.yaml` (0600), history in SQLite (`config_history`) |
 | kenari key values | `data/secrets.env` (0600) |
 | request log, usage, leaderboard rows, admin sessions, video job -> key | `data/xellter.db` (SQLite, WAL) |
-| last good catalog | `data/catalog.json` |
-| admin login | `data/auth-record.json` (0600), `login-state.json`, `recovery-used.json` |
+| last good catalog | SQLite (`kv`, key `catalog.snapshot`) |
+| admin login | `data/auth-record.json` (0600, credentials); login counters and used recovery codes in SQLite (`kv`) |
 | session pins | `data/xellter.db` (`kv`), written every minute and on shutdown |
 | learned effort refusals | `data/xellter.db` (`effort_facts`) |
 | the models that are out, their strikes, the health records of the last hour | `data/xellter.db` (`kv`, `model_health`), written every minute and on shutdown |

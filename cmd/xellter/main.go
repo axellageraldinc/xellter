@@ -225,7 +225,7 @@ func migrateCmd(args []string) error {
 		}
 		defer os.Remove(tmp.Name())
 		tmp.Close()
-		if err := config.Save(tmp.Name(), c); err != nil {
+		if err := config.Save(tmp.Name(), c, nil); err != nil {
 			return err
 		}
 		out, err := os.ReadFile(tmp.Name())
@@ -238,7 +238,7 @@ func migrateCmd(args []string) error {
 	if err := os.WriteFile(*path+".pre-rewrite", data, 0o600); err != nil {
 		return err
 	}
-	if err := config.Save(*path, c); err != nil {
+	if err := saveConfig(*path, c); err != nil {
 		return err
 	}
 	fmt.Printf("wrote %s (old file kept as %s.pre-rewrite)\n", *path, *path)
@@ -267,10 +267,9 @@ func adminCmd(args []string) error {
 		if !*force {
 			return fmt.Errorf("%s already exists; pass -force to replace it", c.Server.AuthRecord)
 		}
-		for _, f := range []string{"login-state.json", "recovery-used.json"} {
-			_ = os.Remove(filepath.Join(c.Server.DataDir, f))
-		}
 		if st, err := store.Open(c.Server.DataDir); err == nil {
+			st.KVDel(auth.StateKey) // a credential reset starts the counters and the used codes again
+			st.KVDel(auth.RecoveryKey)
 			st.DeleteAllSessions() // old logins must not survive a credential reset
 			_ = st.Close()
 		}
@@ -323,7 +322,7 @@ func clientCmd(args []string) error {
 	}
 	key := "xl-" + auth.RandomHex(24)
 	c.Clients = append(c.Clients, config.Client{Name: *name, Enabled: true, Purpose: *purpose, KeyHash: proxy.HashKey(key), KeyHint: "…" + key[len(key)-4:], Presets: map[string]config.Preset{}})
-	if err := config.Save(*path, c); err != nil {
+	if err := saveConfig(*path, c); err != nil {
 		return err
 	}
 	if *out != "" {
@@ -367,7 +366,7 @@ func keyCmd(args []string) error {
 		if err := config.SetSecret(c.Server.SecretsFile, env, value); err != nil {
 			return err
 		}
-		if err := config.Save(*path, c); err != nil {
+		if err := saveConfig(*path, c); err != nil {
 			return err
 		}
 		fmt.Printf("key %q added to client %q (restart or use the panel to have it probed)\n", *name, *client)
@@ -384,4 +383,14 @@ func split(s string) []string {
 		}
 	}
 	return out
+}
+
+// saveConfig writes the config and keeps the previous version in the database.
+func saveConfig(path string, c *config.Config) error {
+	st, err := store.Open(c.Server.DataDir)
+	if err != nil {
+		return config.Save(path, c, nil)
+	}
+	defer st.Close()
+	return config.Save(path, c, st)
 }

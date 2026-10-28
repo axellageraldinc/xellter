@@ -175,10 +175,9 @@ func TOTPNow(secret string, at time.Time) string {
 
 // Authenticator verifies logins with rate limiting.
 type Authenticator struct {
-	rec          *Record
-	recoveryFile string
-	stateFile    string
-	now          func() time.Time
+	rec *Record
+	kv  KV
+	now func() time.Time
 
 	mu      sync.Mutex
 	window  time.Duration
@@ -192,16 +191,28 @@ type bucket struct {
 	Count int       `json:"count"`
 }
 
-// NewAuthenticator builds one; stateFile persists attempt counters across restarts.
-func NewAuthenticator(rec *Record, stateFile, recoveryFile string) *Authenticator {
-	a := &Authenticator{rec: rec, recoveryFile: recoveryFile, stateFile: stateFile, now: time.Now, window: 15 * time.Minute, clients: map[string]*bucket{}}
-	if stateFile != "" {
-		if b, err := os.ReadFile(stateFile); err == nil {
+// KV is where the login counters and the used recovery codes are kept (the store).
+type KV interface {
+	KVGet(k string) string
+	KVSet(k, v string)
+}
+
+// StateKey and RecoveryKey are the kv keys; a credential reset deletes both.
+const (
+	StateKey    = "auth.login_state"
+	RecoveryKey = "auth.recovery_used"
+)
+
+// NewAuthenticator builds one; kv persists attempt counters and used recovery codes across restarts.
+func NewAuthenticator(rec *Record, kv KV) *Authenticator {
+	a := &Authenticator{rec: rec, kv: kv, now: time.Now, window: 15 * time.Minute, clients: map[string]*bucket{}}
+	if kv != nil {
+		if b := kv.KVGet(StateKey); b != "" {
 			var s struct {
 				Global  bucket             `json:"global"`
 				Clients map[string]*bucket `json:"clients"`
 			}
-			if json.Unmarshal(b, &s) == nil {
+			if json.Unmarshal([]byte(b), &s) == nil {
 				a.global = s.Global
 				if s.Clients != nil {
 					a.clients = s.Clients
@@ -216,14 +227,11 @@ func NewAuthenticator(rec *Record, stateFile, recoveryFile string) *Authenticato
 func (a *Authenticator) Username() string { return a.rec.Username }
 
 func (a *Authenticator) persist() {
-	if a.stateFile == "" {
+	if a.kv == nil {
 		return
 	}
 	b, _ := json.Marshal(map[string]any{"global": a.global, "clients": a.clients})
-	tmp := a.stateFile + ".tmp"
-	if os.WriteFile(tmp, b, 0o600) == nil {
-		_ = os.Rename(tmp, a.stateFile)
-	}
+	a.kv.KVSet(StateKey, string(b))
 }
 
 // Result of a login attempt.
@@ -310,7 +318,7 @@ func (a *Authenticator) secondFactor(code string) bool {
 		return true
 	}
 	norm := strings.ToUpper(regexp.MustCompile(`[^A-Za-z0-9]`).ReplaceAllString(raw, ""))
-	if len(norm) < 10 || len(a.rec.RecoveryHashes) == 0 || a.recoveryFile == "" {
+	if len(norm) < 10 || len(a.rec.RecoveryHashes) == 0 || a.kv == nil {
 		return false
 	}
 	sum := sha256.Sum256([]byte(norm))
@@ -329,9 +337,7 @@ func (a *Authenticator) secondFactor(code string) bool {
 	var used struct {
 		Used []string `json:"used"`
 	}
-	if b, err := os.ReadFile(a.recoveryFile); err == nil {
-		_ = json.Unmarshal(b, &used)
-	}
+	_ = json.Unmarshal([]byte(a.kv.KVGet(RecoveryKey)), &used)
 	for _, u := range used.Used {
 		if u == d {
 			return false
@@ -339,10 +345,7 @@ func (a *Authenticator) secondFactor(code string) bool {
 	}
 	used.Used = append(used.Used, d)
 	b, _ := json.Marshal(used)
-	tmp := a.recoveryFile + ".tmp"
-	if os.WriteFile(tmp, b, 0o600) != nil || os.Rename(tmp, a.recoveryFile) != nil {
-		return false
-	}
+	a.kv.KVSet(RecoveryKey, string(b))
 	return true
 }
 

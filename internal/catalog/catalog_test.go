@@ -95,7 +95,8 @@ func TestFailedRefreshKeepsLastSnapshotAndMarksItStale(t *testing.T) {
 		io.WriteString(w, `{}`)
 	}))
 	defer srv.Close()
-	c := New(&Kenari{BaseURL: srv.URL, UA: "t", HTTP: srv.Client()}, t.TempDir()+"/c.json")
+	cache := kvMap{}
+	c := New(&Kenari{BaseURL: srv.URL, UA: "t", HTTP: srv.Client()}, cache)
 	if err := c.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -108,6 +109,13 @@ func TestFailedRefreshKeepsLastSnapshotAndMarksItStale(t *testing.T) {
 		t.Fatalf("snapshot should be kept and flagged stale: %+v", s)
 	}
 	// a restart while kenari is down still loads the cached catalog
-	c2 := New(&Kenari{BaseURL: srv.URL, UA: "t", HTTP: srv.Client()}, "")
-	_ = c2
+	c2 := New(&Kenari{BaseURL: srv.URL, UA: "t", HTTP: srv.Client()}, cache)
+	if s := c2.Snapshot(); s == nil || len(s.Models) != 1 || !s.Degraded {
+		t.Fatalf("the cached catalog must load after a restart: %+v", s)
+	}
 }
+
+type kvMap map[string]string
+
+func (m kvMap) KVGet(k string) string { return m[k] }
+func (m kvMap) KVSet(k, v string)     { m[k] = v }

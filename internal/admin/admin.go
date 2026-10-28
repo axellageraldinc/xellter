@@ -248,7 +248,7 @@ func (h *Handler) config(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		c := h.a.Cfg()
 		y, _ := yaml.Marshal(c)
-		jok(w, map[string]any{"config": c, "yaml": string(y), "history": config.History(c.Server.DataDir)})
+		jok(w, map[string]any{"config": c, "yaml": string(y), "history": h.a.St.ListHistory()})
 	case http.MethodPut:
 		var in struct {
 			Config *config.Config  `json:"config"`
@@ -314,7 +314,7 @@ func (h *Handler) rollback(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 400, "POST {id}")
 		return
 	}
-	b, err := config.ReadHistory(h.a.Cfg().Server.DataDir, in.ID)
+	b, err := config.ReadHistory(h.a.St, in.ID)
 	if err != nil {
 		jerr(w, 404, "no such version")
 		return

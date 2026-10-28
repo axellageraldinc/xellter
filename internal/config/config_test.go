@@ -108,13 +108,14 @@ func TestSaveKeepsHistoryAndNeverStoresSecrets(t *testing.T) {
 		Keys:    []Upstream{{Name: "main", KeyEnv: "KENARI_KEY_BABU_MAIN"}},
 		Presets: map[string]Preset{"text": {Category: "chat", Optimization: "balanced", Models: []string{"cheap-b", "pro-c"}}},
 	}}
+	hist := &memHistory{}
 	for i := range 3 {
 		c.Routing.TopModels = 10 + i
-		if err := Save(file, c); err != nil {
+		if err := Save(file, c, hist); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if h := History(c.Server.DataDir); len(h) != 2 {
+	if h := hist.ListHistory(); len(h) != 2 {
 		t.Fatalf("history %v", h)
 	}
 	st, _ := os.Stat(file)
@@ -134,7 +135,7 @@ func TestSaveKeepsHistoryAndNeverStoresSecrets(t *testing.T) {
 	if err := DeleteSecret(filepath.Join(dir, "s.env"), "KENARI_KEY_BABU_MAIN"); err != nil || len(LoadSecrets(filepath.Join(dir, "s.env"))) != 0 {
 		t.Fatal("secret not deleted")
 	}
-	if _, err := ReadHistory(c.Server.DataDir, "../../etc/passwd"); err == nil {
+	if _, err := ReadHistory(hist, "../../etc/passwd"); err == nil {
 		t.Fatal("history id path traversal")
 	}
 	back, err := Load(file)
@@ -295,4 +296,24 @@ func TestMigrateCarriesTheOldStickySwitchOver(t *testing.T) {
 	if !silent.Clients[0].Presets["text"].IsSticky() {
 		t.Fatal("a file that never said anything must keep the sticky default")
 	}
+}
+
+type memHistory struct{ m map[string][]byte }
+
+func (h *memHistory) AddHistory(id string, y []byte) {
+	if h.m == nil {
+		h.m = map[string][]byte{}
+	}
+	h.m[id] = y
+}
+func (h *memHistory) HasHistory(id string) bool { _, ok := h.m[id]; return ok }
+func (h *memHistory) GetHistory(id string) ([]byte, error) {
+	return h.m[id], nil
+}
+func (h *memHistory) ListHistory() []string {
+	var out []string
+	for id := range h.m {
+		out = append(out, id)
+	}
+	return out
 }

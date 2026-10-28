@@ -9,7 +9,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"path/filepath"
 	"reflect"
 	"sync"
 	"sync/atomic"
@@ -102,7 +101,8 @@ func New(path string, src catalog.Source) (*App, error) {
 		src = dynSource{a}
 	}
 	src = catalog.WithLocal(src, a.locals)
-	a.Cat = catalog.New(src, filepath.Join(cfg.Server.DataDir, "catalog.json"))
+	importLegacyFiles(cfg.Server.DataDir, st, log.Printf)
+	a.Cat = catalog.New(src, st)
 	a.Pool = upstream.NewPool()
 	a.Pool.Reload(cfg, config.LoadSecrets(cfg.Server.SecretsFile), st)
 	a.Rt = route.New(cfg, a.Cat, a.Pool, st)
@@ -122,7 +122,7 @@ func New(path string, src catalog.Source) (*App, error) {
 		a.Rt.Recompute(time.Now())
 	})
 	if rec, err := auth.ReadRecord(cfg.Server.AuthRecord); err == nil {
-		a.Auth = auth.NewAuthenticator(rec, filepath.Join(cfg.Server.DataDir, "login-state.json"), filepath.Join(cfg.Server.DataDir, "recovery-used.json"))
+		a.Auth = auth.NewAuthenticator(rec, st)
 	} else {
 		a.Logf("admin login disabled: %v (run: xellter admin init)", err)
 	}
@@ -139,7 +139,7 @@ func (a *App) Secrets() map[string]string { return config.LoadSecrets(a.Cfg().Se
 func (a *App) Apply(c *config.Config) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if err := config.Save(a.Path, c); err != nil {
+	if err := config.Save(a.Path, c, a.St); err != nil {
 		return err
 	}
 	a.activate(c)

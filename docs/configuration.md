@@ -2,7 +2,7 @@
 
 One YAML file (`xellter -config`, default `xellter.yaml`, or `$XELLTER_CONFIG`). Missing fields take
 the defaults below. The panel's Config tab edits the same file, validates it, keeps a history under
-`<data_dir>/config-history` (last 50) and can restore a version. Run `xellter check` to validate
+the database, table `config_history` (last 50) and can restore a version. Run `xellter check` to validate
 without starting.
 
 Unknown keys are ignored — except the ones the rewrite deleted, which are **refused** (see the last

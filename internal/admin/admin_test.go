@@ -55,7 +55,7 @@ func newTestApp(t *testing.T) *app.App {
 		},
 	}}
 	path := filepath.Join(dir, "xellter.yaml")
-	if err := config.Save(path, c); err != nil {
+	if err := config.Save(path, c, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := config.SetSecret(c.Server.SecretsFile, "KENARI_KEY_BABU", "kn-babu"); err != nil {
@@ -88,7 +88,7 @@ func sessionCookie(t *testing.T, a *app.App) *http.Cookie {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.Auth = auth.NewAuthenticator(&rec, filepath.Join(a.Cfg().Server.DataDir, "login-state.json"), filepath.Join(a.Cfg().Server.DataDir, "recovery-used.json"))
+	a.Auth = auth.NewAuthenticator(&rec, a.St)
 	tok, hash := auth.NewToken()
 	a.St.PutSession(hash, time.Now().Add(time.Hour), "127.0.0.1", "test")
 	return &http.Cookie{Name: cookieName, Value: tok, Path: "/"}

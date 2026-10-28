@@ -548,9 +548,18 @@ func absFrom(base, p string) string {
 	return filepath.Join(base, p)
 }
 
-// Save writes the config atomically (mode 0600) and keeps a history copy of
-// the previous file under <data_dir>/config-history.
-func Save(file string, c *Config) error {
+// HistoryStore keeps the previous versions of the config. The store (SQLite)
+// implements it; nil means no history is kept.
+type HistoryStore interface {
+	AddHistory(id string, yaml []byte)
+	ListHistory() []string
+	GetHistory(id string) ([]byte, error)
+	HasHistory(id string) bool
+}
+
+// Save writes the config atomically (mode 0600) and keeps the previous file in
+// the history store.
+func Save(file string, c *Config, h HistoryStore) error {
 	if err := c.Validate(); err != nil {
 		return err
 	}
@@ -558,18 +567,14 @@ func Save(file string, c *Config) error {
 	if err != nil {
 		return err
 	}
-	if old, err := os.ReadFile(file); err == nil {
-		dir := filepath.Join(c.Server.DataDir, "config-history")
-		if err := os.MkdirAll(dir, 0o700); err == nil {
-			t := time.Now().UTC()
-			name := filepath.Join(dir, t.Format("20060102-150405.000")+".yaml")
-			for _, err := os.Stat(name); err == nil; _, err = os.Stat(name) { // saves within one millisecond must not overwrite each other
-				t = t.Add(time.Millisecond)
-				name = filepath.Join(dir, t.Format("20060102-150405.000")+".yaml")
-			}
-			_ = os.WriteFile(name, old, 0o600)
-			pruneHistory(dir, 50)
+	if old, err := os.ReadFile(file); err == nil && h != nil {
+		t := time.Now().UTC()
+		id := t.Format("20060102-150405.000")
+		for h.HasHistory(id) { // saves within one millisecond must not overwrite each other
+			t = t.Add(time.Millisecond)
+			id = t.Format("20060102-150405.000")
 		}
+		h.AddHistory(id, old)
 	}
 	tmp := file + ".tmp"
 	if err := os.WriteFile(tmp, append([]byte("# Managed by xellter (the admin panel rewrites this file; comments are not preserved).\n"), out...), 0o600); err != nil {
@@ -578,38 +583,12 @@ func Save(file string, c *Config) error {
 	return os.Rename(tmp, file)
 }
 
-func pruneHistory(dir string, keep int) {
-	ents, err := os.ReadDir(dir)
-	if err != nil || len(ents) <= keep {
-		return
-	}
-	names := make([]string, 0, len(ents))
-	for _, e := range ents {
-		names = append(names, e.Name())
-	}
-	sort.Strings(names)
-	for _, n := range names[:len(names)-keep] {
-		_ = os.Remove(filepath.Join(dir, n))
-	}
-}
-
-// History lists saved config versions, newest first.
-func History(dataDir string) []string {
-	ents, _ := os.ReadDir(filepath.Join(dataDir, "config-history"))
-	var names []string
-	for _, e := range ents {
-		names = append(names, strings.TrimSuffix(e.Name(), ".yaml"))
-	}
-	sort.Sort(sort.Reverse(sort.StringSlice(names)))
-	return names
-}
-
 // ReadHistory returns one saved version's YAML.
-func ReadHistory(dataDir, id string) ([]byte, error) {
+func ReadHistory(h HistoryStore, id string) ([]byte, error) {
 	if !regexp.MustCompile(`^[0-9]{8}-[0-9]{6}\.[0-9]{3}$`).MatchString(id) {
 		return nil, errors.New("bad history id")
 	}
-	return os.ReadFile(filepath.Join(dataDir, "config-history", id+".yaml"))
+	return h.GetHistory(id)
 }
 
 // ---- secrets ----

@@ -38,7 +38,7 @@ func TestRecordRoundTripRecoveryCodeIsSingleUse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := NewAuthenticator(got, "", filepath.Join(dir, "used.json"))
+	a := NewAuthenticator(got, kvMap{})
 	if !a.Verify("axell", "a-long-enough-password", codes[0], "ip1").OK {
 		t.Fatal("recovery code should work once")
 	}
@@ -72,3 +72,8 @@ func TestWeakPasswordRejected(t *testing.T) {
 		t.Fatal("short password accepted")
 	}
 }
+
+type kvMap map[string]string
+
+func (m kvMap) KVGet(k string) string { return m[k] }
+func (m kvMap) KVSet(k, v string)     { m[k] = v }
