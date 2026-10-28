@@ -35,3 +35,32 @@ func TestTheLastModelIsWaitedFor(t *testing.T) {
 		t.Fatalf("a slow answer must still arrive: %d %s", resp.StatusCode, body)
 	}
 }
+
+// A client that names no session is told apart by the first user message, not by the system prompt every
+// one of its conversations shares (ADR 0030).
+func TestConversationsWithTheSamePromptAreNotOneSession(t *testing.T) {
+	e := setup(t, nil)
+	sys := strings.Repeat("You are a helpful assistant. ", 40) // longer than the bytes the old key looked at
+	post := func(user string) string {
+		resp, body := e.post(t, e.keyCl, "/v1/chat/completions", `{"model":"text","messages":[{"role":"system","content":"`+sys+`"},{"role":"user","content":"`+user+`"}]}`)
+		if resp.StatusCode != 200 {
+			t.Fatalf("status %d: %s", resp.StatusCode, body)
+		}
+		return resp.Header.Get("X-Xellter-Model")
+	}
+	seen := map[string]bool{}
+	for i := 0; i < 8; i++ {
+		seen[post("question number "+string(rune('a'+i)))] = true
+	}
+	if len(seen) < 2 {
+		t.Fatalf("eight different conversations all went to %v: they share one pin", seen)
+	}
+	// and a conversation keeps its model as it grows
+	first := post("a long talk")
+	for i := 0; i < 4; i++ {
+		resp, _ := e.post(t, e.keyCl, "/v1/chat/completions", `{"model":"text","messages":[{"role":"system","content":"`+sys+`"},{"role":"user","content":"a long talk"},{"role":"assistant","content":"ok"},{"role":"user","content":"and then?"}]}`)
+		if got := resp.Header.Get("X-Xellter-Model"); got != first {
+			t.Fatalf("turn %d moved from %s to %s", i+2, first, got)
+		}
+	}
+}

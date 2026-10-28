@@ -420,7 +420,7 @@ func (s *Server) effortOf(b *reqBody) (effort.Level, bool) {
 }
 
 // sessionKey identifies a session: an explicit header wins, then the request body's own keys, then a hash of
-// the opening messages. The returned value is the session id as the caller would recognise it, because it is
+// the first user message (or, failing that, the opening bytes). The returned value is the session id as the caller would recognise it, because it is
 // also what GET /v1/session accepts; the prefix that says where it came from is added separately.
 func sessionKey(r *http.Request, b *reqBody) string {
 	for _, h := range []string{"X-Xellter-Session", "X-Session-Id", "X-Claude-Code-Session-Id"} {
@@ -437,12 +437,27 @@ func sessionKey(r *http.Request, b *reqBody) string {
 			return v
 		}
 	}
-	if raw := b.json["messages"]; len(raw) > 0 {
-		n := min(len(raw), 600)
-		h := sha256.Sum256(raw[:n])
-		return "m" + hex.EncodeToString(h[:8])
+	raw := b.json["messages"]
+	if len(raw) == 0 {
+		return ""
 	}
-	return ""
+	// A client that names no session is told apart by how its conversation opens: the first user message,
+	// which every later turn repeats. The system prompt is not used: every conversation of one agent starts
+	// with the same one, so they would all share a single pin and a single model (ADR 0030).
+	var msgs []struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(raw, &msgs) == nil {
+		for _, m := range msgs {
+			if m.Role == "user" && len(m.Content) > 0 {
+				h := sha256.Sum256(m.Content[:min(len(m.Content), 2000)])
+				return "u" + hex.EncodeToString(h[:8])
+			}
+		}
+	}
+	h := sha256.Sum256(raw[:min(len(raw), 600)])
+	return "m" + hex.EncodeToString(h[:8])
 }
 
 func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client) {
