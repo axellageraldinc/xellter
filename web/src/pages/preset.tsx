@@ -2,7 +2,7 @@ import * as React from 'react'
 import { Check, ChevronDown, Pencil, Search, Sparkles, Trash2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import type { CatalogRow, PresetView } from '@/lib/types'
-import { ctx, left, rp, secs, when } from '@/lib/format'
+import { ctx, rp, secs } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -22,6 +22,7 @@ import { Switch } from '@/components/ui/switch'
 import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table'
 import { useToast } from '@/components/ui/toast'
 import { BillingBadge } from '@/components/billing-badge'
+import { OutHistory, OutOfServiceList } from '@/components/model-health'
 
 const OPTIMIZATIONS = [
   { value: 'cheapest', label: 'Cheapest', help: 'Price only: input, output, cache and promos.' },
@@ -109,7 +110,7 @@ export function PresetCard({
   }
 
   return (
-    <Card className="flex h-full flex-col">
+    <Card className="flex h-full min-w-0 flex-col">
       <CardHeader className="items-start">
         <div className="flex min-w-0 items-start gap-3">
           <span
@@ -266,41 +267,8 @@ export function PresetCard({
           )}
         </div>
 
-        {(preset.out_of_service?.length ?? 0) > 0 && (
-          <div className="space-y-1.5" data-testid="out-of-service">
-            <div className="text-xs font-semibold tracking-wide text-text-muted uppercase">
-              Out for now ({preset.out_of_service.length})
-            </div>
-            {preset.out_of_service.map((o) => (
-              <div key={o.model} className="text-xs text-text-muted">
-                <span className="font-medium text-text">{o.model}</span>
-                {' · '}
-                {o.reason}
-                {' · '}back in {left(o.until) || 'a moment'}
-                {o.strikes > 1 ? ` (out ${o.strikes} times in a row)` : ''}
-              </div>
-            ))}
-          </div>
-        )}
-
-        {(preset.history?.length ?? 0) > 0 && (
-          <details className="group" data-testid="out-history">
-            <summary className="cursor-pointer list-none text-xs font-semibold tracking-wide text-text-muted uppercase">
-              Taken out before ({preset.history.length})
-            </summary>
-            <div className="mt-2 space-y-1.5">
-              {preset.history.map((h) => (
-                <div key={`${h.ts}-${h.model}`} className="text-xs text-text-muted">
-                  <span className="tabular">{when(h.ts)}</span>
-                  {' · '}
-                  <span className="font-medium text-text">{h.model}</span>
-                  {' · '}
-                  {h.reason}
-                </div>
-              ))}
-            </div>
-          </details>
-        )}
+        <OutOfServiceList items={preset.out_of_service} />
+        <OutHistory events={preset.history} />
 
         {(ranking?.rejected?.length ?? 0) > 0 && (
           <details className="group">

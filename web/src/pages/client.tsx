@@ -102,7 +102,7 @@ export function ClientDetailPage() {
       }
     >
       <div className="grid gap-4 lg:grid-cols-3">
-        <Card className="lg:col-span-2">
+        <Card className="min-w-0 lg:col-span-2">
           <CardHeader>
             <CardTitle>kenari API keys</CardTitle>
             <Button variant="outline" size="sm" onClick={() => setAddKeyOpen(true)}>
