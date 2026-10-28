@@ -150,6 +150,10 @@ func (p Preset) IsSticky() bool { return p.Sticky == nil || *p.Sticky }
 // preset per client.
 var MultiCategories = []string{"chat"}
 
+// VoicePreset is the name of the chat preset an app asks for on a spoken turn (ADR 0038). The panel offers it as its own
+// entry, "Voice Conversation", with this name fixed, so it is never confused with the ordinary text preset.
+const VoicePreset = "voice-conversation"
+
 // Categories are the endpoint kinds a preset can serve, in display order.
 var Categories = []string{"chat", "images", "videos", "audio_speech", "audio_transcription", "music", "systemone"}
 

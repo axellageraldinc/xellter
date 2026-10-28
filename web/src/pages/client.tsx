@@ -2,7 +2,7 @@ import * as React from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Activity, Copy, KeyRound, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { api } from '@/lib/api'
-import type { ClientDetail, Category } from '@/lib/types'
+import type { ClientDetail, CategoryOption } from '@/lib/types'
 import { ago, left, num, pl } from '@/lib/format'
 import { Badge, Dot } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -28,7 +28,7 @@ import { PresetCard } from '@/pages/preset'
 export function ClientDetailPage() {
   const { name = '' } = useParams()
   const [d, setD] = React.useState<ClientDetail | null>(null)
-  const [adding, setAdding] = React.useState<Category | null>(null)
+  const [adding, setAdding] = React.useState<CategoryOption | null>(null)
   const [addKeyOpen, setAddKeyOpen] = React.useState(false)
   const [renameKeyName, setRenameKeyName] = React.useState<string | null>(null)
   const [newKey, setNewKey] = React.useState<{ client: string; key: string } | null>(null)
@@ -46,7 +46,10 @@ export function ClientDetailPage() {
   if (!d) return <Page title={name}>Loading…</Page>
 
   const have = new Set(d.presets.map((p) => p.category))
-  const missing = d.categories.filter((c) => c.multi || !have.has(c.category))
+  const names = new Set(d.presets.map((p) => p.name))
+  // An entry with a fixed name (Voice Conversation) is offered until the client has that preset; the others until it has one of the category.
+  const missing = d.categories.filter((c) => (c.fixed ? !names.has(c.preset) : !have.has(c.category)))
+  const keyOf = (c: CategoryOption) => `${c.category}:${c.preset}`
 
   return (
     <Page
@@ -291,7 +294,7 @@ export function ClientDetailPage() {
       <div className="mt-8 mb-3 flex items-center justify-between">
         <h2 className="text-sm font-semibold tracking-tight text-text">Presets</h2>
         {missing.length > 0 && (
-          <Select onValueChange={(c) => setAdding(c as Category)}>
+          <Select onValueChange={(k) => setAdding(d.categories.find((c) => keyOf(c) === k) ?? null)}>
             <SelectTrigger className="w-auto" aria-label="Add a preset">
               <span className="flex items-center gap-1.5">
                 <Plus className="size-4" />
@@ -300,7 +303,7 @@ export function ClientDetailPage() {
             </SelectTrigger>
             <SelectContent>
               {missing.map((c) => (
-                <SelectItem key={c.category} value={c.category}>
+                <SelectItem key={keyOf(c)} value={keyOf(c)}>
                   {c.label} ({c.preset})
                 </SelectItem>
               ))}
@@ -329,7 +332,7 @@ export function ClientDetailPage() {
       {adding && (
         <AddPresetDialog
           client={d.client.name}
-          category={adding}
+          option={adding}
           taken={d.presets.map((p) => p.name)}
           onClose={() => setAdding(null)}
           onDone={async () => {
@@ -382,18 +385,18 @@ export function ClientDetailPage() {
 /** AddPresetDialog creates a preset with the owner's own name. */
 function AddPresetDialog({
   client,
-  category,
+  option,
   taken,
   onClose,
   onDone,
 }: {
   client: string
-  category: Category
+  option: CategoryOption
   taken: string[]
   onClose: () => void
   onDone: () => void
 }) {
-  const [name, setName] = React.useState('')
+  const [name, setName] = React.useState(option.fixed ? option.preset : '')
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState('')
 
@@ -407,7 +410,9 @@ function AddPresetDialog({
     try {
       await api('presets', {
         method: 'POST',
-        body: { client, action: 'save', preset: name.trim(), category, optimization: 'balanced', models: [] },
+        body: option.fixed
+          ? { client, action: 'save', preset: name.trim(), category: option.category, optimization: 'cheapest', sticky: false, models: [] }
+          : { client, action: 'save', preset: name.trim(), category: option.category, optimization: 'balanced', models: [] },
       })
       onDone()
     } catch (e) {
@@ -421,23 +426,26 @@ function AddPresetDialog({
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>New preset</DialogTitle>
+          <DialogTitle>{option.fixed ? `New preset: ${option.label}` : 'New preset'}</DialogTitle>
           <DialogDescription>
-            The name is the model your app asks for. A client holds one preset per category, and as many chat presets as it needs (a fast one for voice, say).
+            {option.fixed
+              ? 'A pool of fast models for spoken conversations. The app asks for it by this exact name, so the name cannot be changed. Pick the models and the optimization on the preset afterwards.'
+              : 'The name is the model your app asks for. A client holds one preset per category.'}
           </DialogDescription>
         </DialogHeader>
         <DialogBody className="space-y-4">
-          <Field label="Preset name" htmlFor="preset-name" hint="Letters, digits, dot, dash and underscore.">
+          <Field label="Preset name" htmlFor="preset-name" hint={option.fixed ? 'Fixed.' : 'Letters, digits, dot, dash and underscore.'}>
             <Input
               id="preset-name"
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="e.g. my-fast-text"
+              disabled={option.fixed}
               autoFocus
             />
           </Field>
           <Field label="Category">
-            <Input value={category} disabled />
+            <Input value={option.category} disabled />
           </Field>
           {error && <p className="text-sm text-danger-text">{error}</p>}
         </DialogBody>

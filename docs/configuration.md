@@ -147,7 +147,8 @@ The value lives in `data/secrets.env` (0600), never in the YAML.
 Key = the model name the app sends. The name is the owner's own (ADR 0021): letters, digits, dot,
 dash and underscore, unique inside the client. The `category` says what the preset serves, and a
 client holds at most one preset per category, so a second preset of a kind is refused, except for `chat`:
-a client may hold several chat presets (ADR 0038), for example a fast one for a voice conversation.
+a client may hold several chat presets (ADR 0038), for example a fast one for a voice conversation: the panel offers it as
+"Voice Conversation" with the fixed name `voice-conversation`.
 
 | Category | Suggested name | kenari endpoint |
 |---|---|---|

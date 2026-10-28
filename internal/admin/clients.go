@@ -39,6 +39,15 @@ var categoryLabel = map[string]string{
 	"audio_transcription": "Speech to text", "music": "Music", "systemone": "System One",
 }
 
+// presetLabel is what the panel calls a preset's kind: the category's label, or "Voice Conversation" for the chat preset of
+// that name, so two chat presets are never both shown as "Text".
+func presetLabel(name, category string) string {
+	if category == "chat" && name == config.VoicePreset {
+		return "Voice Conversation"
+	}
+	return categoryLabel[category]
+}
+
 type option struct {
 	Value string `json:"value"`
 	Label string `json:"label"`
@@ -67,13 +76,16 @@ type categoryOption struct {
 	Category string `json:"category"`
 	Preset   string `json:"preset"`
 	Label    string `json:"label"`
-	Multi    bool   `json:"multi"` // the client may hold several presets of this category (ADR 0038)
+	Fixed    bool   `json:"fixed"` // an extra preset with a purpose of its own: its name is fixed and the client may hold it next to the category's main one (ADR 0038)
 }
 
 func categoryOptions() []categoryOption {
 	out := make([]categoryOption, 0, len(config.Categories))
 	for _, c := range config.Categories {
-		out = append(out, categoryOption{Category: c, Preset: config.PresetName(c), Label: categoryLabel[c], Multi: slices.Contains(config.MultiCategories, c)})
+		out = append(out, categoryOption{Category: c, Preset: config.PresetName(c), Label: categoryLabel[c]})
+		if c == "chat" {
+			out = append(out, categoryOption{Category: c, Preset: config.VoicePreset, Label: "Voice Conversation", Fixed: true})
+		}
 	}
 	return out
 }
@@ -272,7 +284,7 @@ func (h *Handler) presetRows(cl *config.Client) []presetRow {
 	for _, n := range names {
 		p := cl.Presets[n]
 		row := presetRow{
-			Name: n, Category: p.Category, Label: categoryLabel[p.Category],
+			Name: n, Category: p.Category, Label: presetLabel(n, p.Category),
 			Optimization: p.Optimization, OptimizationLabel: optimizationLabel[p.Optimization], Pool: len(p.Models),
 		}
 		if x := rk[rank.Key(cl.Name, n)]; x != nil {
@@ -757,7 +769,7 @@ func (h *Handler) clientDetail(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		presets = append(presets, presetView{
-			Name: n, Category: p.Category, Label: categoryLabel[p.Category],
+			Name: n, Category: p.Category, Label: presetLabel(n, p.Category),
 			Optimization: p.Optimization, OptimizationLabel: optimizationLabel[p.Optimization],
 			Models: append([]string{}, p.Models...), AutoModels: auto, ExcludedModels: excluded, Excluded: append([]string{}, p.Excluded...), Sticky: p.IsSticky(),
 			Ranking:      rk[rank.Key(cl.Name, n)],

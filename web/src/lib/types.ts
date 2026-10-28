@@ -13,7 +13,7 @@ export type Category =
 
 export type Option = { value: string; label: string }
 
-export type CategoryOption = { category: Category; preset: string; label: string; multi: boolean }
+export type CategoryOption = { category: Category; preset: string; label: string; fixed: boolean }
 
 export type KeyRow = {
   name: string

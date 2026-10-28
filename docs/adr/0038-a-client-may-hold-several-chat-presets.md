@@ -20,8 +20,11 @@ that sends one key per agent cannot switch keys per turn.
 2. Each chat preset has its own pool, optimization and `sticky` toggle, and its own eviction and health records, which
    were already kept per `(client, preset, model)`. Nothing in routing changes: a request names a preset, and that
    preset's ranking serves it.
-3. The panel offers "Add preset" for chat even when the client already has one, and refuses a name the client
-   already uses (saving it would replace that preset).
+3. The panel's "Add preset" list has a separate entry, **Voice Conversation**, whose name is fixed to `voice-conversation`
+   (`config.VoicePreset`) and which starts as Cheapest with sticky off. The ordinary chat entry is offered only while the
+   client has no chat preset, so two chat presets are never both called "Text" and the name an app asks for is never
+   mistyped. The dialog refuses a name the client already uses (saving it would replace that preset), and a preset of that
+   name is labelled "Voice Conversation" on the client page.
 
 ## Consequences
 
