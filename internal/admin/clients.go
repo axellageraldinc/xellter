@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -403,6 +404,7 @@ func clonePresets(m map[string]config.Preset) map[string]config.Preset {
 	out := make(map[string]config.Preset, len(m))
 	for k, v := range m {
 		v.Models = append([]string{}, v.Models...)
+		v.Excluded = append([]string(nil), v.Excluded...)
 		if v.Sticky != nil {
 			v.Sticky = new(*v.Sticky)
 		}
@@ -689,17 +691,20 @@ type clientView struct {
 
 // presetView is one preset with its live ranking and its eviction state.
 type presetView struct {
-	Name              string               `json:"name"`
-	Category          string               `json:"category"`
-	Label             string               `json:"label"`
-	Optimization      string               `json:"optimization"`
-	OptimizationLabel string               `json:"optimization_label"`
-	Models            []string             `json:"models"`
-	AutoModels        []string             `json:"auto_models"` // free and promo models xellter added on its own
-	Sticky            bool                 `json:"sticky"`      // a session keeps one model for its whole life
-	Ranking           *rank.Ranking        `json:"ranking"`
-	Evictions         map[string]time.Time `json:"evictions"`
-	OutOfService      []route.Out          `json:"out_of_service"` // the same models, with the reason each is out
+	Name              string   `json:"name"`
+	Category          string   `json:"category"`
+	Label             string   `json:"label"`
+	Optimization      string   `json:"optimization"`
+	OptimizationLabel string   `json:"optimization_label"`
+	Models            []string `json:"models"`
+	AutoModels        []string `json:"auto_models"` // free and promo models xellter added on its own
+	// ExcludedModels are free or promo models xellter would add but the owner unticked (ADR 0035).
+	ExcludedModels []string             `json:"excluded_models"`
+	Excluded       []string             `json:"excluded"` // the whole saved list, what the panel sends back
+	Sticky         bool                 `json:"sticky"`   // a session keeps one model for its whole life
+	Ranking        *rank.Ranking        `json:"ranking"`
+	Evictions      map[string]time.Time `json:"evictions"`
+	OutOfService   []route.Out          `json:"out_of_service"` // the same models, with the reason each is out
 	// Stats is how each model did in this preset over the last 24 hours; History is who was taken out and why.
 	Stats   map[string]*store.PresetModelStat `json:"stats"`
 	History []store.ModelEvent                `json:"history"`
@@ -736,16 +741,24 @@ func (h *Handler) clientDetail(w http.ResponseWriter, r *http.Request) {
 		for _, id := range p.Models {
 			own[id] = true
 		}
-		auto := []string{}
+		skip := map[string]bool{}
+		for _, id := range p.Excluded {
+			skip[id] = true
+		}
+		auto, excluded := []string{}, []string{}
 		for _, id := range rank.AutoPool(cfg, h.a.Cat.Snapshot(), h.a.Pool, cl, p.Category, now) {
-			if !own[id] {
+			switch {
+			case own[id]:
+			case skip[id]:
+				excluded = append(excluded, id)
+			default:
 				auto = append(auto, id)
 			}
 		}
 		presets = append(presets, presetView{
 			Name: n, Category: p.Category, Label: categoryLabel[p.Category],
 			Optimization: p.Optimization, OptimizationLabel: optimizationLabel[p.Optimization],
-			Models: append([]string{}, p.Models...), AutoModels: auto, Sticky: p.IsSticky(),
+			Models: append([]string{}, p.Models...), AutoModels: auto, ExcludedModels: excluded, Excluded: append([]string{}, p.Excluded...), Sticky: p.IsSticky(),
 			Ranking:      rk[rank.Key(cl.Name, n)],
 			Evictions:    h.a.Rt.Evictions(cl.Name, n, now),
 			OutOfService: h.a.Rt.OutOfService(cl.Name, n, now),
@@ -770,14 +783,15 @@ func (h *Handler) clientDetail(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) presets(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Client       string   `json:"client"`
-		Action       string   `json:"action"` // save | delete | rename
-		Preset       string   `json:"preset"`
-		NewName      string   `json:"new_name"`
-		Category     string   `json:"category"`
-		Optimization string   `json:"optimization"`
-		Models       []string `json:"models"`
-		Sticky       *bool    `json:"sticky"` // absent keeps what the preset has
+		Client       string    `json:"client"`
+		Action       string    `json:"action"` // save | delete | rename
+		Preset       string    `json:"preset"`
+		NewName      string    `json:"new_name"`
+		Category     string    `json:"category"`
+		Optimization string    `json:"optimization"`
+		Models       []string  `json:"models"`
+		Sticky       *bool     `json:"sticky"`   // absent keeps what the preset has
+		Excluded     *[]string `json:"excluded"` // absent keeps what the preset has
 	}
 	if r.Method != http.MethodPost || readJSON(r, &in) != nil {
 		jerr(w, 400, "POST {client, action, preset, category, optimization, models, sticky}")
@@ -823,7 +837,22 @@ func (h *Handler) presets(w http.ResponseWriter, r *http.Request) {
 		if in.Sticky != nil {
 			sticky = new(*in.Sticky)
 		}
-		cl.Presets[name] = config.Preset{Category: category, Optimization: opt, Models: models, Sticky: sticky}
+		excluded := cl.Presets[name].Excluded
+		if in.Excluded != nil {
+			excluded = *in.Excluded
+		}
+		// A model the owner ticked is in the pool; it cannot also be kept out of it.
+		kept := []string{}
+		for _, m := range excluded {
+			m = strings.TrimSpace(m)
+			if m != "" && !seen[m] && !slices.Contains(kept, m) {
+				kept = append(kept, m)
+			}
+		}
+		if len(kept) == 0 {
+			kept = nil
+		}
+		cl.Presets[name] = config.Preset{Category: category, Optimization: opt, Models: models, Excluded: kept, Sticky: sticky}
 	case "rename":
 		newName := strings.TrimSpace(in.NewName)
 		if newName == "" {

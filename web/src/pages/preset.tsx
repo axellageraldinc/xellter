@@ -55,6 +55,7 @@ export function PresetCard({
 }) {
   const [optimization, setOptimization] = React.useState(preset.optimization)
   const [models, setModels] = React.useState<string[]>(preset.models)
+  const [excluded, setExcluded] = React.useState<string[]>(preset.excluded ?? [])
   const [sticky, setSticky] = React.useState(preset.sticky)
   const [picking, setPicking] = React.useState(false)
   const [renaming, setRenaming] = React.useState(false)
@@ -63,6 +64,7 @@ export function PresetCard({
   const dirty =
     optimization !== preset.optimization ||
     sticky !== preset.sticky ||
+    [...excluded].sort().join('\n') !== [...(preset.excluded ?? [])].sort().join('\n') ||
     models.length !== preset.models.length ||
     [...models].sort().join('\n') !== [...preset.models].sort().join('\n')
   const ranking = preset.ranking
@@ -82,7 +84,8 @@ export function PresetCard({
     setOptimization(preset.optimization)
     setModels(preset.models)
     setSticky(preset.sticky)
-  }, [preset.optimization, preset.models, preset.sticky])
+    setExcluded(preset.excluded ?? [])
+  }, [preset.optimization, preset.models, preset.sticky, preset.excluded])
 
   async function save() {
     try {
@@ -95,6 +98,7 @@ export function PresetCard({
           category: preset.category,
           optimization,
           models,
+          excluded,
           sticky,
         },
       })
@@ -201,7 +205,7 @@ export function PresetCard({
 
         {/* The models that are free or discounted and that xellter put in the
             pool by itself. They come and go on their own. */}
-        {preset.auto_models.length > 0 && (
+        {(preset.auto_models.length > 0 || preset.excluded_models?.length > 0) && (
           <div className="rounded-md border border-accent/25 bg-accent-soft/50 px-3 py-2.5">
             <div className="flex items-center gap-2">
               <Sparkles className="size-3.5 shrink-0 text-accent-text" />
@@ -217,6 +221,20 @@ export function PresetCard({
                 </span>
               ))}
             </div>
+            {preset.excluded_models?.length > 0 && (
+              <div className="mt-2 border-t border-accent/20 pt-2">
+                <div className="text-xs text-text-muted">
+                  {preset.excluded_models.length} removed on purpose, so they are not added again:
+                </div>
+                <div className="mt-1.5 flex flex-wrap gap-1">
+                  {preset.excluded_models.map((m) => (
+                    <span key={m} className="mono rounded-sm bg-surface px-1.5 py-0.5 text-[11px] text-text-muted line-through">
+                      {m}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -297,9 +315,11 @@ export function PresetCard({
           client={client}
           preset={preset}
           selected={models}
+          excluded={excluded}
           onClose={() => setPicking(false)}
-          onSave={(next) => {
+          onSave={(next, nextExcluded) => {
             setModels(next)
+            setExcluded(nextExcluded)
             setPicking(false)
           }}
         />
@@ -327,17 +347,33 @@ function ModelPicker({
   client,
   preset,
   selected,
+  excluded,
   onClose,
   onSave,
 }: {
   client: string
   preset: PresetView
   selected: string[]
+  excluded: string[]
   onClose: () => void
-  onSave: (models: string[]) => void
+  onSave: (models: string[], excluded: string[]) => void
 }) {
   const [rows, setRows] = React.useState<CatalogRow[] | null>(null)
   const [draft, setDraft] = React.useState<string[]>(selected)
+  const [out, setOut] = React.useState<string[]>(excluded)
+  // A model xellter adds on its own is ticked until the owner unticks it (ADR 0035).
+  const auto = React.useMemo(() => new Set([...preset.auto_models, ...excluded]), [preset.auto_models, excluded])
+  const isOn = (id: string) => draft.includes(id) || (auto.has(id) && !out.includes(id))
+  const setMany = (ids: string[], on: boolean) => {
+    setDraft((d) => {
+      const rest = d.filter((x) => !ids.includes(x))
+      return on ? [...rest, ...ids.filter((id) => !auto.has(id))] : rest
+    })
+    setOut((o) => {
+      const rest = o.filter((x) => !ids.includes(x))
+      return on ? rest : [...rest, ...ids.filter((id) => auto.has(id))]
+    })
+  }
   const [query, setQuery] = React.useState('')
   const [open, setOpen] = React.useState<Record<string, boolean>>({})
   const toast = useToast()
@@ -361,9 +397,7 @@ function ModelPicker({
     return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]))
   }, [rows, query])
 
-  const toggle = (id: string, on: boolean) => {
-    setDraft((d) => (on ? [...new Set([...d, id])] : d.filter((x) => x !== id)))
-  }
+  const toggle = (id: string, on: boolean) => setMany([id], on)
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
@@ -371,8 +405,8 @@ function ModelPicker({
         <DialogHeader>
           <DialogTitle>Choose the models of “{preset.name}”</DialogTitle>
           <DialogDescription>
-            Every free and discounted model of this category is in the pool whether you tick it or not. The free
-            and discounted models are marked below.
+            Free and discounted models of this category are ticked for you. Untick one you do not want and it stays
+            out, even after the catalog syncs.
           </DialogDescription>
         </DialogHeader>
         <DialogBody className="space-y-3">
@@ -394,7 +428,7 @@ function ModelPicker({
             <div className="space-y-2">
               {families.map(([owner, list]) => {
                 const ids = list.map((m) => m.id)
-                const picked = ids.filter((id) => draft.includes(id)).length
+                const picked = ids.filter(isOn).length
                 const all = picked === ids.length
                 return (
                   <div key={owner} className="rounded-md border border-border">
@@ -413,17 +447,13 @@ function ModelPicker({
                         tabIndex={0}
                         onClick={(e) => {
                           e.stopPropagation()
-                          setDraft((d) =>
-                            all ? d.filter((x) => !ids.includes(x)) : [...new Set([...d, ...ids])],
-                          )
+                          setMany(ids, !all)
                         }}
                         onKeyDown={(e) => {
                           if (e.key === 'Enter' || e.key === ' ') {
                             e.stopPropagation()
                             e.preventDefault()
-                            setDraft((d) =>
-                              all ? d.filter((x) => !ids.includes(x)) : [...new Set([...d, ...ids])],
-                            )
+                            setMany(ids, !all)
                           }
                         }}
                         className={cn(
@@ -439,7 +469,7 @@ function ModelPicker({
                     {open[owner] && (
                       <div className="border-t border-border">
                         {list.map((m) => {
-                          const on = draft.includes(m.id)
+                          const on = isOn(m.id)
                           return (
                             <label
                               key={m.id}
@@ -474,11 +504,11 @@ function ModelPicker({
           )}
         </DialogBody>
         <DialogFooter>
-          <span className="mr-auto text-xs text-text-muted">{draft.length} models ticked</span>
+          <span className="mr-auto text-xs text-text-muted">{draft.length + [...auto].filter((id) => !out.includes(id) && !draft.includes(id)).length} models ticked</span>
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" onClick={() => onSave(draft)}>
+          <Button variant="primary" onClick={() => onSave(draft, out)}>
             Use these models
           </Button>
         </DialogFooter>

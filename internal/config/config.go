@@ -131,6 +131,9 @@ type Preset struct {
 	Category     string   `yaml:"category" json:"category"`         // chat | images | videos | audio_speech | audio_transcription | music | systemone
 	Optimization string   `yaml:"optimization" json:"optimization"` // cheapest | balanced | best_quality
 	Models       []string `yaml:"models" json:"models"`             // the pool, chosen in the panel
+	// Excluded are free or discounted models the owner unticked: xellter does not add them to this preset
+	// on its own. The list is kept across catalog syncs, and across a promo that ends and comes back (ADR 0035).
+	Excluded []string `yaml:"excluded,omitempty" json:"excluded,omitempty"`
 	// Sticky says whether a session keeps one model for its whole life. A preset
 	// that never said anything sticks, as it always did (ADR 0025).
 	Sticky *bool `yaml:"sticky,omitempty" json:"sticky,omitempty"`
@@ -465,6 +468,11 @@ func (c *Config) Validate() error {
 					bad("%s: model %q listed twice", where, m)
 				}
 				seen[m] = true
+			}
+			for _, m := range p.Excluded {
+				if strings.TrimSpace(m) == "" {
+					bad("%s: empty excluded model id", where)
+				}
 			}
 		}
 	}

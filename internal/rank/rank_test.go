@@ -883,3 +883,26 @@ func TestNoSpeedDataKeepsTheNameOrder(t *testing.T) {
 		t.Fatalf("got %v", got)
 	}
 }
+
+// A free model the owner unticked stays out of the pool (ADR 0035), unless the
+// owner ticks it explicitly.
+func TestExcludedFreeModelIsNotAddedAutomatically(t *testing.T) {
+	f := fixture(chat("paid-a", 100, 300), freeChat("free-a:free"), freeChat("free-b:free"))
+	f.preset("paid-a")
+	sh := f.cl.Presets["text"]
+	sh.Excluded = []string{"free-a:free"}
+	pool := EffectivePool(f.cfg, f.snap, f.pool, f.cl, sh, now)
+	for _, id := range pool {
+		if id == "free-a:free" {
+			t.Fatalf("an excluded free model must not be added: %v", pool)
+		}
+	}
+	if len(pool) != 2 {
+		t.Fatalf("paid-a and free-b:free must remain: %v", pool)
+	}
+	sh.Models = append(sh.Models, "free-a:free")
+	pool = EffectivePool(f.cfg, f.snap, f.pool, f.cl, sh, now)
+	if len(pool) != 3 {
+		t.Fatalf("a model the owner ticked is in the pool whatever the exclusion says: %v", pool)
+	}
+}

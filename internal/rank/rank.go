@@ -172,12 +172,28 @@ func EffectivePool(cfg *config.Config, snap *catalog.Snapshot, pool *upstream.Po
 		seen[id] = true
 		out = append(out, id)
 	}
-	for _, id := range AutoPool(cfg, snap, pool, cl, sh.Category, now) {
+	for _, id := range AutoPoolFor(cfg, snap, pool, cl, sh, now) {
 		if seen[id] {
 			continue
 		}
 		seen[id] = true
 		out = append(out, id)
+	}
+	return out
+}
+
+// AutoPoolFor is AutoPool without the models the owner unticked in this preset
+// (Preset.Excluded, ADR 0035).
+func AutoPoolFor(cfg *config.Config, snap *catalog.Snapshot, pool *upstream.Pool, cl *config.Client, sh config.Preset, now time.Time) []string {
+	skip := map[string]bool{}
+	for _, id := range sh.Excluded {
+		skip[strings.TrimSpace(id)] = true
+	}
+	out := []string{}
+	for _, id := range AutoPool(cfg, snap, pool, cl, sh.Category, now) {
+		if !skip[id] {
+			out = append(out, id)
+		}
 	}
 	return out
 }

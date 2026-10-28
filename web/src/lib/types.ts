@@ -67,6 +67,10 @@ export type PresetView = {
   optimization_label: string
   models: string[]
   auto_models: string[]
+  /** Free or discounted models xellter would add, that the owner unticked. */
+  excluded_models: string[]
+  /** Everything the owner unticked, including models that are not free right now. */
+  excluded: string[]
   /** A session keeps one model for its whole life. */
   sticky: boolean
   ranking: Ranking | null
