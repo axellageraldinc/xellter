@@ -249,7 +249,7 @@ func (r *Router) PlanEffort(cl *config.Client, requested, session, path string, 
 	}
 	p := &Plan{Preset: requested, Requested: requested, Modality: sh.Category, Session: session}
 	order := r.order(cl, rk, session, now)
-	order = r.serveEffort(order, asked, hasEffort)
+	order = r.serveEffort(order, asked, hasEffort, now)
 	order = r.serveContext(order, snap, bodyTokens)
 	if len(order) == 0 {
 		return nil, &Error{503, "all_evicted", fmt.Sprintf("every model of preset %q is cooling down after errors", requested), 60 * time.Second}
@@ -282,13 +282,19 @@ func (r *Router) PlanEffort(cl *config.Client, requested, session, path string, 
 // Only the "none" effort is a routing constraint. A graded effort ("low", "high") asks
 // for more or less thinking, and a model that ignores the grade still answers; failing
 // the call over it would be worse than the inaccuracy (ADR 0026).
-func (r *Router) serveEffort(order []string, asked effort.Level, hasEffort bool) []string {
+//
+// A fact older than the trust window is not used: the model is measured again the next
+// time it is served, because a provider can change a model's behaviour and a gateway
+// that believed yesterday's answer forever would keep preferring a model that no longer
+// behaves that way. A refusal is exempt: it is a property of the API's parameter
+// validation, and sending the field again would fail the call.
+func (r *Router) serveEffort(order []string, asked effort.Level, hasEffort bool, now time.Time) []string {
 	if !hasEffort || asked != effort.None || len(order) < 2 {
 		return order
 	}
 	can, cannot := make([]string, 0, len(order)), make([]string, 0, len(order))
 	for _, id := range order {
-		switch r.efforts.Verdict(id, asked) {
+		switch r.efforts.VerdictAt(id, asked, now, effort.DefaultTTL) {
 		case effort.Honours:
 			can = append(can, id)
 		case effort.Ignores, effort.Rejects:

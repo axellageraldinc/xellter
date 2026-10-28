@@ -176,6 +176,7 @@ type env struct {
 	f     *fake
 	px    *httptest.Server
 	keyCl string // client key with all presets
+	path  string // the config file, so a test can build a second app over the same data
 }
 
 func setup(t testing.TB, mutate func(*config.Config)) *env {
@@ -247,7 +248,7 @@ func setup(t testing.TB, mutate func(*config.Config)) *env {
 	a.Rt.Recompute(time.Now())
 	px := httptest.NewServer(a.Px)
 	t.Cleanup(func() { px.Close(); a.Close() })
-	return &env{a: a, f: f, px: px, keyCl: key}
+	return &env{a: a, f: f, px: px, keyCl: key, path: path}
 }
 
 func (e *env) post(t *testing.T, key, path, body string, hdr ...string) (*http.Response, string) {

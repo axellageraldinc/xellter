@@ -26,10 +26,11 @@ ADR [0017](adr/0017-three-optimizations.md), [0018](adr/0018-client-purpose-chan
 |---|---|
 | `internal/config` | YAML schema, defaults, validation, retired-key refusal, history, secrets file, migration |
 | `internal/catalog` | kenari catalog + prices + promos + plans -> immutable `Snapshot`; System One on its own endpoint |
-| `internal/store` | SQLite (modernc, no CGO): request log, usage aggregates, leaderboard rows, admin sessions, video job -> key |
+| `internal/store` | SQLite (modernc, no CGO): request log, usage aggregates, leaderboard rows, admin sessions, video job -> key, learned effort facts |
 | `internal/upstream` | per-key and per-account limits: rpm, free quota, plan ledger, cooldown, breaker, learned allow list |
 | `internal/rank` | pure ranking of one preset: pool -> rejections -> cost/quality -> top list, with reasons |
 | `internal/route` | rankings cache, effective pools, round-robin ring, session pin, per-preset eviction, key ordering |
+| `internal/effort` | what each model is known to do with a reasoning effort, measured from traffic and saved across restarts (ADR 0026, 0027) |
 | `internal/proxy` | data plane: auth, body rewrite, streaming relay, usage accounting, read-only endpoints |
 | `internal/rtk` | tool-output compression, always on |
 | `internal/bench` | public leaderboards -> one 0..1 value per model and arena |

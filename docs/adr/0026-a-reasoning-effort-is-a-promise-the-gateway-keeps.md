@@ -138,8 +138,9 @@ compress early, every time, for no reason.
   body passed through.
 - A model that ignores `none` is still served, but later in the order, so a
   preset with only such models still answers.
-- The registry is in memory. It starts empty on a restart and refills from
+- The registry was in memory. It started empty on a restart and refilled from
   traffic. A model nobody has called is unknown, and is served as asked.
+  (Superseded: the facts are now saved and restored — ADR 0027.)
 - The panel can show what each model is known to do with an effort. That
   information is measured, so it is as fresh as the last request.
 - A preset now advertises the pool's largest context window. A client that

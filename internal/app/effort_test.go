@@ -1,11 +1,16 @@
 package app_test
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/axellageraldinc/xellter/internal/app"
+	"github.com/axellageraldinc/xellter/internal/catalog"
 	"github.com/axellageraldinc/xellter/internal/effort"
 )
 
@@ -294,4 +299,170 @@ func TestTheModelListCarriesTheSupportedEfforts(t *testing.T) {
 		return
 	}
 	t.Fatal("pro-c was not in the model list")
+}
+
+// ---- persistence across a restart ----
+
+// A restart must not cost the client the knowledge the gateway had already paid for.
+//
+// The registry is built from traffic, so without saving it every restart starts blind:
+// the first request is served by a model that ignores the effort, and the client waits
+// for a long answer it did not ask for. The gateway writes what it learned to the
+// database and reads it back on the next start.
+func TestWhatTheGatewayLearnedSurvivesARestart(t *testing.T) {
+	e := setup(t, nil)
+	// The gateway learns that two models ignore "none" and two honour it.
+	e.a.Rt.Efforts().Record("cheap-b", "none", effortIgnores, time.Now())
+	e.a.Rt.Efforts().Record("pro-c", "none", effortIgnores, time.Now())
+	e.a.Rt.Efforts().Record("free-a:free", "none", effortHonours, time.Now())
+	e.a.Rt.Efforts().Record("promo-d", "none", effortHonours, time.Now())
+	// The facts are written when the service stops.
+	e.a.Close()
+
+	// A new process over the same data directory: the same as a restart.
+	src := &catalog.Kenari{BaseURL: e.f.srv.URL, UA: "test", HTTP: e.f.srv.Client()}
+	a2, err := app.New(e.path, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a2.Close()
+	if err := a2.Cat.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	a2.Rt.Recompute(time.Now())
+
+	// The knowledge came back.
+	if v := a2.Rt.Efforts().Verdict("cheap-b", "none"); v != effortIgnores {
+		t.Fatalf("the verdict for cheap-b came back as %v, wanted ignores", v)
+	}
+	if v := a2.Rt.Efforts().Verdict("free-a:free", "none"); v != effortHonours {
+		t.Fatalf("the verdict for free-a:free came back as %v, wanted honours", v)
+	}
+
+	// And the routing uses it: the request is served by a model that honours the effort.
+	px := httptest.NewServer(a2.Px)
+	defer px.Close()
+	req, _ := http.NewRequest("POST", px.URL+"/v1/chat/completions", strings.NewReader(`{"model":"text","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+e.keyCl)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	served := resp.Header.Get("X-Xellter-Model")
+	if served != "free-a:free" && served != "promo-d" {
+		t.Fatalf("after the restart a model that ignores the effort served the request: %s", served)
+	}
+}
+
+// A fact is a measurement, and a provider can change a model's behaviour. A fact older
+// than the trust window is not used, so the model is measured again.
+func TestAnOldFactIsNotUsedAfterARestart(t *testing.T) {
+	e := setup(t, nil)
+	// A fact from long ago: the model honoured "none" back then.
+	old := time.Now().Add(-2 * effort.DefaultTTL)
+	e.a.Rt.Efforts().Record("cheap-b", "none", effortIgnores, old)
+	e.a.Rt.Efforts().Record("pro-c", "none", effortIgnores, old)
+	e.a.Rt.Efforts().Record("free-a:free", "none", effortHonours, old)
+	e.a.Rt.Efforts().Record("promo-d", "none", effortHonours, old)
+	e.a.Close()
+
+	src := &catalog.Kenari{BaseURL: e.f.srv.URL, UA: "test", HTTP: e.f.srv.Client()}
+	a2, err := app.New(e.path, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a2.Close()
+	if err := a2.Cat.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	a2.Rt.Recompute(time.Now())
+
+	// The old facts were dropped, so the models are unknown again and the routing does
+	// not prefer the one that honoured the effort back then.
+	if v := a2.Rt.Efforts().Verdict("free-a:free", "none"); v != effortUnknown {
+		t.Fatalf("an expired fact was kept: %v", v)
+	}
+}
+
+// A refusal is a property of the API's parameter validation, not a passing mood. It
+// holds however old it is, and after a restart the model is still not asked with the
+// field.
+func TestARefusalSurvivesARestart(t *testing.T) {
+	e := setup(t, nil)
+	old := time.Now().Add(-100 * effort.DefaultTTL)
+	e.a.Rt.Efforts().Record("cheap-b", "none", effortRejects, old)
+	e.a.Close()
+
+	src := &catalog.Kenari{BaseURL: e.f.srv.URL, UA: "test", HTTP: e.f.srv.Client()}
+	a2, err := app.New(e.path, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a2.Close()
+	if err := a2.Cat.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	a2.Rt.Recompute(time.Now())
+
+	if v := a2.Rt.Efforts().Verdict("cheap-b", "none"); v != effortRejects {
+		t.Fatalf("the refusal did not survive the restart: %v", v)
+	}
+}
+
+// A read-only command such as `xellter explain` builds an app over the same data
+// directory, loads the facts and closes again without serving anything. It must not
+// write that older copy back over what the running gateway has learned since.
+func TestAReadOnlyCommandDoesNotOverwriteWhatWasLearned(t *testing.T) {
+	e := setup(t, nil)
+	e.a.Rt.Efforts().Record("cheap-b", "none", effortIgnores, time.Now())
+	e.a.Close() // a planned stop writes what was learned
+
+	src := &catalog.Kenari{BaseURL: e.f.srv.URL, UA: "test", HTTP: e.f.srv.Client()}
+
+	// A read-only command starts: it loads the facts and holds them.
+	reader, err := app.New(e.path, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.Cat.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Meanwhile the running gateway learns something new and writes it.
+	running, err := app.New(e.path, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := running.Cat.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	running.Rt.Efforts().Record("pro-c", "none", effortHonours, time.Now())
+	running.Close()
+
+	// The read-only command now finishes and closes. It learned nothing, so it must
+	// not write its older copy back over what the running gateway just wrote.
+	reader.Close()
+
+	// The facts are still the ones the running gateway wrote.
+	verify, err := app.New(e.path, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verify.Close()
+	facts, _ := verify.St.EffortFacts()
+	if len(facts) != 2 {
+		t.Fatalf("the read-only command overwrote the facts: %v", facts)
+	}
+	byModel := map[string]string{}
+	for _, f := range facts {
+		byModel[f.Model] = f.Verdict
+	}
+	if byModel["pro-c"] != "honours" || byModel["cheap-b"] != "ignores" {
+		t.Fatalf("the facts came back as %v", byModel)
+	}
 }

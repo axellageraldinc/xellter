@@ -494,8 +494,11 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 		// A model that has been measured to reject the effort does not get it again
 		// (ADR 0026). The request is served without the field, which is better than
 		// failing the call over a parameter the client cannot drop.
+		//
+		// A refusal is exempt from the trust window: it is a property of the API's
+		// parameter validation rather than a passing mood, so it holds however old it is.
 		drop := map[string]bool(nil)
-		if hasEffort && s.efforts.Verdict(at.Model.ID, asked) == effort.Rejects {
+		if hasEffort && s.efforts.VerdictAt(at.Model.ID, asked, s.Now(), effort.DefaultTTL) == effort.Rejects {
 			drop = effortFields()
 		}
 		for try := 1; try <= 2; try++ {

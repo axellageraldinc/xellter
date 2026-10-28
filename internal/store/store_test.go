@@ -370,3 +370,66 @@ func TestALostDatabaseIsDetected(t *testing.T) {
 		t.Fatalf("the lost history was not reported: %q", buf.String())
 	}
 }
+
+// What the gateway learned about models is written to the database, so a restart does
+// not have to learn it again.
+func TestEffortFactsSurviveAReopen(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts := []EffortFact{
+		{Model: "honest", Level: "none", Verdict: "honours", At: 1000},
+		{Model: "stubborn", Level: "none", Verdict: "rejects", At: 1000},
+	}
+	thinkers := []EffortThinker{{Model: "honest"}}
+	if err := st.SaveEffortFacts(facts, thinkers); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	// A new process, the same directory.
+	st2, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st2.Close()
+	gotFacts, gotThinkers := st2.EffortFacts()
+	if len(gotFacts) != 2 {
+		t.Fatalf("read back %d facts, wanted 2", len(gotFacts))
+	}
+	if len(gotThinkers) != 1 || gotThinkers[0].Model != "honest" {
+		t.Fatalf("read back the thinkers as %v", gotThinkers)
+	}
+	byModel := map[string]EffortFact{}
+	for _, f := range gotFacts {
+		byModel[f.Model] = f
+	}
+	if byModel["honest"].Verdict != "honours" || byModel["stubborn"].Verdict != "rejects" {
+		t.Fatalf("the facts came back as %v", byModel)
+	}
+	if byModel["honest"].At != 1000 {
+		t.Fatalf("the measurement time was lost: %v", byModel["honest"])
+	}
+}
+
+// Saving replaces what was there: the gateway's knowledge is the current state, not a
+// log of everything it ever saw.
+func TestSavingEffortFactsReplacesTheOldOnes(t *testing.T) {
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.SaveEffortFacts([]EffortFact{{Model: "old", Level: "none", Verdict: "honours", At: 1}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveEffortFacts([]EffortFact{{Model: "new", Level: "none", Verdict: "honours", At: 2}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	facts, _ := st.EffortFacts()
+	if len(facts) != 1 || facts[0].Model != "new" {
+		t.Fatalf("the old facts were kept: %v", facts)
+	}
+}

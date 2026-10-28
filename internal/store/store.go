@@ -57,6 +57,9 @@ type Store struct {
 	logC chan Request
 	wg   sync.WaitGroup
 	stop chan struct{}
+	// closeOnce makes Close safe to call twice: the shutdown path and a test's cleanup
+	// can both reach it, and closing a closed channel is a panic.
+	closeOnce sync.Once
 }
 
 const schema = `
@@ -71,6 +74,8 @@ CREATE INDEX IF NOT EXISTS req_client_ts ON requests(client, ts);
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, exp INTEGER NOT NULL, ip TEXT, ua TEXT, created INTEGER);
 CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, upstream TEXT NOT NULL, ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS effort_facts(model TEXT, level TEXT, verdict TEXT, at INTEGER NOT NULL, PRIMARY KEY(model,level));
+CREATE TABLE IF NOT EXISTS effort_thinkers(model TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS bench(model TEXT NOT NULL, arena TEXT NOT NULL, value REAL, rating REAL, lo REAL, hi REAL, matched TEXT, date TEXT, votes REAL, PRIMARY KEY(model, arena));
 `
 
@@ -154,9 +159,14 @@ func Open(dir string) (*Store, error) {
 }
 
 // Close flushes the log queue and closes the database.
+//
+// It is safe to call more than once: the shutdown path and a test's cleanup can both
+// reach it, and closing a closed channel is a panic that takes the process down.
 func (s *Store) Close() error {
-	close(s.stop)
-	s.wg.Wait()
+	s.closeOnce.Do(func() {
+		close(s.stop)
+		s.wg.Wait()
+	})
 	return s.db.Close()
 }
 
@@ -523,6 +533,106 @@ func (s *Store) KVGet(k string) string {
 // KVSet writes a value.
 func (s *Store) KVSet(k, v string) {
 	_, _ = s.db.Exec(`INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v`, k, v)
+}
+
+// ---- effort facts (what each model is known to do with a reasoning effort) ----
+
+// EffortFact is one measured fact: what one model does with one reasoning effort.
+//
+// The table exists so the gateway does not have to learn the same thing again after
+// every restart. A fact is a measurement, so it carries the time it was made: a fact
+// older than the trust window is dropped and the model is measured again, because a
+// provider can change a model's behaviour. A refusal is kept regardless of age — it is
+// a property of the API's parameter validation, not a passing mood.
+type EffortFact struct {
+	Model   string `json:"model"`
+	Level   string `json:"level"`
+	Verdict string `json:"verdict"` // honours | ignores | rejects
+	At      int64  `json:"at"`      // unix seconds of the measurement
+}
+
+// EffortThinker records that a model was seen producing reasoning at all.
+//
+// It travels with the facts because "honours" means the model was seen thinking once
+// and then stopped: without this, a restored "honours" would not survive the next
+// quiet answer.
+type EffortThinker struct {
+	Model string `json:"model"`
+}
+
+// SaveEffortFacts replaces the stored facts and thinkers with what the caller measured.
+//
+// One transaction, so a crash cannot leave half the knowledge behind: a gateway that
+// came back with half its facts would serve some models as if it had never met them.
+func (s *Store) SaveEffortFacts(facts []EffortFact, thinkers []EffortThinker) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM effort_facts`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM effort_thinkers`); err != nil {
+		return err
+	}
+	insFact, err := tx.Prepare(`INSERT INTO effort_facts(model,level,verdict,at) VALUES(?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	for _, f := range facts {
+		if _, err := insFact.Exec(f.Model, f.Level, f.Verdict, f.At); err != nil {
+			insFact.Close()
+			return err
+		}
+	}
+	insFact.Close()
+	insThinker, err := tx.Prepare(`INSERT OR IGNORE INTO effort_thinkers(model) VALUES(?)`)
+	if err != nil {
+		return err
+	}
+	for _, t := range thinkers {
+		if _, err := insThinker.Exec(t.Model); err != nil {
+			insThinker.Close()
+			return err
+		}
+	}
+	insThinker.Close()
+	return tx.Commit()
+}
+
+// EffortFacts returns every stored fact and every model known to think.
+func (s *Store) EffortFacts() ([]EffortFact, []EffortThinker) {
+	rows, err := s.db.Query(`SELECT model,level,verdict,at FROM effort_facts`)
+	if err != nil {
+		return nil, nil
+	}
+	defer rows.Close()
+	var facts []EffortFact
+	for rows.Next() {
+		var f EffortFact
+		if err := rows.Scan(&f.Model, &f.Level, &f.Verdict, &f.At); err != nil {
+			return facts, nil
+		}
+		facts = append(facts, f)
+	}
+	if err := rows.Err(); err != nil {
+		return facts, nil
+	}
+	trows, err := s.db.Query(`SELECT model FROM effort_thinkers`)
+	if err != nil {
+		return facts, nil
+	}
+	defer trows.Close()
+	var thinkers []EffortThinker
+	for trows.Next() {
+		var t EffortThinker
+		if err := trows.Scan(&t.Model); err != nil {
+			return facts, thinkers
+		}
+		thinkers = append(thinkers, t)
+	}
+	return facts, thinkers
 }
 
 // ---- benchmark scores (mapped from public leaderboards, see package bench) ----

@@ -21,6 +21,7 @@ internal/store     SQLite (modernc, no CGO): request log, usage aggregates, lead
 internal/upstream  per-key and per-account limits: rpm, free quota, plan ledger, cooldown, breaker, allow list
 internal/rank      PURE ranking of one preset: pool -> rejections -> cost/quality -> top list + reasons
 internal/route     rankings cache, round-robin ring, session pin, per-preset eviction
+internal/effort    what each model is known to do with a reasoning effort, measured from traffic (ADR 0026) and saved across restarts (ADR 0027)
 internal/proxy     data plane: auth, body rewrite, streaming relay, usage accounting, read-only endpoints
 internal/rtk       tool-output compression, always on, no configuration
 internal/bench     public leaderboards -> 0..1 per model and arena

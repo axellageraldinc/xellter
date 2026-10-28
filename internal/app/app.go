@@ -18,6 +18,7 @@ import (
 	"github.com/axellageraldinc/xellter/internal/bench"
 	"github.com/axellageraldinc/xellter/internal/catalog"
 	"github.com/axellageraldinc/xellter/internal/config"
+	"github.com/axellageraldinc/xellter/internal/effort"
 	"github.com/axellageraldinc/xellter/internal/proxy"
 	"github.com/axellageraldinc/xellter/internal/route"
 	"github.com/axellageraldinc/xellter/internal/store"
@@ -26,6 +27,14 @@ import (
 
 // Version is set at build time.
 var Version = "dev"
+
+// effortSaveInterval is how often the learned effort facts are written to the database.
+//
+// A restart that loses the facts costs the client a few slow answers, because the
+// gateway serves an unknown model as asked until it has measured it again. A minute is
+// short enough that a crash loses almost nothing and long enough that the database is
+// not written to on every request.
+const effortSaveInterval = time.Minute
 
 // App is the running system.
 type App struct {
@@ -45,6 +54,12 @@ type App struct {
 
 	cfg atomic.Pointer[config.Config]
 	mu  sync.Mutex // serialises Apply
+	// effortVersion is the registry version this process last loaded or wrote. The
+	// facts are written only when the version moved, so a read-only command such as
+	// `xellter explain` — which builds an app over the same data directory, loads the
+	// facts and learns nothing — cannot write that older copy back over what the
+	// running gateway has learned since.
+	effortVersion atomic.Uint64
 }
 
 type dynSource struct{ a *App }
@@ -79,6 +94,7 @@ func New(path string, src catalog.Source) (*App, error) {
 	a.BenchBase = bench.DefaultBase
 	a.SWEPage = bench.DefaultSWEURL
 	a.AiderYAML = bench.DefaultAiderURL
+	a.loadEffortFacts()
 	a.Cat.OnUpdate(func(s *catalog.Snapshot) {
 		for _, ac := range a.Pool.Accounts() {
 			ac.SetTopupThreshold(s.Tier.Thresh)
@@ -117,6 +133,78 @@ func (a *App) activate(c *config.Config) {
 	a.Px.SetConfig(c)
 	a.Rt.SetConfig(c)
 	go a.ProbeKeys(context.Background())
+}
+
+// loadEffortFacts restores what the gateway learned about models from a previous run.
+//
+// The facts are measurements, so the gateway keeps them so a restart does not have to
+// learn the same thing again: a model that ignores "none" is demoted again at once,
+// instead of the first request after a restart being served by a model that thinks.
+//
+// A fact older than the trust window is dropped, and the model is measured again the
+// next time it is served. A refusal is kept whatever its age, because it is a property
+// of the API's parameter validation rather than a passing mood.
+func (a *App) loadEffortFacts() {
+	if a.St == nil || a.Rt == nil {
+		return
+	}
+	facts, thinkers := a.St.EffortFacts()
+	if len(facts) == 0 {
+		return
+	}
+	st := effort.State{}
+	for _, f := range facts {
+		st.Facts = append(st.Facts, effort.Snapshot{Model: f.Model, Level: f.Level, Known: f.Verdict, At: f.At})
+	}
+	for _, t := range thinkers {
+		st.Thinkers = append(st.Thinkers, t.Model)
+	}
+	kept, dropped := a.Rt.Efforts().Restore(st, time.Now(), effort.DefaultTTL)
+	// The version now matches what was loaded, so a process that learns nothing does
+	// not write the file back.
+	a.effortVersion.Store(a.Rt.Efforts().Version())
+	if kept > 0 {
+		a.Logf("effort: restored %d learned facts from %d models", kept, len(thinkers))
+	}
+	if dropped > 0 {
+		a.Logf("effort: dropped %d facts older than %s (the models are measured again)", dropped, effort.DefaultTTL)
+	}
+}
+
+// saveEffortFacts writes what the gateway learned, so the next start does not have to
+// learn it again.
+//
+// It is called from a timer, never from the request path: the request path must not
+// write to the database synchronously.
+//
+// It writes only when the registry has changed since the last write. A process that
+// learned nothing — a read-only command such as `xellter explain`, which loads the
+// facts and closes again — has the same version as the file it read, so it leaves the
+// file alone instead of writing back an older copy of what the running gateway has
+// learned since.
+func (a *App) saveEffortFacts() {
+	if a.St == nil || a.Rt == nil {
+		return
+	}
+	reg := a.Rt.Efforts()
+	version := reg.Version()
+	if version == a.effortVersion.Load() {
+		return
+	}
+	state := reg.State()
+	facts := make([]store.EffortFact, 0, len(state.Facts))
+	for _, f := range state.Facts {
+		facts = append(facts, store.EffortFact{Model: f.Model, Level: f.Level, Verdict: f.Known, At: f.At})
+	}
+	thinkers := make([]store.EffortThinker, 0, len(state.Thinkers))
+	for _, m := range state.Thinkers {
+		thinkers = append(thinkers, store.EffortThinker{Model: m})
+	}
+	if err := a.St.SaveEffortFacts(facts, thinkers); err != nil {
+		a.Logf("effort: could not save the learned facts: %v", err)
+		return
+	}
+	a.effortVersion.Store(version)
 }
 
 // SetSecret stores an upstream key value and reloads the pool.
@@ -409,10 +497,34 @@ func (a *App) Start(ctx context.Context) {
 			}
 		}
 	}()
+	go func() {
+		// What the gateway learned about models is saved on a timer, so a restart does
+		// not have to learn it again. The timer is short enough that a crash loses
+		// little, and long enough that the database is not written to constantly.
+		//
+		// The facts are also written when the service stops, so a planned restart does
+		// not lose the last few minutes of learning.
+		t := time.NewTicker(effortSaveInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				a.saveEffortFacts()
+				return
+			case <-t.C:
+				a.saveEffortFacts()
+			}
+		}
+	}()
 }
 
 // Close flushes state.
-func (a *App) Close() error { return a.St.Close() }
+func (a *App) Close() error {
+	// The learned facts are written here as well as on the timer, so a planned
+	// restart does not lose what the gateway learned since the last tick.
+	a.saveEffortFacts()
+	return a.St.Close()
+}
 
 // Describe is a one-line startup summary.
 func (a *App) Describe() string {
