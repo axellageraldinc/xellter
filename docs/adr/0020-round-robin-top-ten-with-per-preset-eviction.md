@@ -45,6 +45,13 @@ Rankings are rebuilt every `rank_refresh_minutes` (5), after every catalog sync,
 panel's Recalculate button, which recomputes every preset of one client. Nothing on the request path
 recomputes them.
 
+## Addendum (2026-10-28)
+
+The reserve was added to the ring as a whole, so every pool model took fresh sessions in turn and "routes against
+10" was not true: a preset with a pool of 23 spread traffic over 23 models, including slow free ones outside the
+list. The ring is now the top list only; the reserve replaces a top model that is out, one for one, and otherwise
+follows the ring as a fallback.
+
 ## Alternatives considered
 - **Keep the round-robin band.** It is a second way to express "these are equally good", and the score
   already says that.

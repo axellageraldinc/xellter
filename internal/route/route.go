@@ -372,14 +372,27 @@ func (r *Router) order(cl *config.Client, rk *rank.Ranking, session string, now 
 		}
 		out = append(out, id)
 	}
-	ids := make([]string, len(rk.Candidates))
-	for i, c := range rk.Candidates {
-		ids[i] = c.Model
-	}
-	// A model outside the list is a reserve: it only serves when one above it is evicted, so it joins the end of
-	// the ring instead of being dropped (ADR 0020).
-	for _, c := range rk.Reserve {
+	// The ring is the top list, and only the top list. A model outside it is a reserve (ADR 0020): it takes the
+	// place of a top model that is out, one reserve for each, so the preset keeps routing against the same
+	// number of models. The rest of the reserve comes after the ring, as a fallback for a request whose
+	// models all failed; it never takes fresh sessions while the top list is healthy.
+	ids := make([]string, 0, len(rk.Candidates))
+	missing := 0
+	for _, c := range rk.Candidates {
+		if r.evicted(cl.Name, rk.Preset, c.Model, now) {
+			missing++
+			continue
+		}
 		ids = append(ids, c.Model)
+	}
+	var fallback []string
+	for _, c := range rk.Reserve {
+		if missing > 0 && !r.evicted(cl.Name, rk.Preset, c.Model, now) {
+			ids = append(ids, c.Model)
+			missing--
+			continue
+		}
+		fallback = append(fallback, c.Model)
 	}
 	// The pinned model goes first, so a sticky session stays on the model it
 	// started with.
@@ -393,6 +406,9 @@ func (r *Router) order(cl *config.Client, rk *rank.Ranking, session string, now 
 		for i := range len(ids) {
 			add(ids[(i+off)%len(ids)])
 		}
+	}
+	for _, id := range fallback {
+		add(id)
 	}
 	return append(out, late...)
 }

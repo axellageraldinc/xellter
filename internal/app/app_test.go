@@ -472,8 +472,9 @@ func TestThreeErrorsEvictTheModelFromThePreset(t *testing.T) {
 	// the next request goes straight to the replacement
 	before := e.f.count("free-a:free")
 	resp, _ = e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "text"), "X-Xellter-Session", "s2")
-	if resp.Header.Get("X-Xellter-Model") != "cheap-b" {
-		t.Fatalf("an evicted model must be skipped: %s", resp.Header.Get("X-Xellter-Model"))
+	// any model that is still in service may take it (the pool also holds the promo model xellter added on its own)
+	if got := resp.Header.Get("X-Xellter-Model"); got == "free-a:free" || got == "" {
+		t.Fatalf("an evicted model must be skipped: %q", got)
 	}
 	if n := e.f.count("free-a:free"); n != before {
 		t.Fatalf("an evicted model must not be tried again: %d -> %d", before, n)

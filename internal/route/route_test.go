@@ -527,3 +527,54 @@ func TestThePresetIsNeverEmptied(t *testing.T) {
 		t.Fatalf("the last models of a preset must stay in service: %s", why)
 	}
 }
+
+// The ring is the top list. A reserve model must not take fresh sessions while the top models are healthy: the
+// preset says it routes against N models, and a slow free model sitting just outside the list was serving a share
+// of the traffic anyway.
+func TestReserveModelsDoNotServeWhileTheTopListIsHealthy(t *testing.T) {
+	r, _ := setup("a", "b", "c", "d")
+	cfg := *r.cfg.Load()
+	cfg.Routing.TopModels = 2
+	r.SetConfig(&cfg)
+	cl := &cfg.Clients[0]
+	rk := r.Rankings()["c/text"]
+	top := map[string]bool{rk.Candidates[0].Model: true, rk.Candidates[1].Model: true}
+	for i := 0; i < 40; i++ {
+		p, err := r.Plan(cl, "text", "", "/v1/chat/completions", t0.Add(time.Duration(i)*time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first := planModels(p)[0]; !top[first] {
+			t.Fatalf("request %d went first to the reserve model %s", i, first)
+		}
+	}
+}
+
+func TestOneReserveReplacesEachTopModelThatIsOut(t *testing.T) {
+	r, _ := setup("a", "b", "c", "d")
+	cfg := *r.cfg.Load()
+	cfg.Routing.TopModels = 2
+	r.SetConfig(&cfg)
+	cl := &cfg.Clients[0]
+	rk := r.Rankings()["c/text"]
+	out := rk.Candidates[0].Model
+	for range 3 {
+		r.Failed(cl.Name, "text", out, t0)
+	}
+	want := map[string]bool{rk.Candidates[1].Model: true, rk.Reserve[0].Model: true}
+	seen := map[string]bool{}
+	for i := 0; i < 40; i++ {
+		p, err := r.Plan(cl, "text", "", "/v1/chat/completions", t0.Add(time.Minute+time.Duration(i)*time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
+		first := planModels(p)[0]
+		if !want[first] {
+			t.Fatalf("request %d went first to %s; the ring is %v", i, first, want)
+		}
+		seen[first] = true
+	}
+	if len(seen) != 2 {
+		t.Fatalf("the replacement never served: %v", seen)
+	}
+}

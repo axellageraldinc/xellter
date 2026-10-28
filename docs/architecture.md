@@ -256,16 +256,18 @@ Five rules, in this order.
    out of the preset, or is slow for the session (rule 5). A preset with `sticky: false` keeps no pin, and
    every turn is routed again. Pins are saved in the database (`kv`, `session_pins`) every minute and when
    the service stops, and loaded at start-up; a pin unused for seven days is dropped.
-2. **Round-robin ring.** A fresh session takes the next model in the preset's ring, which runs over
-   the whole top list followed by the reserve. The counter is per client and preset, so two presets never
-   share one. Every model in the list is used in turn.
+2. **Round-robin ring.** A fresh session takes the next model in the preset's ring, which runs over the
+   top list (`routing.top_models`) and nothing else. The counter is per client and preset, so two presets
+   never share one. Every model in the list is used in turn. The pool models outside the list (the
+   **reserve**) serve nothing while the list is healthy: they enter the ring one for one when a top model is
+   out, and otherwise only come after the ring as a fallback for a request whose models all failed.
 3. **Keys.** Free or plan-covered keys first, then pay-as-you-go; equal keys rotate. A client never
    uses another client's keys.
 4. **Eviction and health.** A model is taken out of **that preset only** when it fails `evict_errors`
    times in a row (out for `evict_cooldown_minutes`), or when its last hour shows it is unreliable or slow
    (out for `quarantine_minutes`, doubling; ADR 0029). The ring skips it while it is out and the reserve
-   (the pool members the top list left out, in the optimization's order) takes its place, so the preset
-   keeps routing against the same number of models. A session pinned to it moves on its next request. The
+   (the pool members the top list left out, in the optimization's order) takes its place, one for each
+   model that is out, so the preset keeps routing against the same number of models. A session pinned to it moves on its next request. The
    rankings are not recomputed: scores do not depend on who is out. A preset is never emptied (the last
    two models stay in). Eviction state is per client and preset and survives a rank rebuild and a restart
    (the models that are out and their strikes are saved with the health records). Direct model pins (a caller naming a real model) are not evicted.
