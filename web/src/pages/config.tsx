@@ -44,7 +44,7 @@ export function ConfigPage() {
   return (
     <Page
       title="Config file"
-      subtitle="The same settings as plain text. Saving checks everything first; the previous version is kept."
+      subtitle="The same settings as plain text, with a comment above every setting saying what it does. Saving checks everything first; the previous version is kept."
       actions={
         <>
           <Button variant="ghost" size="sm" onClick={load}>

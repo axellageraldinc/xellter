@@ -247,7 +247,10 @@ func (h *Handler) config(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		c := h.a.Cfg()
-		y, _ := yaml.Marshal(c)
+		y, err := annotatedYAML(c)
+		if err != nil {
+			y, _ = yaml.Marshal(c)
+		}
 		jok(w, map[string]any{"config": c, "yaml": string(y), "history": h.a.St.ListHistory()})
 	case http.MethodPut:
 		var in struct {
