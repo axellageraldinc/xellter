@@ -14,6 +14,7 @@ import (
 	"github.com/axellageraldinc/xellter/internal/config"
 	"github.com/axellageraldinc/xellter/internal/proxy"
 	"github.com/axellageraldinc/xellter/internal/rank"
+	"github.com/axellageraldinc/xellter/internal/route"
 	"github.com/axellageraldinc/xellter/internal/upstream"
 )
 
@@ -697,6 +698,7 @@ type presetView struct {
 	Sticky            bool                 `json:"sticky"`      // a session keeps one model for its whole life
 	Ranking           *rank.Ranking        `json:"ranking"`
 	Evictions         map[string]time.Time `json:"evictions"`
+	OutOfService      []route.Out          `json:"out_of_service"` // the same models, with the reason each is out
 }
 
 func (h *Handler) clientDetail(w http.ResponseWriter, r *http.Request) {
@@ -740,8 +742,9 @@ func (h *Handler) clientDetail(w http.ResponseWriter, r *http.Request) {
 			Name: n, Category: p.Category, Label: categoryLabel[p.Category],
 			Optimization: p.Optimization, OptimizationLabel: optimizationLabel[p.Optimization],
 			Models: append([]string{}, p.Models...), AutoModels: auto, Sticky: p.IsSticky(),
-			Ranking:   rk[rank.Key(cl.Name, n)],
-			Evictions: h.a.Rt.Evictions(cl.Name, n, now),
+			Ranking:      rk[rank.Key(cl.Name, n)],
+			Evictions:    h.a.Rt.Evictions(cl.Name, n, now),
+			OutOfService: h.a.Rt.OutOfService(cl.Name, n, now),
 		})
 	}
 	jok(w, map[string]any{

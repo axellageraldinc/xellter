@@ -71,6 +71,19 @@ export type PresetView = {
   sticky: boolean
   ranking: Ranking | null
   evictions: Record<string, string>
+  /** The models that are out of this preset, and why. */
+  out_of_service: OutOfService[]
+}
+
+export type OutOfService = {
+  model: string
+  reason: string
+  /** errors | slow | unreliable */
+  kind: string
+  since: string
+  until: string
+  /** How many times in a row it came back and was put out again. */
+  strikes: number
 }
 
 export type PresetRow = {

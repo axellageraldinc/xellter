@@ -84,6 +84,8 @@ type Router struct {
 	pins map[string]pin // session key -> model
 	// pinVer counts the writes to pins, so a saver can tell whether there is anything new to keep.
 	pinVer uint64
+	health map[string][]healthSample // client|preset|model -> recent requests (ADR 0029)
+	sess   map[string]*sessState     // client|preset|session -> how the pinned model has been doing
 	evict  map[string]*eviction
 }
 
@@ -97,6 +99,11 @@ type eviction struct {
 	fails    []time.Time
 	until    time.Time
 	replaced bool
+	// Why the model is out, since when, and how many times in a row it came back and was put out again.
+	reason  string
+	kind    string // errors | slow | unreliable
+	since   time.Time
+	strikes int
 }
 
 // New builds a router.
@@ -342,8 +349,9 @@ func (r *Router) pinModel(cl *config.Client, id, session, category string, now t
 //
 // A preset that does not stick has no pinned model: every request takes the next model of the ring.
 func (r *Router) order(cl *config.Client, rk *rank.Ranking, session string, now time.Time) []string {
-	var out []string
+	var out, late []string
 	seen := map[string]bool{}
+	avoid := r.avoided(cl.Name, rk.Preset, session)
 	add := func(id string) {
 		if id == "" || seen[id] {
 			return
@@ -352,6 +360,10 @@ func (r *Router) order(cl *config.Client, rk *rank.Ranking, session string, now 
 			return
 		}
 		seen[id] = true
+		if avoid[id] { // this session left the model for being slow: it is the last resort, not gone
+			late = append(late, id)
+			return
+		}
 		out = append(out, id)
 	}
 	ids := make([]string, len(rk.Candidates))
@@ -376,7 +388,7 @@ func (r *Router) order(cl *config.Client, rk *rank.Ranking, session string, now 
 			add(ids[(i+off)%len(ids)])
 		}
 	}
-	return out
+	return append(out, late...)
 }
 
 // sticky reports whether the preset keeps one model per session. A preset that
@@ -547,6 +559,11 @@ func pinKey(client, preset, session string) string { return client + "|" + prese
 // the cooldown, and the preset's ranking simply moves on to the next model. It reports whether this failure
 // evicted the model.
 func (r *Router) Failed(client, preset, model string, now time.Time) bool {
+	return r.FailedWhy(client, preset, model, "", now)
+}
+
+// FailedWhy is Failed with the reason of the failure, which the panel shows when the model is taken out.
+func (r *Router) FailedWhy(client, preset, model, why string, now time.Time) bool {
 	cfg := r.cfg.Load()
 	window := time.Duration(cfg.Routing.EvictWindowMin) * time.Minute
 	key := evictKey(client, preset, model)
@@ -568,6 +585,11 @@ func (r *Router) Failed(client, preset, model string, now time.Time) bool {
 		e.until = now.Add(time.Duration(cfg.Routing.EvictCooldownMin) * time.Minute)
 		e.fails = nil
 		e.replaced = true
+		e.kind, e.since = "errors", now
+		e.reason = fmt.Sprintf("%d errors within %d minutes", cfg.Routing.EvictErrors, cfg.Routing.EvictWindowMin)
+		if why != "" {
+			e.reason += ", the last: " + why
+		}
 		return true
 	}
 	return false

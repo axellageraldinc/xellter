@@ -67,6 +67,15 @@ type Routing struct {
 	EvictWindowMin     int `yaml:"evict_window_minutes" json:"evict_window_minutes"`
 	EvictCooldownMin   int `yaml:"evict_cooldown_minutes" json:"evict_cooldown_minutes"`
 	AvoidSunsetDays    int `yaml:"avoid_sunset_days" json:"avoid_sunset_days"`
+
+	// Speed and reliability (ADR 0029). A model that answers too slowly or fails too often is taken out of
+	// the preset that saw it, for a while, and measured again when it comes back.
+	FirstTokenSecs   int `yaml:"first_token_timeout_s" json:"first_token_timeout_s"` // 0 = default, -1 = off
+	SlowTTFTSecs     int `yaml:"slow_first_token_s" json:"slow_first_token_s"`       // median first token above this takes a model out
+	FailPercent      int `yaml:"fail_percent" json:"fail_percent"`                   // failed requests, in percent, that take a model out
+	HealthMinReqs    int `yaml:"health_min_requests" json:"health_min_requests"`     // requests needed before a model is judged
+	QuarantineMin    int `yaml:"quarantine_minutes" json:"quarantine_minutes"`       // first time out; doubles each time it comes back and fails again
+	RepinFirstTokenS int `yaml:"repin_first_token_s" json:"repin_first_token_s"`     // a pinned model this slow twice in three requests loses the session
 }
 
 // Upstream is one kenari API key of a client. Only a name and the secret
@@ -167,6 +176,7 @@ func Default() *Config {
 		Routing: Routing{
 			RankRefreshMinutes: 5, TopModels: 10, EvictErrors: 3, EvictWindowMin: 60,
 			EvictCooldownMin: 720, AvoidSunsetDays: 3,
+			FirstTokenSecs: 15, SlowTTFTSecs: 10, FailPercent: 40, HealthMinReqs: 6, QuarantineMin: 30, RepinFirstTokenS: 15,
 		},
 	}
 }
@@ -289,6 +299,24 @@ func (c *Config) fillDefaults() {
 	}
 	if r.EvictCooldownMin <= 0 {
 		r.EvictCooldownMin = d.Routing.EvictCooldownMin
+	}
+	if r.FirstTokenSecs == 0 {
+		r.FirstTokenSecs = d.Routing.FirstTokenSecs
+	}
+	if r.SlowTTFTSecs <= 0 {
+		r.SlowTTFTSecs = d.Routing.SlowTTFTSecs
+	}
+	if r.FailPercent <= 0 || r.FailPercent > 100 {
+		r.FailPercent = d.Routing.FailPercent
+	}
+	if r.HealthMinReqs <= 0 {
+		r.HealthMinReqs = d.Routing.HealthMinReqs
+	}
+	if r.QuarantineMin <= 0 {
+		r.QuarantineMin = d.Routing.QuarantineMin
+	}
+	if r.RepinFirstTokenS <= 0 {
+		r.RepinFirstTokenS = d.Routing.RepinFirstTokenS
 	}
 	if r.RankRefreshMinutes < 0 {
 		r.RankRefreshMinutes = 0

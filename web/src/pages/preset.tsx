@@ -244,12 +244,20 @@ export function PresetCard({
           )}
         </div>
 
-        {Object.keys(preset.evictions).length > 0 && (
-          <div className="text-xs text-text-muted">
-            Out for now:{' '}
-            {Object.entries(preset.evictions)
-              .map(([m, t]) => `${m} (back in ${left(t) || 'a moment'})`)
-              .join(', ')}
+        {(preset.out_of_service?.length ?? 0) > 0 && (
+          <div className="space-y-1.5" data-testid="out-of-service">
+            <div className="text-xs font-semibold tracking-wide text-text-muted uppercase">
+              Out for now ({preset.out_of_service.length})
+            </div>
+            {preset.out_of_service.map((o) => (
+              <div key={o.model} className="text-xs text-text-muted">
+                <span className="font-medium text-text">{o.model}</span>
+                {' · '}
+                {o.reason}
+                {' · '}back in {left(o.until) || 'a moment'}
+                {o.strikes > 1 ? ` (out ${o.strikes} times in a row)` : ''}
+              </div>
+            ))}
           </div>
         )}
 

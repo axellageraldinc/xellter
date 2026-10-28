@@ -27,6 +27,8 @@ type fake struct {
 	calls []call
 	// chat decides the response for a chat call; default is 200.
 	chat func(c call, n int) (int, string)
+	// stall makes a model send its stream headers at once and its first token only after the delay.
+	stall map[string]time.Duration
 	// account answers /v1/account/quota; default: 403 like a restricted key.
 	account func(auth string) (int, string)
 	srv     *httptest.Server
@@ -127,6 +129,15 @@ func newFake(t testing.TB) *fake {
 		if strings.Contains(c.Body, `"stream":true`) {
 			w.Header().Set("Content-Type", "text/event-stream")
 			fl := w.(http.Flusher)
+			if d := f.stall[c.Model]; d > 0 {
+				w.WriteHeader(200)
+				fl.Flush()
+				select {
+				case <-time.After(d):
+				case <-r.Context().Done():
+					return
+				}
+			}
 			for i := 0; i < 3; i++ {
 				fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"t%d\"}}]}\n\n", i)
 				fl.Flush()

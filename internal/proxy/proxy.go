@@ -487,9 +487,21 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 	// failure and then abandoned, so its remaining keys are skipped: the retry is a property of the model, not
 	// of the key (requirement 15).
 	dead := map[string]bool{}
-	for _, at := range plan.Attempts {
+	ftLimit := s.firstTokenLimit(cfg, body, plan.Modality, isStream)
+	for ai, at := range plan.Attempts {
 		if dead[at.Model.ID] {
 			continue
+		}
+		// The last model that can still be tried is never timed out: something has to answer.
+		timed := ftLimit > 0
+		if timed {
+			timed = false
+			for _, later := range plan.Attempts[ai+1:] {
+				if !dead[later.Model.ID] && later.Model.ID != at.Model.ID {
+					timed = true
+					break
+				}
+			}
 		}
 		// A model that has been measured to reject the effort does not get it again
 		// (ADR 0026). The request is served without the field, which is better than
@@ -519,6 +531,25 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 			res := s.send(r, at, payload, body.ctype, isStream, cfg)
 			row := store.Request{TS: start.UnixMilli(), Client: cl.Name, Preset: plan.Preset, Requested: plan.Requested, Model: at.Model.ID, Upstream: at.Key.Name,
 				Path: r.URL.Path, Stream: isStream, Attempt: attempts, RTKSaved: rtkSaved, Session: session, Key: cl.KeyHint}
+			// A streamed answer that sends nothing for too long is a model queueing, and the caller is better
+			// served by the next one (ADR 0029). Headers alone do not count: some upstreams send them at once.
+			if timed && res.err == nil && res.resp.StatusCode < 300 {
+				var got bool
+				if res, got = s.firstToken(res, ftLimit); !got {
+					if r.Context().Err() != nil {
+						return
+					}
+					waited := s.Now().Sub(res.started)
+					row.Status, row.Err = 0, fmt.Sprintf("no first token in %ds", int(ftLimit/time.Second))
+					row.LatencyMS = int(s.Now().Sub(start) / time.Millisecond)
+					row.Billing = "payg"
+					s.st.Log(row)
+					s.Logf("attempt %d %s/%s on %s: no first token in %s, trying the next model", attempts, plan.Requested, at.Model.ID, at.Key.Name, ftLimit)
+					s.observe(cl.Name, plan, session, at.Model.ID, waited, false)
+					dead[at.Model.ID] = true
+					break
+				}
+			}
 			if res.err == nil && res.resp.StatusCode < 300 {
 				s.rt.Succeeded(cl.Name, plan.Preset, at.Model.ID)
 				if plan.Preset != "" {
@@ -571,7 +602,10 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 			if r.Context().Err() != nil {
 				return
 			}
-			if plan.Preset != "" && s.rt.Failed(cl.Name, plan.Preset, at.Model.ID, s.Now()) {
+			if f.status == 0 || f.status >= 500 {
+				s.observe(cl.Name, plan, session, at.Model.ID, 0, false)
+			}
+			if plan.Preset != "" && s.rt.FailedWhy(cl.Name, plan.Preset, at.Model.ID, f.reason, s.Now()) {
 				// Requirement 16: three errors inside the window take the model out of this preset only, and a
 				// session pinned to it moves on (eviction beats stickiness).
 				s.rt.Forget(cl.Name, plan.Preset, session)
@@ -761,6 +795,13 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, cl *config.Client
 	}
 	u := findUsage(head, tail.bytes())
 	row.InTok, row.OutTok, row.CachedTok = u.in, u.out, u.cached
+	if copyErr == nil {
+		var waited time.Duration
+		if stream && plan.Modality == "chat" && ttft > 0 {
+			waited = ttft - res.started.Sub(start)
+		}
+		s.observe(row.Client, plan, row.Session, at.Model.ID, waited, true)
+	}
 	covered := at.Key.Covered(at.Model, snap, now)
 	switch {
 	case at.Model.Free:
@@ -978,3 +1019,81 @@ func writeErr(w http.ResponseWriter, path string, status int, code, msg string, 
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": msg, "type": "xellter_error", "code": code}})
 }
+
+// observe tells the router how one request of a model went (ADR 0029) and logs the verdict when it
+// takes the model out of the preset or moves a session off it.
+func (s *Server) observe(client string, plan *route.Plan, session, model string, waited time.Duration, ok bool) {
+	if plan.Preset == "" {
+		return
+	}
+	why, moved := s.rt.Observe(client, plan.Preset, session, model, waited, ok, s.Now())
+	if why != "" {
+		s.Logf("%s/%s out of preset %s: %s", client, model, plan.Preset, why)
+	}
+	if moved {
+		s.Logf("%s: session %.12s leaves %s, which keeps answering slowly", client, session, model)
+	}
+}
+
+// firstTokenLimit is how long a streamed chat answer may stay silent before the next model is tried. It
+// grows with the size of the request, because a long prompt legitimately takes longer to read.
+func (s *Server) firstTokenLimit(cfg *config.Config, b *reqBody, modality string, stream bool) time.Duration {
+	secs := cfg.Routing.FirstTokenSecs
+	if secs < 0 || !stream || modality != "chat" {
+		return 0
+	}
+	if secs == 0 {
+		secs = 15
+	}
+	d := time.Duration(secs+bodyTokens(b)/10000) * time.Second
+	return min(d, 60*time.Second)
+}
+
+// firstToken waits for the first bytes of a streamed answer. It reports false when nothing arrived within
+// limit, after cancelling the request. Bytes that did arrive are put back in front of the body.
+func (s *Server) firstToken(res sendResult, limit time.Duration) (sendResult, bool) {
+	type chunk struct {
+		b   []byte
+		err error
+	}
+	ch := make(chan chunk, 1)
+	buf := make([]byte, 16<<10)
+	body := res.resp.Body
+	go func() {
+		n, err := body.Read(buf)
+		ch <- chunk{buf[:n], err}
+	}()
+	t := time.NewTimer(limit)
+	defer t.Stop()
+	select {
+	case c := <-ch:
+		res.resp.Body = &replayBody{first: c.b, err: c.err, rest: body}
+		return res, true
+	case <-t.C:
+		res.cancel() // unblocks the read
+		<-ch
+		_ = body.Close()
+		return res, false
+	}
+}
+
+// replayBody gives back the bytes that were read ahead, then the rest of the body.
+type replayBody struct {
+	first []byte
+	err   error // what the read-ahead ended with, returned once the bytes are consumed
+	rest  io.ReadCloser
+}
+
+func (b *replayBody) Read(p []byte) (int, error) {
+	if len(b.first) > 0 {
+		n := copy(p, b.first)
+		b.first = b.first[n:]
+		return n, nil
+	}
+	if b.err != nil {
+		return 0, b.err
+	}
+	return b.rest.Read(p)
+}
+
+func (b *replayBody) Close() error { return b.rest.Close() }

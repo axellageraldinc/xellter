@@ -2,6 +2,7 @@ package route
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -404,5 +405,125 @@ func TestPinsSurviveARestart(t *testing.T) {
 	r3, _ := setup("a", "b", "c")
 	if n, _ := r3.RestorePins(saved, t0.Add(2*time.Hour), time.Hour); n != 0 {
 		t.Fatalf("a pin older than the limit must not be restored, got %d", n)
+	}
+}
+
+// feed records n requests of one model in one preset and returns what the last one decided.
+func feed(r *Router, preset, model string, n int, ttft time.Duration, ok bool, at time.Time) (string, time.Time) {
+	var why string
+	for i := 0; i < n; i++ {
+		at = at.Add(10 * time.Second)
+		why, _ = r.Observe("c", preset, "", model, ttft, ok, at)
+	}
+	return why, at
+}
+
+func TestASlowModelIsTakenOutWithItsReasonAndComesBack(t *testing.T) {
+	r, _ := setup("a", "b", "c", "d")
+	if why, _ := feed(r, "text", "a", 5, 20*time.Second, true, t0); why != "" {
+		t.Fatalf("five requests are too few to judge a model: %s", why)
+	}
+	why, at := feed(r, "text", "a", 1, 20*time.Second, true, t0.Add(time.Minute))
+	if !strings.HasPrefix(why, "slow: median first token 20.0s") {
+		t.Fatalf("reason = %q", why)
+	}
+	out := r.OutOfService("c", "text", at)
+	if len(out) != 1 || out[0].Model != "a" || out[0].Kind != "slow" || out[0].Reason != why {
+		t.Fatalf("out of service = %+v", out)
+	}
+	if got := out[0].Until.Sub(at); got != 30*time.Minute {
+		t.Fatalf("first cooldown %s, want 30m", got)
+	}
+	// the other models of the preset keep serving
+	p, err := r.Plan(&config.Client{Name: "c", Presets: map[string]config.Preset{"text": {Category: "chat"}}}, "text", "", "/v1/chat/completions", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range planModels(p) {
+		if m == "a" {
+			t.Fatal("a model that is out was planned")
+		}
+	}
+	// it comes back after the cooldown, and a single slow request is not enough to judge it again... but
+	// half the usual number is: it was already seen being slow
+	back := out[0].Until.Add(time.Second)
+	if len(r.OutOfService("c", "text", back)) != 0 {
+		t.Fatal("the model must be back after its cooldown")
+	}
+	if why, _ := feed(r, "text", "a", 2, 20*time.Second, true, back); why != "" {
+		t.Fatalf("two requests are too few even on probation (need 3): %s", why)
+	}
+	why, at = feed(r, "text", "a", 1, 20*time.Second, true, back.Add(time.Minute))
+	if why == "" {
+		t.Fatal("a model that is slow again on probation must go out again")
+	}
+	if got := r.OutOfService("c", "text", at)[0].Until.Sub(at); got != time.Hour {
+		t.Fatalf("second cooldown %s, want 1h (doubled)", got)
+	}
+}
+
+func TestAHealthyModelOnProbationResetsItsCooldown(t *testing.T) {
+	r, _ := setup("a", "b", "c")
+	_, at := feed(r, "text", "a", 6, 20*time.Second, true, t0)
+	back := r.OutOfService("c", "text", at)[0].Until.Add(time.Second)
+	if why, at2 := feed(r, "text", "a", 3, time.Second, true, back); why != "" {
+		t.Fatalf("a fast model was taken out: %s", why)
+	} else {
+		at = at2
+	}
+	// slow later, from scratch: the cooldown is the short one again
+	_, at = feed(r, "text", "a", 40, 20*time.Second, true, at.Add(2*time.Hour))
+	if o := r.OutOfService("c", "text", at)[0]; o.Until.Sub(o.Since) != 30*time.Minute {
+		t.Fatalf("cooldown %s, want the short one after a healthy spell", o.Until.Sub(o.Since))
+	}
+}
+
+func TestAnUnreliableModelIsTakenOut(t *testing.T) {
+	r, _ := setup("a", "b", "c")
+	for i := 0; i < 3; i++ {
+		r.Observe("c", "text", "", "a", time.Second, true, t0.Add(time.Duration(i)*time.Second))
+	}
+	why, _ := feed(r, "text", "a", 3, 0, false, t0.Add(time.Minute))
+	if !strings.HasPrefix(why, "unreliable: 3 of its last 6 requests failed") {
+		t.Fatalf("reason = %q", why)
+	}
+}
+
+func TestAModelIsOutOnlyOfThePresetThatSawItSlow(t *testing.T) {
+	r, _ := setup("a", "b", "c")
+	_, at := feed(r, "text", "a", 6, 20*time.Second, true, t0)
+	if len(r.OutOfService("c", "other", at)) != 0 || len(r.OutOfService("someone-else", "text", at)) != 0 {
+		t.Fatal("a model went out of a preset or a client that did not see it slow")
+	}
+}
+
+func TestASessionLeavesAModelThatKeepsBeingSlow(t *testing.T) {
+	r, cl := setup("a", "b", "c")
+	r.Pin("c", "text", "s1", "a", t0)
+	fast, slow := 2*time.Second, 20*time.Second
+	if _, moved := r.Observe("c", "text", "s1", "a", slow, true, t0); moved {
+		t.Fatal("one slow answer must not move a session")
+	}
+	r.Observe("c", "text", "s1", "a", fast, true, t0) // a side call that was quick
+	if _, moved := r.Observe("c", "text", "s1", "a", slow, true, t0); !moved {
+		t.Fatal("two slow answers in the last three must move the session")
+	}
+	for i := 0; i < 6; i++ {
+		p, err := r.Plan(cl, "text", "s1", "/v1/chat/completions", t0.Add(time.Duration(i)*time.Minute))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.Model == "a" {
+			t.Fatal("the session went back to the model it left")
+		}
+	}
+}
+
+func TestThePresetIsNeverEmptied(t *testing.T) {
+	r, _ := setup("a", "b", "c")
+	_, at := feed(r, "text", "a", 6, 20*time.Second, true, t0)
+	// a is out; b going out would leave only c, and the last two models stay in service
+	if why, _ := feed(r, "text", "b", 12, 20*time.Second, true, at.Add(time.Minute)); why != "" {
+		t.Fatalf("the last models of a preset must stay in service: %s", why)
 	}
 }
