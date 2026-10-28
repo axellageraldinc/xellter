@@ -112,7 +112,7 @@ numbers and when they return; the same line is in the log.
 ## clients[]
 
 A client is one app that calls xellter. It owns its kenari keys, one purpose and at most one preset
-per category.
+per category (several for chat, ADR 0038).
 
 | key | meaning |
 |---|---|
@@ -122,7 +122,7 @@ per category.
 | `key_hash` | sha256 hex of the xellter key the app uses; created by `xellter client add` or the panel. Never the key itself |
 | `key_hint` | last four characters of that key, for display |
 | `keys[]` | the client's kenari API keys, see below |
-| `presets{}` | preset name -> preset, at most one per category, see below |
+| `presets{}` | preset name -> preset, at most one per category (several for chat), see below |
 | `note` | free text |
 
 ### clients[].keys[]
@@ -146,7 +146,8 @@ The value lives in `data/secrets.env` (0600), never in the YAML.
 
 Key = the model name the app sends. The name is the owner's own (ADR 0021): letters, digits, dot,
 dash and underscore, unique inside the client. The `category` says what the preset serves, and a
-client holds at most one preset per category, so a second preset of a kind is refused.
+client holds at most one preset per category, so a second preset of a kind is refused, except for `chat`:
+a client may hold several chat presets (ADR 0038), for example a fast one for a voice conversation.
 
 | Category | Suggested name | kenari endpoint |
 |---|---|---|

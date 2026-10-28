@@ -67,12 +67,13 @@ type categoryOption struct {
 	Category string `json:"category"`
 	Preset   string `json:"preset"`
 	Label    string `json:"label"`
+	Multi    bool   `json:"multi"` // the client may hold several presets of this category (ADR 0038)
 }
 
 func categoryOptions() []categoryOption {
 	out := make([]categoryOption, 0, len(config.Categories))
 	for _, c := range config.Categories {
-		out = append(out, categoryOption{Category: c, Preset: config.PresetName(c), Label: categoryLabel[c]})
+		out = append(out, categoryOption{Category: c, Preset: config.PresetName(c), Label: categoryLabel[c], Multi: slices.Contains(config.MultiCategories, c)})
 	}
 	return out
 }

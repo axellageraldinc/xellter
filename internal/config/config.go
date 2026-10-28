@@ -5,7 +5,7 @@
 // admin panel can store values in a separate 0600 secrets file.
 //
 // The shape is deliberately small. A client has a purpose and at most one
-// preset per category; a preset is a list of models plus one optimization. Every
+// preset per category (several for chat); a preset is a list of models plus one optimization. Every
 // other routing rule is a constant (see docs/rewrite-plan.md).
 package config
 
@@ -111,7 +111,7 @@ type Upstream struct {
 
 // Client is an app that calls xellter (a chat app, an editor, ...). It has one
 // xellter API key (stored only as a hash), its own kenari keys, one purpose that
-// decides how its text preset is scored, and at most one preset per category.
+// decides how its text presets are scored, and at most one preset per category (several for chat, ADR 0038).
 type Client struct {
 	Name    string            `yaml:"name" json:"name"`
 	Enabled bool              `yaml:"enabled" json:"enabled"`
@@ -119,7 +119,7 @@ type Client struct {
 	KeyHash string            `yaml:"key_hash" json:"key_hash"`
 	KeyHint string            `yaml:"key_hint" json:"key_hint"`
 	Keys    []Upstream        `yaml:"keys" json:"keys"`       // kenari API keys of this client
-	Presets map[string]Preset `yaml:"presets" json:"presets"` // preset name (one per category) -> preset
+	Presets map[string]Preset `yaml:"presets" json:"presets"` // preset name (one per category, several for chat) -> preset
 	Note    string            `yaml:"note" json:"note"`
 }
 
@@ -127,7 +127,7 @@ type Client struct {
 // plus the rule that orders them. The name is the owner's own (ADR 0021): it is
 // the model name the client asks for, so it must be unique inside a client. The
 // category is what says what kind of model it serves, and a client holds at
-// most one preset per category.
+// most one preset per category (several for chat, ADR 0038).
 type Preset struct {
 	Category     string   `yaml:"category" json:"category"`         // chat | images | videos | audio_speech | audio_transcription | music | systemone
 	Optimization string   `yaml:"optimization" json:"optimization"` // cheapest | balanced | best_quality
@@ -144,6 +144,11 @@ type Preset struct {
 // A preset that does not say sticks: that is how it behaved before the toggle
 // existed (ADR 0025).
 func (p Preset) IsSticky() bool { return p.Sticky == nil || *p.Sticky }
+
+// MultiCategories are the categories a client may hold several presets of (ADR 0038). A chat preset is a pool and a
+// use, so one app can ask for a fast pool for a voice conversation next to its main one. Every other category stays one
+// preset per client.
+var MultiCategories = []string{"chat"}
 
 // Categories are the endpoint kinds a preset can serve, in display order.
 var Categories = []string{"chat", "images", "videos", "audio_speech", "audio_transcription", "music", "systemone"}
@@ -426,7 +431,7 @@ func (c *Config) Validate() error {
 				bad("client %q key %q: capability must be one of %v", cl.Name, u.Name, KeyCapabilities)
 			}
 		}
-		cats := map[string]string{} // category -> preset name, to catch a second preset of a kind
+		cats := map[string]string{} // category -> preset name, to catch a second preset of a kind that allows only one
 		for name, p := range cl.Presets {
 			where := "client " + cl.Name + " preset " + name
 			if !nameRe.MatchString(name) {
@@ -452,7 +457,7 @@ func (c *Config) Validate() error {
 				bad("%s: %q is a %s preset; pick another name for a %s preset", where, name, legacy, category)
 				continue
 			}
-			if other, dup := cats[category]; dup {
+			if other, dup := cats[category]; dup && !contains(MultiCategories, category) {
 				bad("%s: a client may hold only one %s preset (already %q)", where, category, other)
 			}
 			cats[category] = name

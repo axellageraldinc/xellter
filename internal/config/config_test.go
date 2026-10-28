@@ -27,7 +27,7 @@ func TestMinimalYAMLWorksAndDefaultsFill(t *testing.T) {
 
 // A preset may carry any name the owner likes, but the old fixed names keep
 // their meaning, so a config written before presets could be renamed still
-// loads. A client holds at most one preset per category.
+// loads. A client holds at most one preset per category, except chat (ADR 0038).
 func TestPresetNamesCoverEveryCategory(t *testing.T) {
 	want := map[string]string{
 		"chat": "text", "images": "image", "videos": "video", "audio_speech": "tts",
@@ -80,7 +80,7 @@ func TestValidationCatchesMistakes(t *testing.T) {
 		"bad preset name":          "clients:\n  - name: x\n    presets:\n      'a b': {category: chat, optimization: balanced}\n",
 		"preset of no category":    "clients:\n  - name: x\n    presets:\n      budget: {optimization: balanced}\n",
 		"preset of the wrong kind": "clients:\n  - name: x\n    presets:\n      text: {category: images, optimization: balanced}\n",
-		"two presets of one kind":  "clients:\n  - name: x\n    presets:\n      text: {category: chat, optimization: balanced}\n      mine: {category: chat, optimization: balanced}\n",
+		"two presets of one kind":  "clients:\n  - name: x\n    presets:\n      image: {category: images, optimization: balanced}\n      mine: {category: images, optimization: balanced}\n",
 		"bad optimization":         "clients:\n  - name: x\n    presets:\n      text: {category: chat, optimization: cheapestest}\n",
 		"model listed twice":       "clients:\n  - name: x\n    presets:\n      text: {category: chat, optimization: balanced, models: [a, a]}\n",
 		"empty model id":           "clients:\n  - name: x\n    presets:\n      text: {category: chat, optimization: balanced, models: ['  ']}\n",
@@ -92,7 +92,10 @@ func TestValidationCatchesMistakes(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	// a second preset of the same category cannot exist: the names are the categories
+	// a client may hold several chat presets (ADR 0038): a fast pool for voice next to the main one
+	if c, err := Parse([]byte("clients:\n  - name: x\n    presets:\n      text: {category: chat, optimization: balanced}\n      voice-conversation: {category: chat, optimization: cheapest, sticky: false}\n")); err != nil || len(c.Clients[0].Presets) != 2 {
+		t.Fatalf("two chat presets were refused: %v", err)
+	}
 	if _, err := Parse([]byte("clients:\n  - name: x\n    presets:\n      text: {category: chat, optimization: balanced}\n")); err != nil {
 		t.Fatalf("a valid preset was refused: %v", err)
 	}

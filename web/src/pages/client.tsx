@@ -46,7 +46,7 @@ export function ClientDetailPage() {
   if (!d) return <Page title={name}>Loading…</Page>
 
   const have = new Set(d.presets.map((p) => p.category))
-  const missing = d.categories.filter((c) => !have.has(c.category))
+  const missing = d.categories.filter((c) => c.multi || !have.has(c.category))
 
   return (
     <Page
@@ -330,6 +330,7 @@ export function ClientDetailPage() {
         <AddPresetDialog
           client={d.client.name}
           category={adding}
+          taken={d.presets.map((p) => p.name)}
           onClose={() => setAdding(null)}
           onDone={async () => {
             setAdding(null)
@@ -382,11 +383,13 @@ export function ClientDetailPage() {
 function AddPresetDialog({
   client,
   category,
+  taken,
   onClose,
   onDone,
 }: {
   client: string
   category: Category
+  taken: string[]
   onClose: () => void
   onDone: () => void
 }) {
@@ -395,6 +398,10 @@ function AddPresetDialog({
   const [error, setError] = React.useState('')
 
   async function create() {
+    if (taken.includes(name.trim())) {
+      setError('This client already has a preset with that name.') // saving would replace it
+      return
+    }
     setBusy(true)
     setError('')
     try {
@@ -416,7 +423,7 @@ function AddPresetDialog({
         <DialogHeader>
           <DialogTitle>New preset</DialogTitle>
           <DialogDescription>
-            The name is the model your app asks for. A client holds one preset per category.
+            The name is the model your app asks for. A client holds one preset per category, and as many chat presets as it needs (a fast one for voice, say).
           </DialogDescription>
         </DialogHeader>
         <DialogBody className="space-y-4">

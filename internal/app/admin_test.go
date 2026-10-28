@@ -249,11 +249,19 @@ func TestAdminConfigClientsAndRollback(t *testing.T) {
 	if _, ok := ae.a.Cfg().Clients[0].Presets["my-preset"]; !ok {
 		t.Fatal("the renamed preset was not applied")
 	}
-	// a second preset of the same category is still refused
+	// a second chat preset is accepted (ADR 0038)
 	presetsOf(0)["text"] = map[string]any{"category": "chat", "optimization": "balanced"}
+	if r, b := ae.do(t, ck, "PUT", "/api/config", map[string]any{"config": cur.Config}); r.StatusCode != 200 {
+		t.Fatalf("a second chat preset was refused: %d %s", r.StatusCode, b)
+	}
+	// a second preset of any other category is still refused
+	presetsOf(0)["pic"] = map[string]any{"category": "images", "optimization": "balanced"}
+	presetsOf(0)["pic2"] = map[string]any{"category": "images", "optimization": "balanced"}
 	if r, b := ae.do(t, ck, "PUT", "/api/config", map[string]any{"config": cur.Config}); r.StatusCode != 422 {
 		t.Fatalf("two presets of one category accepted: %d %s", r.StatusCode, b)
 	}
+	delete(presetsOf(0), "pic")
+	delete(presetsOf(0), "pic2")
 	delete(presetsOf(0), "text")
 	presetsOf(0)["text"] = map[string]any{"category": "chat", "optimization": "balanced"}
 	delete(presetsOf(0), "my-preset")
