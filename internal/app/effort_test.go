@@ -29,23 +29,34 @@ func newEffortRegistry() *effort.Registry { return effort.NewRegistry() }
 // three ways a model can break that promise, and the two things the gateway does
 // about each.
 
-func TestEffortNoneIsRoutedToAModelThatHonoursIt(t *testing.T) {
+// The effort is the client's request to the model, not a routing key (ADR 0028). A side
+// call (a title, a summary) asks for "none" while the conversation asks for something
+// else; if the effort moved a request between models, the side call would take the
+// session's pin with it.
+func TestTheEffortDoesNotMoveASessionToAnotherModel(t *testing.T) {
 	e := setup(t, nil)
-	// The pool has four chat models. Two of them are known to ignore "none" (they
-	// were seen thinking), and two are known to honour it.
-	e.a.Rt.Efforts().Record("cheap-b", "none", effortIgnores, time.Now())
-	e.a.Rt.Efforts().Record("pro-c", "none", effortIgnores, time.Now())
-	e.a.Rt.Efforts().Record("free-a:free", "none", effortHonours, time.Now())
-	e.a.Rt.Efforts().Record("promo-d", "none", effortHonours, time.Now())
-
-	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", `{"model":"text","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`)
-	if resp.StatusCode != 200 {
-		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	sess := []string{"X-Xellter-Session", "s-effort"}
+	post := func(effort string) string {
+		resp, body := e.post(t, e.keyCl, "/v1/chat/completions", `{"model":"text","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"`+effort+`"}`, sess...)
+		if resp.StatusCode != 200 {
+			t.Fatalf("status %d: %s", resp.StatusCode, body)
+		}
+		return resp.Header.Get("X-Xellter-Model")
 	}
-	// The model that must serve the request is the one that honours the effort.
-	served := resp.Header.Get("X-Xellter-Model")
-	if served != "free-a:free" && served != "promo-d" {
-		t.Fatalf("a model that ignores the effort served the request: %s", served)
+	first := post("minimal")
+	// The pinned model is known to ignore "none" and every other model honours it.
+	for _, m := range []string{"cheap-b", "pro-c", "free-a:free", "promo-d"} {
+		v := effortHonours
+		if m == first {
+			v = effortIgnores
+		}
+		e.a.Rt.Efforts().Record(m, "none", v, time.Now())
+	}
+	for i := 0; i < 6; i++ {
+		effort := []string{"none", "minimal", "low"}[i%3]
+		if got := post(effort); got != first {
+			t.Fatalf("request %d (effort %s) moved the session from %s to %s", i, effort, first, got)
+		}
 	}
 }
 

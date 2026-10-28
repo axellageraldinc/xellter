@@ -462,7 +462,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 	// nothing is not a request for "none": an unset effort lets the upstream apply its
 	// own default, which for a hosted reasoning model is often its ceiling (ADR 0026).
 	asked, hasEffort := s.effortOf(body)
-	plan, perr := s.rt.PlanEffort(cl, body.model, session, r.URL.Path, start, asked, hasEffort, bodyTokens(body))
+	plan, perr := s.rt.PlanEffort(cl, body.model, session, r.URL.Path, start, bodyTokens(body))
 	if perr != nil {
 		writeErr(w, r.URL.Path, perr.Status, perr.Code, perr.Message, perr.RetryAfter)
 		return
@@ -761,15 +761,6 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, cl *config.Client
 	}
 	u := findUsage(head, tail.bytes())
 	row.InTok, row.OutTok, row.CachedTok = u.in, u.out, u.cached
-	// What the model did with the effort the client asked for. This is what the
-	// gateway learns from, and it is the only trustworthy source: no catalog field
-	// says whether a model stops thinking when told to (ADR 0026).
-	if asked, ok := s.effortOf(body); ok {
-		thought := findReasoning(head, tail.bytes())
-		if v := s.efforts.Observe(at.Model.ID, asked, thought, now); v != effort.Unknown {
-			s.Logf("%s %s reasoning effort %q (reasoning in response: %t)", at.Model.ID, v, asked, thought)
-		}
-	}
 	covered := at.Key.Covered(at.Model, snap, now)
 	switch {
 	case at.Model.Free:

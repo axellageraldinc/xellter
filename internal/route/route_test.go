@@ -386,3 +386,23 @@ func TestEvictionPromotesAReserveModel(t *testing.T) {
 		t.Fatalf("the evicted model must not serve: %v", got)
 	}
 }
+
+func TestPinsSurviveARestart(t *testing.T) {
+	r, cl := setup("a", "b", "c")
+	r.Pin(cl.Name, "text", "s1", "b", t0)
+	saved, v := r.PinState()
+	if len(saved) != 1 || v == 0 {
+		t.Fatalf("one pin and a version expected, got %d pins, version %d", len(saved), v)
+	}
+	r2, _ := setup("a", "b", "c")
+	if n, _ := r2.RestorePins(saved, t0, time.Hour); n != 1 {
+		t.Fatalf("restored %d pins, want 1", n)
+	}
+	if got, _ := r2.PinOf(cl.Name, "text", "s1"); got != "b" {
+		t.Fatalf("pin after restart = %q, want b", got)
+	}
+	r3, _ := setup("a", "b", "c")
+	if n, _ := r3.RestorePins(saved, t0.Add(2*time.Hour), time.Hour); n != 0 {
+		t.Fatalf("a pin older than the limit must not be restored, got %d", n)
+	}
+}

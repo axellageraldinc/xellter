@@ -75,14 +75,16 @@ type Router struct {
 	rrMu sync.Mutex
 	rr   map[string]uint64 // per client+preset rotation counter
 
-	// efforts is what each model is known to do with a reasoning effort. It is
-	// written by the proxy as it serves traffic and read here to route a request to
-	// a model that can honour the effort the client asked for (ADR 0026).
+	// efforts is what each model is known to do with a reasoning effort. The only
+	// fact the gateway acts on is a refusal: a model that answers HTTP 400 to the
+	// field is served without it (ADR 0026, ADR 0028).
 	efforts *effort.Registry
 
-	smu   sync.Mutex
-	pins  map[string]pin // session key -> model
-	evict map[string]*eviction
+	smu  sync.Mutex
+	pins map[string]pin // session key -> model
+	// pinVer counts the writes to pins, so a saver can tell whether there is anything new to keep.
+	pinVer uint64
+	evict  map[string]*eviction
 }
 
 type pin struct {
@@ -202,23 +204,19 @@ func (r *Router) Models(cl *config.Client) (presets []string, real []string) {
 
 // Plan resolves the requested name for the client into the attempts to try, in order.
 func (r *Router) Plan(cl *config.Client, requested, session, path string, now time.Time) (*Plan, *Error) {
-	return r.PlanEffort(cl, requested, session, path, now, "", false, 0)
+	return r.PlanEffort(cl, requested, session, path, now, 0)
 }
 
-// PlanEffort resolves the requested name into the attempts to try, in order, honouring
-// the reasoning effort the client asked for.
+// PlanEffort resolves the requested name into the attempts to try, in order.
 //
-// An effort is a constraint on the model, not a hint: a client that asks for "none"
-// wants an answer that was not thought out first. A model that is known to ignore the
-// effort cannot serve that request, so it is left out of the order and another model of
-// the preset takes it (ADR 0026). A model that is known to REJECT the effort would fail
-// the request outright, so it is left out too; the proxy strips the field for such a
-// model as a second line of defence.
-//
-// A model nobody has measured yet is not excluded: there is no evidence against it, and
-// refusing to serve it would empty the pool. The proxy measures what happens and the
-// next request routes accordingly.
-func (r *Router) PlanEffort(cl *config.Client, requested, session, path string, now time.Time, asked effort.Level, hasEffort bool, bodyTokens int) (*Plan, *Error) {
+// The reasoning effort a client asks for plays no part in the choice of model. It used to
+// (ADR 0026): "none" moved the models seen thinking to the back of the order. That made
+// the same session bounce between models, because a side call such as a title or a
+// summary asks for "none" and was routed away from the model the conversation was
+// pinned to, and then moved the pin with it (ADR 0028). The effort is the client's
+// request to the model; the gateway forwards it, and strips it for a model known to
+// refuse it.
+func (r *Router) PlanEffort(cl *config.Client, requested, session, path string, now time.Time, bodyTokens int) (*Plan, *Error) {
 	snap := r.cat.Snapshot()
 	if snap == nil {
 		return nil, &Error{503, "catalog_unavailable", "model catalog not loaded yet", 5 * time.Second}
@@ -249,8 +247,11 @@ func (r *Router) PlanEffort(cl *config.Client, requested, session, path string, 
 	}
 	p := &Plan{Preset: requested, Requested: requested, Modality: sh.Category, Session: session}
 	order := r.order(cl, rk, session, now)
-	order = r.serveEffort(order, asked, hasEffort, now)
-	order = r.serveContext(order, snap, bodyTokens)
+	pinned := ""
+	if len(order) > 0 && r.sticky(cl.Name, requested) && session != "" && order[0] == r.pinned(cl.Name, requested, session) {
+		pinned = order[0]
+	}
+	order = r.serveContext(order, snap, bodyTokens, pinned)
 	if len(order) == 0 {
 		return nil, &Error{503, "all_evicted", fmt.Sprintf("every model of preset %q is cooling down after errors", requested), 60 * time.Second}
 	}
@@ -273,40 +274,6 @@ func (r *Router) PlanEffort(cl *config.Client, requested, session, path string, 
 	return p, nil
 }
 
-// serveEffort puts the models that can honour the asked-for effort first.
-//
-// The order is kept, not replaced: a model that can honour the effort comes before one
-// that cannot, but a model that cannot is still served if every other model is gone.
-// The caller's request is answered by something rather than by nothing.
-//
-// Only the "none" effort is a routing constraint. A graded effort ("low", "high") asks
-// for more or less thinking, and a model that ignores the grade still answers; failing
-// the call over it would be worse than the inaccuracy (ADR 0026).
-//
-// A fact older than the trust window is not used: the model is measured again the next
-// time it is served, because a provider can change a model's behaviour and a gateway
-// that believed yesterday's answer forever would keep preferring a model that no longer
-// behaves that way. A refusal is exempt: it is a property of the API's parameter
-// validation, and sending the field again would fail the call.
-func (r *Router) serveEffort(order []string, asked effort.Level, hasEffort bool, now time.Time) []string {
-	if !hasEffort || asked != effort.None || len(order) < 2 {
-		return order
-	}
-	can, cannot := make([]string, 0, len(order)), make([]string, 0, len(order))
-	for _, id := range order {
-		switch r.efforts.VerdictAt(id, asked, now, effort.DefaultTTL) {
-		case effort.Honours:
-			can = append(can, id)
-		case effort.Ignores, effort.Rejects:
-			cannot = append(cannot, id)
-		default:
-			// Not measured: no evidence against it, so it stays in the first group.
-			can = append(can, id)
-		}
-	}
-	return append(can, cannot...)
-}
-
 // serveContext puts the models whose window can hold the request first.
 //
 // A preset advertises the largest window in its pool (ADR 0026), so a client may send
@@ -318,14 +285,16 @@ func (r *Router) serveEffort(order []string, asked effort.Level, hasEffort bool,
 // The size is an estimate in tokens, and the window is the model's own. The estimate
 // is rough (four characters per token), so it is used to order, never to refuse: a
 // request is never turned away by the gateway on a guess.
-func (r *Router) serveContext(order []string, snap *catalog.Snapshot, bodyTokens int) []string {
+func (r *Router) serveContext(order []string, snap *catalog.Snapshot, bodyTokens int, pinned string) []string {
 	if bodyTokens <= 0 || snap == nil || len(order) < 2 {
 		return order
 	}
 	fit, small := make([]string, 0, len(order)), make([]string, 0, len(order))
 	for _, id := range order {
 		m := snap.Models[id]
-		if m == nil || m.Context <= 0 || bodyTokens < m.Context {
+		// The session's pinned model stays first whatever the estimate says: the estimate is rough, and a
+		// model that really cannot hold the request answers with a context error and the next one takes it.
+		if id == pinned || m == nil || m.Context <= 0 || bodyTokens < m.Context {
 			fit = append(fit, id)
 			continue
 		}
@@ -485,7 +454,50 @@ func (r *Router) Pin(client, preset, session, model string, now time.Time) {
 			}
 		}
 	}
-	r.pins[pinKey(client, preset, session)] = pin{model: model, at: now}
+	k := pinKey(client, preset, session)
+	if old, ok := r.pins[k]; !ok || old.model != model {
+		r.pinVer++
+	}
+	r.pins[k] = pin{model: model, at: now}
+}
+
+// PinSnapshot is one session pin in a form that can be stored.
+type PinSnapshot struct {
+	Key   string    `json:"k"`
+	Model string    `json:"m"`
+	At    time.Time `json:"t"`
+}
+
+// PinState returns every pin and a version that changes whenever a pin does. The pins live in memory, so
+// the app keeps them in the database: without that, every restart of the gateway moved every conversation
+// to another model.
+func (r *Router) PinState() ([]PinSnapshot, uint64) {
+	r.smu.Lock()
+	defer r.smu.Unlock()
+	out := make([]PinSnapshot, 0, len(r.pins))
+	for k, p := range r.pins {
+		out = append(out, PinSnapshot{Key: k, Model: p.model, At: p.at})
+	}
+	return out, r.pinVer
+}
+
+// RestorePins loads pins saved by a previous run, skipping the ones older than maxAge. It returns the
+// version it leaves behind, which the saver compares against so a process that learns nothing writes nothing.
+func (r *Router) RestorePins(saved []PinSnapshot, now time.Time, maxAge time.Duration) (int, uint64) {
+	r.smu.Lock()
+	defer r.smu.Unlock()
+	n := 0
+	for _, p := range saved {
+		if p.Key == "" || p.Model == "" || now.Sub(p.At) > maxAge {
+			continue
+		}
+		if _, ok := r.pins[p.Key]; !ok {
+			r.pins[p.Key] = pin{model: p.Model, at: p.At}
+			n++
+		}
+	}
+	r.pinVer++
+	return n, r.pinVer
 }
 
 // PinOf reports the model a session is pinned to ("" when it is not).
@@ -508,6 +520,7 @@ func (r *Router) Forget(client, preset, session string) {
 	r.smu.Lock()
 	defer r.smu.Unlock()
 	delete(r.pins, pinKey(client, preset, session))
+	r.pinVer++
 }
 
 func pinKey(client, preset, session string) string { return client + "|" + preset + "|" + session }

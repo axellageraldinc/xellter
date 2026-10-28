@@ -60,6 +60,8 @@ type App struct {
 	// facts and learns nothing — cannot write that older copy back over what the
 	// running gateway has learned since.
 	effortVersion atomic.Uint64
+	// pinVersion is the router's pin version this process last loaded or wrote.
+	pinVersion atomic.Uint64
 }
 
 type dynSource struct{ a *App }
@@ -95,6 +97,7 @@ func New(path string, src catalog.Source) (*App, error) {
 	a.SWEPage = bench.DefaultSWEURL
 	a.AiderYAML = bench.DefaultAiderURL
 	a.loadEffortFacts()
+	a.loadPins()
 	a.Cat.OnUpdate(func(s *catalog.Snapshot) {
 		for _, ac := range a.Pool.Accounts() {
 			ac.SetTopupThreshold(s.Tier.Thresh)
@@ -205,6 +208,55 @@ func (a *App) saveEffortFacts() {
 		return
 	}
 	a.effortVersion.Store(version)
+}
+
+// pinsKey is the kv row that holds the session pins, and pinsMaxAge how long a pin is kept for a session
+// nobody came back to.
+const (
+	pinsKey    = "session_pins"
+	pinsMaxAge = 7 * 24 * time.Hour
+)
+
+// loadPins restores the session pins of the previous run, so a restart does not move a conversation to
+// another model (ADR 0028).
+func (a *App) loadPins() {
+	if a.St == nil || a.Rt == nil {
+		return
+	}
+	var saved []route.PinSnapshot
+	if raw := a.St.KVGet(pinsKey); raw != "" {
+		_ = json.Unmarshal([]byte(raw), &saved)
+	}
+	n, v := a.Rt.RestorePins(saved, time.Now(), pinsMaxAge)
+	a.pinVersion.Store(v)
+	if n > 0 {
+		a.Logf("pins: restored %d session pins", n)
+	}
+}
+
+// savePins writes the session pins when they changed since the last write. Like the effort facts it is
+// called from a timer and on close, never from the request path.
+func (a *App) savePins() {
+	if a.St == nil || a.Rt == nil {
+		return
+	}
+	pins, v := a.Rt.PinState()
+	if v == a.pinVersion.Load() {
+		return
+	}
+	cut := time.Now().Add(-pinsMaxAge)
+	kept := pins[:0]
+	for _, p := range pins {
+		if p.At.After(cut) {
+			kept = append(kept, p)
+		}
+	}
+	raw, err := json.Marshal(kept)
+	if err != nil {
+		return
+	}
+	a.St.KVSet(pinsKey, string(raw))
+	a.pinVersion.Store(v)
 }
 
 // SetSecret stores an upstream key value and reloads the pool.
@@ -510,9 +562,11 @@ func (a *App) Start(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				a.saveEffortFacts()
+				a.savePins()
 				return
 			case <-t.C:
 				a.saveEffortFacts()
+				a.savePins()
 			}
 		}
 	}()
@@ -523,6 +577,7 @@ func (a *App) Close() error {
 	// The learned facts are written here as well as on the timer, so a planned
 	// restart does not lose what the gateway learned since the last tick.
 	a.saveEffortFacts()
+	a.savePins()
 	return a.St.Close()
 }
 
