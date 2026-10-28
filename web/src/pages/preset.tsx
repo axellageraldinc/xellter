@@ -245,15 +245,20 @@ export function PresetCard({
                       <BillingBadge billing={c.billing} />
                     </TD>
                     <TD className="tabular text-right">{c.score.toFixed(3)}</TD>
-                    <TD className="tabular text-xs text-text-muted" data-testid="model-stat">
+                    <TD className="tabular text-xs whitespace-nowrap text-text-muted" data-testid="model-stat">
                       {(() => {
                         const st = preset.stats?.[c.model]
                         if (!st) return 'no traffic'
-                        const wait = st.ttft_p50_ms ? `${secs(st.ttft_p50_ms)} median first token` : 'no stream'
-                        return `${wait} · ${st.fail_pct}% failed · ${st.requests} req`
+                        return (
+                          <span title="Median wait for the first token of the streamed answers, share of failed requests and requests, last 24 hours">
+                            <span className="font-medium text-text">{st.ttft_p50_ms ? secs(st.ttft_p50_ms) : 'no stream'}</span>
+                            <br />
+                            {st.fail_pct}% failed · {st.requests} req
+                          </span>
+                        )
                       })()}
                     </TD>
-                    <TD className="max-w-xs text-xs text-text-muted">{c.reason}</TD>
+                    <TD className="max-w-[12rem] truncate text-xs text-text-muted" title={c.reason}>{c.reason}</TD>
                   </TR>
                 ))}
               </TBody>
