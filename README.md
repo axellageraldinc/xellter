@@ -70,6 +70,12 @@ carries the sticky-session toggle, next to its optimization and its pool.
 
 ![A client and its presets](docs/screenshots/client.png)
 
+**Out for now** — on a preset card: the models that were taken out of that preset for being slow or unreliable,
+with the reason and its numbers, when each one comes back, and how often in a row it went out; under it, **Taken out
+before** keeps the history as a timeline. The screenshot is made from demo data.
+
+![Models taken out of a preset](docs/screenshots/out-for-now.png)
+
 **Usage** — per model, preset, key or client, with the price of each and the split between plan,
 pay-as-you-go and free.
 
