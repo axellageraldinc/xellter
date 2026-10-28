@@ -253,7 +253,7 @@ reason; every model left out carries a reason too. `xellter explain` prints the 
 
 ## Routing (`internal/route`)
 
-Five rules, in this order.
+Five rules, in this order. (The same behaviour told from the owner's side: [model-rotation.md](model-rotation.md).)
 
 1. **Session pin.** A sticky preset (the default, ADR 0025) pins the session to one model: the first
    successful request picks the model, and every later request of that session uses it, **whatever effort

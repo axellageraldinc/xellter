@@ -6,6 +6,28 @@ xellter picks a real model from that preset's pool, keeps one model per conversa
 owner says otherwise, retries a failure once, and takes a model out of that preset when it errs, is
 unreliable or is slow. One static Go binary, SQLite, no runtime dependencies.
 
+## Models that look after themselves
+
+You choose the pool; xellter keeps it healthy. It measures every model of every preset on your
+app's own traffic and rotates around the ones that misbehave, so you do not have to watch which
+model is slow today.
+
+- **Spread.** New conversations go round-robin over the preset's best ten; the rest of the pool is a
+  reserve that steps in when a model drops out.
+- **Fail over in the request.** An error is retried once, then the next model is tried. A streamed
+  answer that sends no first token in 15 s is cancelled and moved on, and the caller never sees the stall.
+- **Out of the preset when it does badly.** Three errors in a row, a median first token above 10 s, or
+  40 % of requests failing take a model out of *that client's preset*, never out of the others and never
+  empty (the last two stay).
+- **Back by itself.** After 30 minutes it serves again on a clean record; if it is bad again it goes out
+  for twice as long. It survives a restart.
+- **A conversation does not stay on a bad model.** A pinned model that is taken out, or slow for 2 of the
+  conversation's last 3 requests, hands the conversation to another model.
+- **You can see it.** The panel lists who is out, the reason with its numbers, when they return, and the
+  median first token and failure share of every model over 24 hours.
+
+The full picture, with every number and where to change it: [docs/model-rotation.md](docs/model-rotation.md).
+
 ## The three optimizations
 
 A preset is a **pool of models** plus **one optimization**, and the preset has a name of your own.
@@ -36,15 +58,6 @@ nothing there.
 - **Routing.** Round-robin over the preset's top 10, session pinning (one model per conversation),
   retry once on a retriable error, then the next model. Rankings rebuild every 5 minutes, after each
   catalog sync, and from the panel's Recalculate button.
-- **A model that does badly goes out of the preset.** Per client and preset: three errors in a row in
-  an hour take it out for 12 hours; a median first token above 10 s, or 40 % of its requests failing,
-  take it out for 30 minutes (ADR 0029). It comes back on its own with a clean record; if it is bad
-  again it goes out for twice as long. A preset is never emptied: the last two models stay in. The
-  panel lists who is out, why and when they return, keeps the history, and shows the median first token and
-  the failure share of every model of the preset over the last 24 hours.
-- **A silent stream fails over.** A streamed chat answer that sends no first token within 15 s (plus
-  1 s per 10 000 prompt tokens) is cancelled and the next model is tried. A conversation whose pinned
-  model is slow for two of its last three requests moves to another model.
 - **Sticky session, per preset.** A preset keeps one model for the whole conversation, so the
   provider's prompt cache stays warm — that is the default. Turn the toggle off on a preset that
   should spread its traffic: every turn is routed again, and the whole pool is used. One client can
@@ -367,6 +380,7 @@ public name serves `/v1/*` and `/healthz` and returns 404 for everything else.
 
 | File | Contents |
 |---|---|
+| [docs/model-rotation.md](docs/model-rotation.md) | how xellter keeps a pool healthy: rotation, fail-over, taking models out and bringing them back |
 | [docs/architecture.md](docs/architecture.md) | components, request flow, ranking maths, routing, endpoints, panel |
 | [docs/configuration.md](docs/configuration.md) | every config key, and what is refused |
 | [docs/operations.md](docs/operations.md) | deploy, Tailscale, runbook, what to do when models are slow or failing, backups, security model |
