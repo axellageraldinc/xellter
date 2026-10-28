@@ -510,6 +510,24 @@ func (r *Router) PinOf(client, preset, session string) (string, time.Time) {
 	return "", time.Time{}
 }
 
+// PinFor finds the pin of a session when the preset is not known: the preset and the model. It is how a
+// session that is still answering its first request can be asked which model it is on, before the request
+// log has a row for it.
+func (r *Router) PinFor(client, session string) (preset, model string, at time.Time) {
+	r.smu.Lock()
+	defer r.smu.Unlock()
+	prefix, suffix := client+"|", "|"+session
+	for k, p := range r.pins {
+		if strings.HasPrefix(k, prefix) && strings.HasSuffix(k, suffix) {
+			mid := k[len(prefix) : len(k)-len(suffix)]
+			if len(k) >= len(prefix)+len(suffix) && !strings.Contains(mid, "|") {
+				return mid, p.model, p.at
+			}
+		}
+	}
+	return "", "", time.Time{}
+}
+
 func (r *Router) pinned(client, preset, session string) string {
 	id, _ := r.PinOf(client, preset, session)
 	return id

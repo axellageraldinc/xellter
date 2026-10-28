@@ -10,6 +10,7 @@ import (
 
 	"github.com/axellageraldinc/xellter/internal/catalog"
 	"github.com/axellageraldinc/xellter/internal/config"
+	"github.com/axellageraldinc/xellter/internal/store"
 	"github.com/axellageraldinc/xellter/internal/upstream"
 )
 
@@ -217,9 +218,15 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request, cl *config.Clie
 		writeErr(w, r.URL.Path, 500, "internal_error", "cannot read the request log", 0)
 		return
 	}
+	// A request is logged when it ends, but the session is pinned as soon as the model starts answering. A
+	// session still on its first reply has a pin and no log yet; the pin is enough to say which model it is on.
 	if u == nil {
-		writeErr(w, r.URL.Path, 404, "no_session", "this session has no traffic yet", 0)
-		return
+		preset, pinned, _ := s.rt.PinFor(cl.Name, id)
+		if pinned == "" {
+			writeErr(w, r.URL.Path, 404, "no_session", "this session has no traffic yet", 0)
+			return
+		}
+		u = &store.SessionUsage{Preset: preset, LastModel: pinned, Models: []string{pinned}}
 	}
 	out := sessionInfo{
 		Object: "session", Session: id, Client: cl.Name, Preset: u.Preset,

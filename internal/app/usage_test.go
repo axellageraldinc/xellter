@@ -357,3 +357,24 @@ func TestUsageByKeyAndByModel(t *testing.T) {
 		t.Fatalf("another client must not see the traffic: %s", body)
 	}
 }
+
+// A session is pinned when its model starts answering, but its request is logged when the answer ends. A
+// caller that asks in between (a chat showing the model name during the first reply) must get the pin.
+func TestSessionEndpointNamesTheModelBeforeTheFirstReplyIsLogged(t *testing.T) {
+	e := setup(t, nil)
+	e.a.Rt.Pin("babu", "text", "s-first", "free-a:free", time.Now())
+	resp, body := e.get(t, e.keyCl, "/v1/session?session=s-first")
+	if resp.StatusCode != 200 {
+		t.Fatalf("a pinned session with no log yet must answer: %d %s", resp.StatusCode, body)
+	}
+	var s struct {
+		Model  string `json:"model"`
+		Preset string `json:"preset"`
+	}
+	if err := json.Unmarshal([]byte(body), &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.Model != "free-a:free" || s.Preset != "text" {
+		t.Fatalf("got model %q preset %q", s.Model, s.Preset)
+	}
+}
