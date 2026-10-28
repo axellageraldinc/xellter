@@ -98,6 +98,23 @@ export function ClientDetailPage() {
             <RefreshCw />
             Recalculate
           </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={async () => {
+              if (!confirm(`Delete client “${d.client.name}”? Its presets, kenari keys and xellter key are removed. Usage history stays.`)) return
+              try {
+                await api('clients', { method: 'POST', body: { action: 'delete', name: d.client.name } })
+                toast.push('Client deleted')
+                nav('/')
+              } catch (e) {
+                toast.push((e as Error).message, 'bad')
+              }
+            }}
+          >
+            <Trash2 />
+            Delete
+          </Button>
         </>
       }
     >

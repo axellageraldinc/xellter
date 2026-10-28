@@ -322,7 +322,7 @@ func (h *Handler) alerts(snap *catalog.Snapshot, clients []clientRow, accts []up
 		}
 		for _, p := range c.Presets {
 			switch {
-			case p.Pool == 0:
+			case p.Pool == 0 && p.Serving+p.Rejected+p.Unranked == 0: // free, promo and local models join the pool on their own
 				add("info", fmt.Sprintf("%s: preset %q has no models picked yet.", c.Name, p.Name), c.Name)
 			case p.Top == "" && len(c.Keys) > 0:
 				add("warn", fmt.Sprintf("%s: preset %q has no usable model right now.", c.Name, p.Name), c.Name)
