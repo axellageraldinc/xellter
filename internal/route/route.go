@@ -158,6 +158,10 @@ func (r *Router) Recompute(now time.Time) {
 	r.stickyMu.Unlock()
 }
 
+// Pool is the models a preset can serve right now: the owner's list plus the free and promo models xellter
+// added on its own (ADR 0022).
+func (r *Router) Pool(client, preset string) []string { return r.effectivePool(client, preset) }
+
 // effectivePool returns the cached pool of a preset.
 func (r *Router) effectivePool(client, preset string) []string {
 	r.poolsMu.RLock()

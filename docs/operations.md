@@ -12,7 +12,7 @@ echo 'kn-...' | ./bin/xellter key add -client demo -name main      # a kenari ke
 The same can be done in the panel (Clients, Add client, Add key). `admin init -from-record <file>` reuses an existing login record instead of generating one.
 
 ## systemd (user)
-A user systemd unit `xellter.service` runs `bin/xellter serve -config xellter.yaml` from the project directory. After editing: `systemctl --user daemon-reload`. Logs: `journalctl --user -u xellter -f`.
+A user systemd unit `xellter.service` (not shipped in the repository) runs `bin/xellter serve -config xellter.yaml` from the project directory. After editing: `systemctl --user daemon-reload`. Logs: `journalctl --user -u xellter -f`.
 
 A second pair, `xellter-backup.service` and `xellter-backup.timer`, takes a daily snapshot (see
 "Backups" below). The timer is enabled and running; it survives reboots because it is
@@ -36,12 +36,19 @@ The tunnel (`~/.cloudflared/xellter.yml`, `cloudflared-xellter.service`) points
 
 ## Day to day
 - **Overview:** health banner with warnings you can act on, 24 h numbers, plan budget and balance, per-client summary.
-- **Clients -> a client:** its kenari keys (add, replace, remove, settings), its presets (what they serve now, "Optimise for", requirements; "Why this order?" explains the ranking), its spending limit.
+- **Clients -> a client:** its kenari keys (add, replace, remove, settings) and its presets: the pool, the optimization, the sticky toggle, "Serving now" and why the order is what it is, and **Out for now** (the models taken out of the preset, why, and when they return). Spend is shown, never capped.
 - **Add a client:** Clients, Add client. The xellter key is shown once. Then Add key on the client page; presets appear a few seconds after the key is checked.
 - **Rotate a client key:** client page, New xellter key (the old key dies immediately).
 - **Plan numbers:** Overview, Kenari plan & balance, Add account key (a full-access kenari key). Without it the plan budget is estimated.
 - **Usage:** per client, preset, model or kenari key, with a request list; filter by client and period.
 - **A client got `503`/`429`:** the Overview banner names the key or account that is paused and why; the client page has "Re-check".
+
+## Restarts
+
+State that survives a restart: the configuration, the request log, the learned leaderboard rows, the
+**session pins** (so a restart does not move conversations, ADR 0028) and the effort refusals. State
+that does not: evictions and health records, round-robin counters, key cooldowns and breakers. A restart
+forgives every model and key, which is the safe direction.
 
 ## Backups
 
@@ -87,11 +94,64 @@ The service still starts: a warning beats a gateway that refuses to come up. The
 time the database was created, so the loss is dated. Restore the newest copy from
 `xellter-backups/` with the steps above.
 
-## When a model fails
-The ranking is also the fallback order. For every request xellter builds up to `resilience.max_attempts` (4) attempts, best first, at most two keys per model, and moves to the next one **before the first byte reaches the client** when:
-- the model or key answers 5xx, 408, 402 (no balance), 429 (rate or quota limit), 401/403 (key rejected), or "model not allowed/not found";
-- the connection fails or nothing arrives within `kenari.first_byte_timeout_s` (streaming; non-streaming gets 3x).
-The failed model/key is paused with growing back-off (and a circuit breaker after repeated errors), so the next request does not try it again at once. A genuine client mistake (400 for a bad body) is returned as is: another model would fail the same way. Not covered: a stream that breaks **after** the first byte (the client has already received part of the answer), and a model that answers 200 with a poor answer. Lower `first_byte_timeout_s` if you prefer faster fallback over patience with slow reasoning models.
+## When a model fails or is slow
+
+For every request xellter builds a list of attempts, one per usable (model, key), in ring order: the
+session's pinned model first, then the preset's models in turn. It moves to the next model **before the
+first byte reaches the client** when:
+
+- the model or key answers 5xx, 408, 402 (no balance), 429 (rate or quota limit), 401/403 (key rejected),
+  or "model not allowed / not found". A retriable failure retries the same model once first;
+- the connection fails, or the response headers do not arrive within `kenari.first_byte_timeout_s`;
+- a **streamed chat** answer sends headers but no first token within `routing.first_token_timeout_s`
+  (15 s, plus 1 s per 10 000 prompt tokens). Some free upstreams queue for a minute before they say
+  anything; this is what moves the caller on. The last model that can be tried is never timed out.
+
+A genuine client mistake (400 for a bad body) is returned as is: another model would fail the same way.
+Not covered: a stream that breaks **after** the first byte, and a model that answers 200 with a poor
+answer.
+
+**Taking a model out of a preset.** Per client and preset (ADR 0020, 0029). All of these keep the model
+out of **that preset only**; the ring skips it and the next best model takes its place at once:
+
+| Why | Rule | Out for |
+|---|---|---|
+| errors | `evict_errors` (3) failures in a row inside `evict_window_minutes` (60) | `evict_cooldown_minutes` (720) |
+| unreliable | `fail_percent` (40) of its last `health_min_requests` (6) or more requests failed | `quarantine_minutes` (30), doubling |
+| slow | median first token above `slow_first_token_s` (10) over the same requests | `quarantine_minutes` (30), doubling |
+
+A model that comes back is judged afresh, on half as many requests. If it is bad again it goes out for
+twice as long, up to `evict_cooldown_minutes`; a healthy judgement resets the doubling. A preset is
+never emptied: the last two models stay in whatever their record. Evictions and records are in memory,
+so a restart forgives every model; a model that is really bad is taken out again within a few requests.
+
+**A conversation leaves a slow model.** If the model a session is pinned to waits longer than
+`repin_first_token_s` (15) for two of the session's last three requests, the pin is dropped and the
+model goes to the end of that session's order. The next model that answers becomes the pin.
+
+### Runbook: replies are slow
+
+1. Open the client's preset in the panel. **Out for now** shows who has already been taken out and why.
+2. The panel does not chart latency yet. The recent requests (`GET /api/requests`, behind the login) carry
+   `latency_ms` and `ttft_ms` per request and per model: a model with a long first-token wait that has
+   not been taken out is either under `health_min_requests` or under the limit. Lower
+   `slow_first_token_s` or `health_min_requests` for a stricter rule.
+3. Remove a model that is always slow from the preset's pool in the panel. The free models of the
+   category are added to every pool on their own (ADR 0022) and cannot be removed from one preset; the
+   health rules are what keep the slow ones out.
+4. The reasoning effort a client asks for is forwarded as it is and does not choose a model (ADR 0028).
+   Most models ignore `none`; a model that refuses the field is served without it. If a client is slow
+   because a model thinks for thousands of tokens, the fix is the pool, not the effort.
+5. `journalctl --user -u xellter -f` prints one line each time a model goes out
+   (`client/model out of preset p: slow: median first token 12.3s over its last 7 requests (limit 10s)`)
+   and each time a session leaves a model.
+
+### Runbook: a conversation keeps changing model
+
+Check that the client sends a session id (`X-Xellter-Session`, `X-Session-Id` or `prompt_cache_key`). Without
+one xellter identifies the conversation by its first user message (ADR 0030); a client that rewrites that
+message (for example after compressing its history) starts a new session. `GET /v1/session?session=<id>`
+shows the live pin and every model the session has used. Also check that the preset is sticky.
 
 ## Security model
 - Client keys: random 192-bit, stored as sha256, shown once; a key belongs to one client.

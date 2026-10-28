@@ -203,35 +203,39 @@ func (s *Server) listModels(w http.ResponseWriter, r *http.Request, cl *config.C
 	var data []item
 	for _, n := range presets {
 		sh := cl.Presets[n]
-		desc := sh.Optimization + " over " + fmt.Sprint(len(sh.Models)) + " models"
+		// The pool is the owner's list plus the free and promo models added on its own (ADR 0022): that is
+		// what can answer, so that is what the preset advertises.
+		pool := s.rt.Pool(cl.Name, n)
+		if len(pool) == 0 {
+			pool = sh.Models
+		}
+		desc := sh.Optimization + " over " + fmt.Sprint(len(pool)) + " models"
 		it := item{ID: n, Object: "model", Created: s.startedAt.Unix(), OwnedBy: "xellter", Modality: sh.Category,
 			Description: desc, Preset: true}
-		// A preset advertises what its pool can do: the largest context any model in
-		// it has, and whether every model in it supports a feature.
+		// A preset advertises what its pool can do: the largest context any model in it has, and whether
+		// every model in it supports a feature.
 		//
-		// The largest, not the smallest (ADR 0026). A preset is a name that may resolve
-		// to any model in it, so the window it publishes is a promise about the
-		// conversation the client may keep. Publishing the smallest window made clients
-		// compress their history early, for a window the model actually serving them
-		// never had. A conversation that outgrows the served model's real window is
-		// answered with a context-length error, which the client handles by
-		// compressing: the right outcome, for the right reason.
+		// The largest, not the smallest (ADR 0026). A preset is a name that may resolve to any model in it, so
+		// the window it publishes is a promise about the conversation the client may keep. Publishing the
+		// smallest window made clients compress their history early, for a window the model actually serving
+		// them never had. A conversation that outgrows the served model's real window is answered with a
+		// context-length error, which the client handles by compressing: the right outcome, for the right reason.
 		if snap := s.cat.Snapshot(); snap != nil {
-			for i, id := range sh.Models {
+			first := true
+			for _, id := range pool {
 				m := snap.Models[id]
 				if m == nil {
 					continue
 				}
-				if i == 0 || m.Context > it.ContextLength {
-					it.ContextLength = m.Context
-				}
-				if i == 0 {
+				it.ContextLength = max(it.ContextLength, m.Context)
+				if first {
 					it.ToolCall, it.Vision, it.Reasoning = m.ToolCall, m.Vision, m.Reasoning
-				} else {
-					it.ToolCall = it.ToolCall && m.ToolCall
-					it.Vision = it.Vision && m.Vision
-					it.Reasoning = it.Reasoning && m.Reasoning
+					first = false
+					continue
 				}
+				it.ToolCall = it.ToolCall && m.ToolCall
+				it.Vision = it.Vision && m.Vision
+				it.Reasoning = it.Reasoning && m.Reasoning
 			}
 		}
 		data = append(data, it)
@@ -660,6 +664,8 @@ type sendResult struct {
 	cancel  context.CancelFunc
 	started time.Time
 	ttfb    time.Duration
+	// timedOut is set when the first-byte timer, not the caller, cancelled the request.
+	timedOut *atomic.Bool
 }
 
 type failure struct {
@@ -683,7 +689,8 @@ func (s *Server) send(r *http.Request, at route.Attempt, payload []byte, ctype s
 	case !stream:
 		limit *= 3
 	}
-	timer := time.AfterFunc(limit, cancel)
+	var timedOut atomic.Bool
+	timer := time.AfterFunc(limit, func() { timedOut.Store(true); cancel() })
 	url := cfg.Kenari.BaseURL + r.URL.Path
 	if r.URL.RawQuery != "" {
 		url += "?" + r.URL.RawQuery
@@ -699,7 +706,7 @@ func (s *Server) send(r *http.Request, at route.Attempt, payload []byte, ctype s
 	t0 := s.Now()
 	resp, err := s.hc.Do(req)
 	timer.Stop()
-	return sendResult{resp: resp, err: err, cancel: cancel, started: t0, ttfb: s.Now().Sub(t0)}
+	return sendResult{resp: resp, err: err, cancel: cancel, started: t0, ttfb: s.Now().Sub(t0), timedOut: &timedOut}
 }
 
 var forwardHeaders = []string{"Accept", "Anthropic-Version", "Anthropic-Beta", "Openai-Beta", "Openai-Organization"}
@@ -719,6 +726,11 @@ func (s *Server) fail(at route.Attempt, res sendResult, cfg *config.Config) *fai
 		// A request the caller cancelled is not the key's failure and not the
 		// model's: the client went away. The key keeps its state.
 		if errors.Is(res.err, context.Canceled) {
+			if res.timedOut != nil && res.timedOut.Load() {
+				// The upstream did not answer in time. That is the model's slowness, not the key's, and the same
+				// model will not do better a second later: the next one is tried at once.
+				return &failure{status: 0, reason: fmt.Sprintf("no response within %ds", int(now.Sub(res.started)/time.Second)), retry: false}
+			}
 			return &failure{status: 0, reason: "cancelled by the client", retry: false}
 		}
 		v := at.Key.Failure(at.Model.ID, 0, nil, 0, now)

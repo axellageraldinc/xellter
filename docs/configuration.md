@@ -15,7 +15,9 @@ server:   { listen, data_dir, secrets_file, admin_hosts, max_body_mb, log_retent
             trusted_proxy, session_hours, auth_record }
 kenari:   { base_url, sync_minutes, user_agent, first_byte_timeout_s, music_timeout_s, account_key_env }
 routing:  { rank_refresh_minutes, top_models, evict_errors, evict_window_minutes,
-            evict_cooldown_minutes, avoid_sunset_days }
+            evict_cooldown_minutes, avoid_sunset_days,
+            first_token_timeout_s, slow_first_token_s, fail_percent, health_min_requests,
+            quarantine_minutes, repin_first_token_s }
 clients[]:
   - { name, enabled, purpose, key_hash, key_hint, note,
       keys[]:    { name, key_env },
@@ -43,28 +45,42 @@ clients[]:
 | `base_url` | `https://kenari.id` | upstream gateway |
 | `sync_minutes` | `10` | catalog refresh interval |
 | `user_agent` | `xellter/1.0` | sent upstream; kenari blocks the default Go UA |
-| `first_byte_timeout_s` | `60` | per attempt; non-streaming requests get 3x |
+| `first_byte_timeout_s` | `60` | how long an attempt may wait for the upstream's response headers; non-streaming requests get 3x. A timeout moves to the next model at once. See also `routing.first_token_timeout_s`, which is about the first token of a stream |
 | `music_timeout_s` | `900` | music generation timeout |
 | `account_key_env` | `KENARI_ACCOUNT_KEY` | secret name of an optional full-access key. It only reads plan, usage and balance, never serves a request. Must look like `UPPER_SNAKE` |
 
 ## routing
 
-The six knobs that survived the rewrite. Everything a preset or a model decides is not here: the
-optimization and the stickiness live on the preset, and RTK, retry-once, key cooldown, the breaker
-and the reference request are constants. The panel does not edit `routing`: change it in this file or
-through `PUT /api/config`.
+Everything a preset or a model decides is not here: the optimization and the stickiness live on the
+preset, and RTK, retry-once, key cooldown, the breaker and the reference request are constants. The
+panel does not edit `routing`: change it in this file (the Config tab) or through `PUT /api/config`.
+
+**Ranking and eviction after errors**
 
 | key | default | meaning |
 |---|---|---|
-| `rank_refresh_minutes` | `5` | rebuild every ranking on this interval; also rebuilt after every catalog sync and every config change. Keep it >= 1: validation accepts `0` (and clamps a negative to it), but the refresh loop cannot start with a zero interval and the process panics at start-up |
+| `rank_refresh_minutes` | `5` | rebuild every ranking on this interval; also rebuilt after every catalog sync and every config change. `0` turns the timer off (rankings then rebuild only on a sync, a config change or Recalculate). The interval is read at start-up |
 | `top_models` | `10` | how many models a preset routes against; 1..50 |
-| `evict_errors` | `3` | failures that take a model out of a preset |
-| `evict_window_minutes` | `60` | the window those failures are counted in; >= 1 |
-| `evict_cooldown_minutes` | `720` | how long the model stays out of that preset; >= 1 |
+| `evict_errors` | `3` | failures in a row that take a model out of a preset |
+| `evict_window_minutes` | `60` | the window those failures are counted in, and the window `health_min_requests` and the failure rate are counted in; >= 1 |
+| `evict_cooldown_minutes` | `720` | how long a model stays out after errors, and the most any cooldown can grow to; >= 1 |
 | `avoid_sunset_days` | `3` | a model retiring sooner than this is rejected when ranking |
 
-There is no way to switch the timer off: `0` is not a working value (see above). Rankings are always
-rebuilt after a catalog sync, after a config change and from the panel's Recalculate button.
+**Speed and reliability (ADR 0029).** A model is judged per client and preset on its own recent requests.
+A zero or missing value takes the default.
+
+| key | default | meaning |
+|---|---|---|
+| `first_token_timeout_s` | `15` | a **streamed chat** answer that sends no first token within this many seconds (plus one second per 10 000 prompt tokens, at most 60) is cancelled and the next model is tried. It counts as a failed request in the model's record. The last model that can still be tried is never timed out. `-1` turns it off |
+| `slow_first_token_s` | `10` | a model whose **median** wait for the first token is above this is taken out of the preset |
+| `fail_percent` | `40` | a model that failed this share of its requests (5xx, network error, first-token timeout; not 4xx, not a caller that left) is taken out of the preset. 1..100 |
+| `health_min_requests` | `6` | requests inside the window before a model is judged at all. One bad answer never takes a model out. A model coming back from a cooldown is judged on half as many |
+| `quarantine_minutes` | `30` | how long a slow or unreliable model stays out the first time. Each time it comes back and is bad again the time doubles, up to `evict_cooldown_minutes`; a healthy judgement starts it over |
+| `repin_first_token_s` | `15` | a session whose pinned model waited longer than this for two of the session's last three requests leaves that model (sticky presets only) |
+
+A model is out of **one preset of one client** only. A preset is never emptied: a model is not taken out
+if fewer than two others would remain. The panel's preset card lists who is out, the reason with its
+numbers and when they return; the same line is in the log.
 
 ## clients[]
 
@@ -113,14 +129,14 @@ client holds at most one preset per category, so a second preset of a kind is re
 | `audio_speech` | `tts` | `/v1/audio/speech` |
 | `audio_transcription` | `stt` | `/v1/audio/transcriptions` |
 | `music` | `music` | `/v1/music` |
-| `systemone` | `systemone` | `/v1/models?modality=systemone` |
+| `systemone` | `systemone` | `/v1/systemone`, and the chat paths |
 
 | key | meaning |
 |---|---|
 | `category` | the kind of model the preset serves; required for a name that is not one of the suggested ones. A config written before ADR 0021 still loads: the old names keep their meaning |
 | `optimization` | `cheapest` \| `balanced` \| `best_quality`; empty means `balanced` |
 | `models` | the pool: explicit catalog model ids, no duplicates, no blanks. The optimization only orders what is listed here |
-| `sticky` | `true` keeps one model per session for the life of the session; `false` routes every turn again. Absent means `true`, so a config written before ADR 0025 keeps the behaviour it had |
+| `sticky` | `true` keeps one model per session for the life of the session (it moves when the model is taken out, or is slow for the session, ADR 0029); `false` routes every turn again. Absent means `true`, so a config written before ADR 0025 keeps the behaviour it had |
 
 Every free model and every model whose promo is running is in the pool of every preset of that
 category, whether it is listed here or not (ADR 0022). The added models are the ones the client's

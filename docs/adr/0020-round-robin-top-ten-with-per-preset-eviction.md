@@ -1,6 +1,7 @@
 # 0020 — Round-robin over the top ten, with per-preset eviction
 
 - Status: Accepted
+- Amended by ADR 0029 (slow and unreliable models) and ADR 0028 (pins survive a restart).
 - Date: 2026-10-26
 - Deciders: maintainer
 - Supersedes: the sticky/round-robin-band rules of ADR 0003

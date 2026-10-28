@@ -1,6 +1,9 @@
 # xellter rewrite — plan
 
-Status: accepted, in progress. Owner: maintainer. Date: 2026-10-26.
+Status: **historical.** The rewrite shipped; later ADRs (0020 to 0030) changed parts of it: the eviction rules
+and the reserve (0020, 0029), per-preset stickiness (0025), the effort (0026, 0028), pins and session
+identity (0028, 0030). Read `docs/architecture.md` for how xellter works now.
+Original status: accepted, in progress. Owner: maintainer. Date: 2026-10-26.
 Supersedes the ranking and routing parts of ADR 0003, 0010, 0013, 0016 and the panel rules of ADR 0012, 0014.
 
 ## Why

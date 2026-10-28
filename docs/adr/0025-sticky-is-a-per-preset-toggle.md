@@ -1,6 +1,7 @@
 # ADR 0025 — Stickiness is a per-preset toggle
 
 - Status: Accepted
+- Amended by ADR 0028 and 0029: pins survive a restart and a session leaves a slow model.
 - Date: 2026-10-27
 - Deciders: maintainer
 - Amends: ADR 0020 (the session pin)

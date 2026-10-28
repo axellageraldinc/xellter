@@ -32,9 +32,10 @@ Usage:
   xellter serve        [-config xellter.yaml]
   xellter check        [-config xellter.yaml]        validate the config
   xellter migrate      [-config f] [-write]           convert a pre-rewrite config to the current shape
-  xellter explain      [-config f] [-preset name]    print the current ranking and why (fetches the catalog, probes keys)
-  xellter admin init   [-config f] [-username u] [-from-record file] [-credentials-out file]
-  xellter client add   [-config f] -name N [-presets a,b] [-passthrough glob,glob] [-upstreams u1,u2] [-budget IDR] [-out file]
+  xellter explain      [-config f] [-client c] [-preset name]  print the current ranking and why (fetches the catalog, probes keys)
+  xellter admin init   [-config f] [-username u] [-from-record file] [-credentials-out file] [-force]
+  xellter client add   [-config f] -name N [-purpose general|coding|agentic|vision|bulk] [-out file]
+  xellter key add      [-config f] -client N -name K     read the kenari key from stdin
   xellter version
 `
 

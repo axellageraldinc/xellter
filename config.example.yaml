@@ -23,6 +23,14 @@ routing:
   evict_window_minutes: 60        # ... counted inside this window
   evict_cooldown_minutes: 720     # ... and the model is skipped for this long
   avoid_sunset_days: 3            # a model retiring sooner than this is not offered
+  # Speed and reliability (ADR 0029). A model that is slow or fails too often goes out of the
+  # preset that saw it, for a while, and is measured again when it comes back.
+  first_token_timeout_s: 15       # a streamed chat answer silent this long (+1 s per 10k prompt tokens) moves to the next model; -1 = off
+  slow_first_token_s: 10          # median wait for the first token above this takes a model out
+  fail_percent: 40                # this share of failed requests takes a model out
+  health_min_requests: 6          # requests inside the window before a model is judged
+  quarantine_minutes: 30          # first time out; doubles each time it comes back and fails again (up to evict_cooldown_minutes)
+  repin_first_token_s: 15         # a pinned model this slow for 2 of a session's last 3 requests loses the session
 
 # A client is one app that calls xellter. It has its own kenari keys, one purpose
 # that decides how its text preset is scored, and at most one preset per category.

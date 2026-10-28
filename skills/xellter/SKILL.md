@@ -149,11 +149,17 @@ one-line reason ("score 0.612 (cost 532.00, quality 0.83, plan) from text — ba
 quality"). The order decides who goes first in the round-robin and who serves after an eviction.
 Every model in the list is used in turn; a sticky preset keeps a session on the model it is pinned to.
 
-**Out for now** — models evicted from this preset, with the moment each returns. Three failed attempts
-inside `evict_window_minutes` take a model out of **this preset only** for
-`evict_cooldown_minutes`; a session pinned to it loses its pin and moves on the next request. A
-success clears the record, so the rule is three failures in a row, not three ever. Evictions are in
-memory: a restart forgives a model.
+**Out for now** — models taken out of this preset, each with the reason (with its numbers) and the
+moment it returns. **This preset of this client only.** Three rules (ADR 0020, 0029):
+
+- *errors*: `evict_errors` failures in a row inside `evict_window_minutes` — out for `evict_cooldown_minutes`;
+- *unreliable*: `fail_percent` of its last `health_min_requests`+ requests failed — out for `quarantine_minutes`;
+- *slow*: the median wait for the first token is above `slow_first_token_s` — out for `quarantine_minutes`.
+
+A model that comes back is judged afresh on half as many requests; if it is bad again the time out
+doubles (up to `evict_cooldown_minutes`). A preset is never emptied: the last two models stay in. A
+session pinned to a model that goes out moves on the next request. Evictions are in memory: a restart
+forgives every model.
 
 **Left out** — every model in the pool that is not serving, grouped by reason: not in the kenari
 catalog, wrong endpoint, subscriber-only without a plan, sunsets soon, no key may call it, no quality
@@ -172,12 +178,18 @@ refresh interval on a client page), so a change is a config edit or a `PUT /api/
 
 | Knob | Default | Change it when |
 |---|---|---|
-| `rank_refresh_minutes` | 5 | the catalog or the leaderboards move faster than the order does. Never set it to 0: validation accepts 0 but the refresh loop panics at start-up with a non-positive interval |
+| `rank_refresh_minutes` | 5 | the catalog or the leaderboards move faster than the order does. `0` turns the timer off (rankings still rebuild on a sync, a config change and Recalculate) |
 | `top_models` | 10 | the pool is large and only a few models should serve; lower it to concentrate traffic, raise it to spread it (1..50) |
 | `evict_errors` | 3 | a provider is flaky and you want it out sooner (2) or want more tolerance (5) |
 | `evict_window_minutes` | 60 | the failures are spread over a longer period than an hour |
 | `evict_cooldown_minutes` | 720 | a model should come back sooner than 12 h, or stay out longer |
 | `avoid_sunset_days` | 3 | you want to stop using models that retire earlier (5) or keep them until the end (0) |
+| `first_token_timeout_s` | 15 | a streamed answer stays silent this long (+1 s per 10k prompt tokens) before the next model is tried; `-1` is off |
+| `slow_first_token_s` | 10 | replies are slow: lower it to take slow models out sooner; raise it if a client sends huge prompts that are slow everywhere |
+| `fail_percent` | 40 | a model fails this share of its requests before it is taken out |
+| `health_min_requests` | 6 | requests needed before a model is judged |
+| `quarantine_minutes` | 30 | first time a slow or unreliable model is out; doubles on each repeat |
+| `repin_first_token_s` | 15 | a sticky session leaves a model that is this slow for 2 of its last 3 requests |
 
 `retry_once` is not a knob: a retriable failure (5xx, timeout, 429, network) always retries the same
 model once, then moves to the next model.
@@ -235,7 +247,7 @@ curl -s "$BASE/v1/usage/models?range=24h&preset=text" -H "Authorization: Bearer 
 ```
 
 Session ids come from `X-Xellter-Session`, `X-Session-Id`, `X-Claude-Code-Session-Id`, the body's
-`prompt_cache_key` or `user`, or a hash of the opening messages. `GET /v1/session` answers 404
+`prompt_cache_key` or `user`, or a hash of the first user message (ADR 0030). `GET /v1/session` answers 404
 `no_session` until the session has traffic, so a client can tell "not started" from "unknown".
 
 ## Get the current model
@@ -255,7 +267,7 @@ Returns pinned model, vendor, billing, context, tokens and cost for that session
 sqlite3 ~/apps/xellter/data/xellter.db \
   "SELECT session, model, client, ts FROM requests WHERE ok=1 ORDER BY ts DESC LIMIT 20;"
 ```
-Or via Python for formatted output. Session IDs come from `X-Xellter-Session`, `X-Session-Id`, `X-Claude-Code-Session-Id`, the body's `prompt_cache_key` or `user`, or a hash of the opening messages.
+Or via Python for formatted output. Session IDs come from `X-Xellter-Session`, `X-Session-Id`, `X-Claude-Code-Session-Id`, the body's `prompt_cache_key` or `user`, or a hash of the first user message.
 
 ## Migrate an old config
 

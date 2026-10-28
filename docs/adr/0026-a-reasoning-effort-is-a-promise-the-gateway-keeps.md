@@ -1,6 +1,7 @@
 # ADR 0026 — A reasoning effort is a promise the gateway keeps
 
 - Status: Accepted
+- Amended by ADR 0028: the routing by effort was removed; the refusal handling and the advertised context window stand.
 - Date: 2026-10-27
 - Deciders: maintainer
 - Amends: ADR 0017 (the gateway is transparent to the request)

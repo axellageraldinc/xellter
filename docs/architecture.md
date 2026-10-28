@@ -17,8 +17,11 @@ ADR [0017](adr/0017-three-optimizations.md), [0018](adr/0018-client-purpose-chan
 [0020](adr/0020-round-robin-top-ten-with-per-preset-eviction.md),
 [0021](adr/0021-preset-names-are-the-owners.md),
 [0022](adr/0022-free-and-discounted-models-are-always-in-the-pool.md),
-[0023](adr/0023-the-panel-is-the-site.md) and
-[0025](adr/0025-sticky-is-a-per-preset-toggle.md).
+[0023](adr/0023-the-panel-is-the-site.md),
+[0025](adr/0025-sticky-is-a-per-preset-toggle.md),
+[0028](adr/0028-the-effort-does-not-choose-the-model.md),
+[0029](adr/0029-slow-and-unreliable-models-go-out-of-the-preset.md) and
+[0030](adr/0030-a-conversation-is-told-apart-by-its-first-user-message.md).
 
 ## Components
 
@@ -29,8 +32,8 @@ ADR [0017](adr/0017-three-optimizations.md), [0018](adr/0018-client-purpose-chan
 | `internal/store` | SQLite (modernc, no CGO): request log, usage aggregates, leaderboard rows, admin sessions, video job -> key, learned effort facts |
 | `internal/upstream` | per-key and per-account limits: rpm, free quota, plan ledger, cooldown, breaker, learned allow list |
 | `internal/rank` | pure ranking of one preset: pool -> rejections -> cost/quality -> top list, with reasons |
-| `internal/route` | rankings cache, effective pools, round-robin ring, session pin, per-preset eviction, key ordering |
-| `internal/effort` | what each model is known to do with a reasoning effort, measured from traffic and saved across restarts (ADR 0026, 0027) |
+| `internal/route` | rankings cache, effective pools, round-robin ring, session pin (saved across restarts), per-preset eviction, model health (slow / unreliable), key ordering |
+| `internal/effort` | the reasoning effort a request asks for, and the models known to refuse it (served without the field). It does not choose models (ADR 0028) |
 | `internal/proxy` | data plane: auth, body rewrite, streaming relay, usage accounting, read-only endpoints |
 | `internal/rtk` | tool-output compression, always on |
 | `internal/bench` | public leaderboards -> one 0..1 value per model and arena |
@@ -48,9 +51,9 @@ scheduled change. Cache write is kept as a display value (`0` = kenari publishes
 
 **System One is the sixth category.** Its models are not on the main list: they are fetched from
 `/v1/models?modality=systemone`, marked with endpoint `systemone`, priced like any other model, and
-never mixed into a chat pool. `POST /v1/systemone` is the only path mapped to that category
-(`route.modalityOfPath`), so a systemone preset is refused on every other path and never answers a
-chat request.
+never mixed into a chat pool. A systemone preset is served by `POST /v1/systemone` and by the chat
+paths (kenari serves System One through the OpenAI-shaped endpoint too, `route.servesCategory`); it is
+refused on the media paths, and `/v1/systemone` refuses every other category.
 
 Refresh loops:
 
@@ -82,7 +85,8 @@ otherwise an ignored key would look like it still works. `xellter migrate` conve
    disabled 403. The key may also be an Anthropic-style `x-api-key`.
 2. **Read the body** (bounded by `server.max_body_mb`), find `model` (JSON or multipart).
 3. **Session id.** `X-Xellter-Session`, `X-Session-Id`, `X-Claude-Code-Session-Id`, then the body's
-   `prompt_cache_key` or `user`, then a hash of the first 600 bytes of `messages`.
+   `prompt_cache_key` or `user`, then a hash of the first user message of `messages` (ADR 0030; the
+   system prompt is left out because every conversation of an agent shares it).
 4. **`route.Plan`** turns the requested name into attempts:
    - a preset name (`text`, `image`, …) -> the ranking of that client and preset; the path must serve
      that category (`/v1/images/*` cannot be asked to serve `text`);
@@ -93,19 +97,27 @@ otherwise an ignored key would look like it still works. `xellter migrate` conve
    blocks, Responses `function_call_output`). No switch, no header: it is always on and only
    compresses tool results, never user or assistant text. Failures keep the original text.
 6. **Attempts.** For each `(model, key)`: reserve (rpm, free quota, plan window), rewrite `model`,
-   send with the client's headers. Streaming bodies are copied through in 16 KB chunks with a flush
-   each; only the head and tail are kept to read `usage`.
+   send with the client's headers. For a streamed chat request the first bytes of the answer are read
+   **before** the response is committed to the caller: if nothing arrives within
+   `routing.first_token_timeout_s` (+1 s per 10k prompt tokens) the request is cancelled and the next model
+   is tried (never for the last model that can be tried). Then streaming bodies are copied through in
+   16 KB chunks with a flush each; only the head and tail are kept to read `usage`.
 7. **Failure.** `Key.Failure` classifies the status and applies its account/key effect; a retriable
    failure retries **the same model on the same key once**, then the model is abandoned for this
    request (its other keys are skipped). A non-retriable error abandons the model at once.
 8. **Eviction.** Every failed attempt on a preset request is recorded per `(client, preset, model)`;
    the third failure inside the window evicts the model from that preset and drops any session pin
    pointing at it. A success clears the record, so the rule is three failures in a row, not three ever.
+   **Health** (ADR 0029): every attempt also feeds a per-`(client, preset, model)` record of the last
+   hour (first-token wait, success). Once it holds `health_min_requests` requests, a median first token above
+   `slow_first_token_s`, or `fail_percent` failed requests, takes the model out for `quarantine_minutes`
+   (doubling on each repeat, judged on half as many requests when it returns). A preset is never emptied.
    The ranking also reports a **reserve**: the pool members the list size pushed out, in the
    optimization's own order. They sit at the end of the ring, so an evicted model is replaced by the next
    best one instead of shrinking the list.
-9. **Success.** Pin the session to the model (a preset that does not stick keeps no pin, ADR 0025),
-   stream the response, add `X-Xellter-Model` and `X-Xellter-Attempt`, compute the cost at catalog
+9. **Success.** Pin the session to the model (a preset that does not stick keeps no pin, ADR 0025; a
+   session whose pinned model was slow for two of its last three requests drops the pin and avoids that
+   model, ADR 0029), stream the response, add `X-Xellter-Model` and `X-Xellter-Attempt`, compute the cost at catalog
    prices, log metadata (async) and update the account ledger and the client's spend counter.
 
 `X-Xellter-Attempts` is set on the error response when every attempt failed. The upstream's own error
@@ -235,26 +247,33 @@ reason; every model left out carries a reason too. `xellter explain` prints the 
 
 ## Routing (`internal/route`)
 
-Four rules, in this order.
+Five rules, in this order.
 
 1. **Session pin.** A sticky preset (the default, ADR 0025) pins the session to one model: the first
-   successful request picks the model, and every later request of that session uses it. There is no
-   expiry: a session moves only when its model is evicted. A preset with `sticky: false` keeps no
-   pin, and every turn is routed again. Pins are in memory; when the map passes 20 000 entries, pins
-   older than a day are dropped.
+   successful request picks the model, and every later request of that session uses it, **whatever effort
+   or size the request has** (ADR 0028). There is no expiry: a session moves only when its model is taken
+   out of the preset, or is slow for the session (rule 5). A preset with `sticky: false` keeps no pin, and
+   every turn is routed again. Pins are saved in the database (`kv`, `session_pins`) every minute and when
+   the service stops, and loaded at start-up; a pin unused for seven days is dropped.
 2. **Round-robin ring.** A fresh session takes the next model in the preset's ring, which runs over
-   the whole top list. The counter is per client and preset, so two presets never share one. Every
-   model in the list is used in turn.
+   the whole top list followed by the reserve. The counter is per client and preset, so two presets never
+   share one. Every model in the list is used in turn.
 3. **Keys.** Free or plan-covered keys first, then pay-as-you-go; equal keys rotate. A client never
    uses another client's keys.
-4. **Eviction.** Three failed attempts for a model inside `evict_window_minutes` take it out of
-   **that preset only** for `evict_cooldown_minutes`; it is skipped by the ring while its cooldown
-   lasts, and a session pinned to it loses its pin and moves on the next request. Only the models in
-   the preset's top list are ever attempted, so an evicted model is not replaced by a model below the
-   top list — the ring simply continues over the remaining candidates (see "Known gaps" in
-   `docs/plan.md`). Eviction state is per client and preset, in memory, and survives a rank rebuild;
-   a restart forgives a model, which is the safe direction. Direct model pins (a caller naming a real
-   model) are not evicted.
+4. **Eviction and health.** A model is taken out of **that preset only** when it fails `evict_errors`
+   times in a row (out for `evict_cooldown_minutes`), or when its last hour shows it is unreliable or slow
+   (out for `quarantine_minutes`, doubling; ADR 0029). The ring skips it while it is out and the reserve
+   (the pool members the top list left out, in the optimization's order) takes its place, so the preset
+   keeps routing against the same number of models. A session pinned to it moves on its next request. The
+   rankings are not recomputed: scores do not depend on who is out. A preset is never emptied (the last
+   two models stay in). Eviction state is per client and preset, in memory, and survives a rank rebuild;
+   a restart forgives a model. Direct model pins (a caller naming a real model) are not evicted.
+5. **A session leaves a slow model.** If the pinned model's first token took longer than
+   `repin_first_token_s` for two of the session's last three requests, the pin is dropped and that model
+   goes to the end of that session's order.
+
+The reasoning effort a request carries is forwarded and never chooses a model (ADR 0028). The only fact
+kept about it is a refusal: a model that answered HTTP 400 to the field is served without it.
 
 Rankings are cached; nothing on the request path recomputes them. The panel's Recalculate rebuilds
 them all and reports the moment of the last run.
@@ -313,7 +332,7 @@ remaining knobs live in `xellter.yaml` and the Config tab edits that file (ADR 0
 |---|---|
 | Overview | status banner with alerts, 24 h requests / failures / cost at list price / characters saved by RTK, kenari plan windows and balance, hourly chart, per-client table, Refresh catalog |
 | Clients | one row per client: purpose, key names, presets, 24 h requests and cost; New client (name, purpose, optional kenari key) and the xellter key shown once |
-| Client detail | purpose and enabled; kenari keys with probe state and the models they may call (add, rename, remove); one card per preset: its name (renameable), optimization, the sticky-session toggle, pool picker grouped by vendor with a family checkbox and a price line, the free and discounted models xellter added on its own, "Serving now" (rank, model, billing, score, why), the eviction list with the moment each model returns, and "Left out" grouped by reason; Look up a session; New xellter key; Recalculate; Delete client |
+| Client detail | purpose and enabled; kenari keys with probe state and the models they may call (add, rename, remove); one card per preset: its name (renameable), optimization, the sticky-session toggle, pool picker grouped by vendor with a family checkbox and a price line, the free and discounted models xellter added on its own, "Serving now" (rank, model, billing, score, why), "Out for now" (the models taken out of the preset, the reason with its numbers, when each returns), and "Left out" grouped by reason; Look up a session; New xellter key; Recalculate; Delete client |
 | Usage | 24 h or 30 d; all clients -> one client -> its presets -> the models in a preset; totals, chart, and kenari's own plan windows and balance next to xellter's numbers |
 | Config file | the YAML, checked and applied on save, with earlier versions restorable |
 
@@ -341,7 +360,9 @@ ui-ux-pro-max reference: primitive, semantic, component (`web/src/styles/tokens.
 | request log, usage, leaderboard rows, admin sessions, video job -> key | `data/xellter.db` (SQLite, WAL) |
 | last good catalog | `data/catalog.json` |
 | admin login | `data/auth-record.json` (0600), `login-state.json`, `recovery-used.json` |
-| session pins, round-robin counters, evictions | memory only |
+| session pins | `data/xellter.db` (`kv`), written every minute and on shutdown |
+| learned effort refusals | `data/xellter.db` (`effort_facts`) |
+| round-robin counters, evictions, health records, key cooldowns | memory only |
 
 Account counters (rpm, free quota, plan ledger, client spend) are rebuilt from the request log at
 start-up.
@@ -352,6 +373,8 @@ start-up.
 - Nothing to route to: `503 no_candidates`; every model of the preset evicted: `503 all_evicted`;
   no key can take the request: `429 no_capacity` (or 503 when the reason is not a limit), with
   `Retry-After` in both cases.
+- A streamed chat answer that sends no first token in time is cancelled and the next model is tried; the
+  last model that can still be tried is waited for.
 - A stream that fails after the first byte cannot be retried; it is logged as an error.
 - RTK catches its own panics and sends the original text.
 

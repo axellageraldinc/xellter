@@ -1,7 +1,8 @@
 # Plan and phases
 
 Status: **the ranking/routing rewrite is done** — `./scripts/ci.sh` is green and the running service
-uses the new engine. `docs/rewrite-plan.md` is the accepted design; ADRs 0017–0023 record the
+uses the new engine. `docs/rewrite-plan.md` is the design it was built from (a historical document: where
+it differs from the ADRs, the ADRs and `docs/architecture.md` are right). ADRs 0017–0030 record the
 decisions. Rollout and tuning continue (see "Next").
 
 ## Rewrite phases
@@ -27,6 +28,10 @@ decisions. Rollout and tuning continue (see "Next").
 | The usage history was lost | a stray `rm` deleted the live SQLite database, and the service came back as if it had never run: the new database started at request id 1 and the usage page showed nothing. Nothing in the code deleted it | fixed: a daily backup timer snapshots the database, the secrets and the config outside `data/`, and a marker file makes a lost database visible in the log instead of silent |
 | A reasoning effort had to reach the model | the owner set the effort to "none" and the answer came back after nine minutes with 46,773 output tokens: the effort was dropped in the browser and the gateway forwarded it blindly, where 3 of 17 measured models ignore it and 2 reject it with HTTP 400 | done: the gateway measures what each model does with an effort, routes "none" to a model that honours it, serves a refusing model without the field, and advertises the pool's largest context window so the client stops compressing early (ADR 0026) |
 | What the gateway learned had to survive a restart | the facts were in memory, so every restart made the gateway blind again: the first request was served by a model that ignores the effort, and the client waited for an answer it did not ask for | done: the facts are written to the database on a timer and on shutdown, and read back on the next start; a fact older than 30 days is dropped and the model is measured again, a refusal is kept however old it is (ADR 0027) |
+| The effort routing hurt more than it helped | measured on real traffic, most models ignore or refuse "none", and routing by it moved a session's side calls (titles, summaries) off the pinned model and moved the pin with them, so a conversation changed model several times in minutes | done: the effort is forwarded and chooses nothing; a refusing model is still served without the field; the pin is kept across restarts and the pinned model stays first (ADR 0028) |
+| Replies were slow | free upstreams queue for 10–90 s before the first token; a conversation that landed on one stayed slow because of stickiness; a stream whose headers arrived but whose first token did not could not fail over | done: models are judged per client and preset on first-token wait and failure rate and taken out for a while (30 min, doubling), a silent stream moves to the next model, a session leaves a slow model, the panel says who is out and why (ADR 0029) |
+| Clients without a session id shared one pin | a long system prompt made every conversation of an agent hash to the same session | done: told apart by the first user message (ADR 0030) |
+| The model name showed from the second turn | `/v1/session` answered 404 until the request was logged, which happens when the answer ends | done: it answers from the pin |
 
 ## Earlier phases (first build)
 
@@ -52,7 +57,7 @@ decisions. Rollout and tuning continue (see "Next").
 | A weights/quality-gate/strategy vocabulary | one optimization per preset replaces weights, `min_quality`, `rr_band`, `max_candidates`, `strategy` and `mode` (ADR 0017) |
 | Generated or seeded presets | the owner creates one preset per category and names it; nothing appears by itself (ADR 0021) |
 | A round-robin band | equal scores are adjacent in the ring, so ties rotate without a knob (ADR 0020) |
-| Persisting evictions | a restart forgiving a model is the safe direction |
+| Persisting evictions and health records | a restart forgiving a model is the safe direction; a model that is really bad is judged again within a few requests. (Session pins are persisted: forgetting those moves conversations, ADR 0028) |
 | A model or judge producing a score | scoring is a deterministic function of the catalog, the account state and the leaderboard snapshot (ADR 0016) |
 | A switch for the free and discounted models | they are always in the pool (ADR 0022); a knob would only decide whether the owner's rule is followed |
 
@@ -67,11 +72,9 @@ Found while rewriting the docs; not fixed here because the fix is code, not pros
 | Gap | Detail |
 |---|---|
 | Quality is text-only | `rank.assignBench` switches on the client's purpose and every purpose maps to chat arenas, so image, video, TTS, STT, music and System One presets get `source: "none"` for every model. Their Balanced order is cost-only (quality 0) and **Best Quality lists nothing**. The `text_to_image`, `text_to_video` and `asr` rows are fetched and stored but never read by the ranking. The plan says each media category has exactly one metric |
-| `rank_refresh_minutes: 0` | Validation accepts it and clamps a negative to it, but `app.Start` calls `time.NewTicker(0)` and panics at start-up. Either the loop must skip a zero interval or the schema must reject it |
 | The Cheapest halves follow `top_models` | The plan says five free + five plan-covered; the code uses `top/2` per half, which is 5 with the default `top_models: 10`. Lowering the knob lowers the halves too, which is consistent but not what the plan states |
 | No retry-once switch | The plan lists `routing.retry_once: true`; the code has no such key — retry-once is unconditional in the proxy. The docs describe the behaviour, not a knob |
 | Sticky is a boolean, not minutes | The plan lists `sticky_minutes: 0`; the code has a `sticky` flag on the preset (ADR 0025), i.e. a pin that never expires. Behaviour matches the intent |
-| Eviction does not promote a model | The plan says an evicted model "is replaced by the next model below the top 10". `route.order` only ever walks `rk.Candidates` (the top list), so an evicted model is skipped and the ring continues over the remaining candidates; nothing below the top list is promoted |
 | `/v1/usage/keys` keys on the kenari key | The plan calls it "usage broken down by xellter API key". The request row's `api_key` column holds the kenari key name (`at.Key.Label()`), so the endpoint splits by kenari key, not by the xellter key the client used. There is one xellter key per client, so the two coincide per client but not when a client has several kenari keys |
 
 ## Rollout

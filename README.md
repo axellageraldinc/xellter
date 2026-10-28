@@ -3,8 +3,8 @@
 A small LLM gateway in front of [kenari.id](https://kenari.id). An app calls an OpenAI-compatible
 endpoint with its own xellter key and asks for a **preset name** the owner chose (`text`, `image`, …);
 xellter picks a real model from that preset's pool, keeps one model per conversation unless the
-owner says otherwise, retries a failure once, and takes a model out of that preset after three
-errors. One static Go binary, SQLite, no runtime dependencies.
+owner says otherwise, retries a failure once, and takes a model out of that preset when it errs, is
+unreliable or is slow. One static Go binary, SQLite, no runtime dependencies.
 
 ## The three optimizations
 
@@ -30,9 +30,16 @@ nothing there.
 ## Also
 
 - **Routing.** Round-robin over the preset's top 10, session pinning (one model per conversation),
-  retry once on a retriable error, then the next model, and three errors in an hour evict a model
-  from that preset for 12 hours. Rankings rebuild every 5 minutes, after each catalog sync, and from
-  the panel's Recalculate button.
+  retry once on a retriable error, then the next model. Rankings rebuild every 5 minutes, after each
+  catalog sync, and from the panel's Recalculate button.
+- **A model that does badly goes out of the preset.** Per client and preset: three errors in a row in
+  an hour take it out for 12 hours; a median first token above 10 s, or 40 % of its requests failing,
+  take it out for 30 minutes (ADR 0029). It comes back on its own with a clean record; if it is bad
+  again it goes out for twice as long. A preset is never emptied: the last two models stay in. The
+  panel lists who is out, why and when they return.
+- **A silent stream fails over.** A streamed chat answer that sends no first token within 15 s (plus
+  1 s per 10 000 prompt tokens) is cancelled and the next model is tried. A conversation whose pinned
+  model is slow for two of its last three requests moves to another model.
 - **Sticky session, per preset.** A preset keeps one model for the whole conversation, so the
   provider's prompt cache stays warm — that is the default. Turn the toggle off on a preset that
   should spread its traffic: every turn is routed again, and the whole pool is used. One client can
@@ -113,6 +120,10 @@ protocol expects:
 | 404 | `no_search_key` | `/v1/x/search` from a client without a key for that service |
 | 404 | `no_session` | `/v1/session` for a session that has no traffic yet |
 | 405 | `method_not_allowed` | a known path with the wrong method, or any other path |
+| 413 | `body_too_large` | the body is over `server.max_body_mb` |
+| 429 | `no_capacity` | no key of the client can take the request now (rate, quota or plan limit); carries `Retry-After` |
+| 503 | `no_candidates` | the preset has no usable model right now |
+| 503 | `all_evicted` | every model of the preset is out after errors or slowness |
 | 503 | `upstream_unavailable` | every attempt failed; carries `Retry-After` |
 
 A path that is not one of the endpoints below is refused with 405/404 and **never forwarded**. It
@@ -124,7 +135,7 @@ the preset (ADR 0024).
 | Header | On | Meaning |
 |---|---|---|
 | `X-Xellter-Model` | chat, System One, media | the real model that answered, not the preset you asked for |
-| `X-Xellter-Attempt` | chat, System One, media, search | `1`, or `2` after the single retry |
+| `X-Xellter-Attempt` | chat, System One, media, search | which attempt answered: `1`, or higher after a retry or a move to another model |
 | `X-Xellter-Attempts` | a failed call | how many attempts were spent before giving up |
 | `Retry-After` | 503, 429 | seconds to wait |
 
@@ -153,8 +164,10 @@ curl https://xellter.example.com/v1/chat/completions \
 Response headers: `X-Xellter-Model: claude-haiku-5-5`, `X-Xellter-Attempt: 1`.
 
 `X-Xellter-Session` (or `X-Session-Id`, or `X-Claude-Code-Session-Id`) pins one model for the
-conversation. Without it the pin follows `prompt_cache_key`, then `user`, then a hash of the opening
-messages. Send your own id and you can ask about it later with `/v1/session`.
+conversation. Without it the pin follows `prompt_cache_key`, then `user`, then a hash of the first user
+message (ADR 0030). Send your own id when you can: a client that compresses its history changes its first
+message, and a session id survives that. With one you can also ask about the conversation later with
+`/v1/session`. Pins are saved in the database, so a restart does not move a conversation.
 
 ### Media — `POST /v1/images/*`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/videos`, `/v1/music`
 
@@ -164,10 +177,11 @@ kenari's (JSON for images and speech, SSE for music, multipart in, JSON out for 
 
 ### System One — `POST /v1/systemone`
 
-A custom endpoint: kenari publishes System One on a catalogue of its own, so it is a category of its
-own and **only this path reaches it**. `model` is a preset whose category is `systemone`; the body
-and the answer are kenari's, passed through as-is. A systemone preset is refused on every other
-path, and this path refuses every other category.
+kenari publishes System One on a catalogue of its own, so it is a category of its own and a client holds
+one `systemone` preset next to its `chat` preset. `model` is that preset; the body and the answer are
+kenari's, passed through as-is. A systemone preset is served by this path and by the chat paths
+(`/v1/chat/completions`, `/v1/responses`, `/v1/messages`), because kenari serves System One through the
+OpenAI-shaped endpoint too. This path refuses every other category.
 
 ```bash
 curl https://xellter.example.com/v1/systemone \
@@ -233,8 +247,10 @@ models its pools can reach, with the catalogue price of each.
 }
 ```
 
-A preset advertises what its whole pool can do: the smallest context window any model in it has, and
-a capability only if every model has it. Media models carry `lines` (per image, per second, per 1k
+A preset advertises what its whole pool can do (the owner's list plus the free and promo models added on
+their own): the **largest** context window any model in it has, and a capability only if every model has
+it. The largest, because the preset is a name that may resolve to any of them, and a smaller number made
+clients compress their history for a window the serving model never had (ADR 0026). Media models carry `lines` (per image, per second, per 1k
 characters) instead of token prices. `/v1/models/{id}` returns the single item, or 404.
 
 ### Session — `GET /v1/session?session=<id>`
@@ -340,8 +356,8 @@ public name serves `/v1/*` and `/healthz` and returns 404 for everything else.
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | components, request flow, ranking maths, routing, endpoints, panel |
 | [docs/configuration.md](docs/configuration.md) | every config key, and what is refused |
-| [docs/operations.md](docs/operations.md) | deploy, Tailscale, runbook, security model |
-| [docs/plan.md](docs/plan.md) | phase status and what is deliberately not done |
+| [docs/operations.md](docs/operations.md) | deploy, Tailscale, runbook, what to do when models are slow or failing, backups, security model |
+| [docs/plan.md](docs/plan.md) | phase status, what is deliberately not done, known gaps |
 | [docs/adr/](docs/adr/) | architecture decision records |
 | [skills/xellter/SKILL.md](skills/xellter/SKILL.md) | how to operate xellter (for LLM agents) |
 | [AGENTS.md](AGENTS.md) | rules for AI coding agents working on this repo |
@@ -349,7 +365,7 @@ public name serves `/v1/*` and `/healthz` and returns 404 for everything else.
 ## Develop
 
 ```bash
-./scripts/ci.sh   # gofmt, vet, tests, JS syntax; no network, no paid calls
+./scripts/ci.sh   # builds the panel, gofmt, vet, tests, the backup script test; no network, no paid calls
 ```
 
 ## License
