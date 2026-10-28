@@ -21,8 +21,9 @@ ADR [0017](adr/0017-three-optimizations.md), [0018](adr/0018-client-purpose-chan
 [0025](adr/0025-sticky-is-a-per-preset-toggle.md),
 [0028](adr/0028-the-effort-does-not-choose-the-model.md),
 [0029](adr/0029-slow-and-unreliable-models-go-out-of-the-preset.md),
-[0030](adr/0030-a-conversation-is-told-apart-by-its-first-user-message.md) and
-[0031](adr/0031-the-size-of-a-request-is-estimated-from-its-content.md).
+[0030](adr/0030-a-conversation-is-told-apart-by-its-first-user-message.md),
+[0031](adr/0031-the-size-of-a-request-is-estimated-from-its-content.md) and
+[0032](adr/0032-ties-are-broken-by-measured-speed.md).
 
 ## Components
 
@@ -241,7 +242,11 @@ The owner types no number: every score is fetched and matched onto catalog ids b
 
 Two cost pools for Cheapest, because a free model costs nothing ever and a plan-covered one spends
 plan budget: one ranking would let a cheap plan-covered model displace a free one. Equal scores are
-ordered by model id, so a run is reproducible.
+ordered by **measured speed** (ADR 0032): the median wait for the first token of the model's streamed answers
+over the last seven days, raised by its failure rate, in classes of 1.5 s, first from this client's preset and
+else from every client; a model nobody has measured counts as average. Only then by model id, so a run is
+reproducible. Speed never moves a dearer or a worse model above a cheaper or better one; it chooses between
+equals, which is what the free models are.
 
 Every candidate carries its cost, quality, quality source, billing class, flags and a one-line
 reason; every model left out carries a reason too. `xellter explain` prints the same data.

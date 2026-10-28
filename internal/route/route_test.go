@@ -2,6 +2,7 @@ package route
 
 import (
 	"context"
+	"github.com/axellageraldinc/xellter/internal/store"
 	"strings"
 	"testing"
 	"time"
@@ -576,5 +577,27 @@ func TestOneReserveReplacesEachTopModelThatIsOut(t *testing.T) {
 	}
 	if len(seen) != 2 {
 		t.Fatalf("the replacement never served: %v", seen)
+	}
+}
+
+func TestSpeedFallsBackToWhatOtherClientsSawAndDemandsEnoughSamples(t *testing.T) {
+	speed := speedFrom(map[string]*store.WaitStat{
+		"c/text/own":  {Streams: 9, Total: 10, Failed: 1, P50MS: 2000},
+		"*/*/own":     {Streams: 50, Total: 60, P50MS: 9000},
+		"*/*/shared":  {Streams: 20, Total: 20, P50MS: 3000},
+		"c/text/thin": {Streams: 2, Total: 2, P50MS: 100},
+		"*/*/thin":    {Streams: 2, Total: 2, P50MS: 100},
+	})
+	if w, ok := speed("c", "text", "own"); !ok || w < 2200 || w > 2300 {
+		t.Fatalf("own record, raised by the 10%% failures: %v %v", w, ok)
+	}
+	if w, ok := speed("c", "text", "shared"); !ok || w != 3000 {
+		t.Fatalf("fallback to the other clients: %v %v", w, ok)
+	}
+	if _, ok := speed("c", "text", "thin"); ok {
+		t.Fatal("two samples are not enough to believe")
+	}
+	if speedFrom(nil) != nil {
+		t.Fatal("no data, no lookup")
 	}
 }

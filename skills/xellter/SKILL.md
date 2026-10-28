@@ -149,6 +149,10 @@ one-line reason ("score 0.612 (cost 532.00, quality 0.83, plan) from text — ba
 quality"). The order decides who goes first in the round-robin and who serves after an eviction.
 Every model in the list is used in turn; a sticky preset keeps a session on the model it is pinned to.
 
+Models that tie on price or score (all the free ones) are ordered by how fast they answer: the median wait for
+the first token over the last seven days, raised by the failure rate; a model nobody measured counts as average.
+The reason column shows the wait that decided ("first token ~3.9s").
+
 **Out for now** — models taken out of this preset, each with the reason (with its numbers) and the
 moment it returns. **This preset of this client only.** Three rules (ADR 0020, 0029):
 

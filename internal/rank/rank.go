@@ -65,6 +65,10 @@ type Inputs struct {
 	Bench map[string]map[string]store.BenchRow // model -> arena -> score
 	Now   time.Time
 	Top   int // how many models the list holds (0 = Routing.TopModels)
+	// Speed says how long a model takes to start answering in a preset: the median wait for the first token of its
+	// streamed answers, raised by its failure rate, in milliseconds. known is false when there is not enough
+	// traffic to say. It only breaks ties (ADR 0032); nil means no model has a measurement.
+	Speed func(client, preset, model string) (waitMS float64, known bool)
 }
 
 // topSize is how many models a preset routes against.
@@ -89,6 +93,8 @@ type Candidate struct {
 	BenchSource string   `json:"bench_source"` // "arena text", "coding (swebench, webdev)", "none"
 	Flags       []string `json:"flags"`
 	Reason      string   `json:"reason"`
+	// WaitMS is the measured wait for the first token that broke a tie, 0 when the model has no measurement.
+	WaitMS int `json:"wait_ms,omitempty"`
 }
 
 // Rejected explains why a model the owner picked is not in the list.
@@ -306,6 +312,9 @@ type scored struct {
 	// autoAdded marks a model xellter put in the pool on its own, because the
 	// owner did not tick it.
 	autoAdded bool
+	// wait is the measured wait for the first token in this preset (ms, failures included); waitKnown says it exists.
+	wait      float64
+	waitKnown bool
 }
 
 // One ranks a single preset.
@@ -386,6 +395,7 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 	}
 
 	assignBench(in, sh.Category, cl.Purpose, pool)
+	assignSpeed(in, cl.Name, name, pool)
 
 	cheapest := math.Inf(1)
 	for _, s := range pool {
@@ -435,11 +445,14 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 		s.score = reserveScore(s, sh.Optimization)
 		r.Reserve = append(r.Reserve, Candidate{Model: s.m.ID, Score: round(s.score), CostIDR: round4(s.cost),
 			ListCostIDR: round4(s.listCost), Billing: s.billing, Bench: round(s.bench), BenchSource: s.source, Flags: s.flags,
-			Reason: fmt.Sprintf("reserve: outside the top %d (%s)", top, reserveWhy(sh.Optimization))})
+			WaitMS: waitMS(s), Reason: fmt.Sprintf("reserve: outside the top %d (%s)", top, reserveWhy(sh.Optimization))})
 	}
 	sort.SliceStable(r.Reserve, func(i, j int) bool {
 		if r.Reserve[i].Score != r.Reserve[j].Score {
 			return r.Reserve[i].Score > r.Reserve[j].Score
+		}
+		if r.Reserve[i].WaitMS != r.Reserve[j].WaitMS && r.Reserve[i].WaitMS > 0 && r.Reserve[j].WaitMS > 0 {
+			return r.Reserve[i].WaitMS < r.Reserve[j].WaitMS
 		}
 		return r.Reserve[i].Model < r.Reserve[j].Model
 	})
@@ -552,7 +565,7 @@ func orderCheapest(r *Ranking, pool []*scored, top int) {
 			if list[i].cost != list[j].cost {
 				return list[i].cost < list[j].cost
 			}
-			return list[i].m.ID < list[j].m.ID
+			return fasterThan(list[i], list[j])
 		})
 	}
 	var free, plan, balance []*scored
@@ -719,7 +732,7 @@ func sortScore(list []*scored) {
 		if list[i].cost != list[j].cost {
 			return list[i].cost < list[j].cost
 		}
-		return list[i].m.ID < list[j].m.ID
+		return fasterThan(list[i], list[j])
 	})
 }
 
@@ -753,7 +766,7 @@ func emit(r *Ranking, list []*scored, extra string) {
 	for _, s := range list {
 		c := Candidate{
 			Model: s.m.ID, Score: round(s.score), CostIDR: round4(s.cost), ListCostIDR: round4(s.listCost),
-			Billing: s.billing, Bench: round(s.bench), BenchSource: s.source, Flags: s.flags,
+			Billing: s.billing, Bench: round(s.bench), BenchSource: s.source, Flags: s.flags, WaitMS: waitMS(s),
 		}
 		c.Reason = describe(c, extra)
 		r.Candidates = append(r.Candidates, c)
@@ -769,6 +782,9 @@ func describe(c Candidate, extra string) string {
 	if len(c.Flags) > 0 {
 		s += " [" + strings.Join(c.Flags, ", ") + "]"
 	}
+	if c.WaitMS > 0 {
+		s += fmt.Sprintf(", first token ~%.1fs", float64(c.WaitMS)/1000)
+	}
 	if extra != "" {
 		s += " — " + extra
 	}
@@ -783,3 +799,53 @@ func sortRejected(r *Ranking) {
 func clamp(v float64) float64  { return math.Max(0, math.Min(1, v)) }
 func round(v float64) float64  { return math.Round(v*1000) / 1000 }
 func round4(v float64) float64 { return math.Round(v*10000) / 10000 }
+
+// waitBucket is how coarsely speeds are compared when they break a tie. Two models that answer within a bucket
+// of each other count as equally fast, so the top list does not reshuffle every five minutes over noise.
+const waitBucket = 1500 // ms
+
+// assignSpeed puts the measured wait on every model of the pool that has one, and gives the others the
+// median of the rest: a model nobody has measured yet is neither favoured nor punished, so it still gets
+// traffic and a measurement.
+func assignSpeed(in Inputs, client, preset string, pool []*scored) {
+	if in.Speed == nil {
+		return
+	}
+	var known []float64
+	for _, s := range pool {
+		if w, ok := in.Speed(client, preset, s.m.ID); ok && w > 0 {
+			s.wait, s.waitKnown = w, true
+			known = append(known, w)
+		}
+	}
+	if len(known) == 0 {
+		return
+	}
+	sort.Float64s(known)
+	neutral := known[len(known)/2]
+	for _, s := range pool {
+		if !s.waitKnown {
+			s.wait = neutral
+		}
+	}
+}
+
+// bucketOf is the speed class of a model: its wait in whole buckets.
+func bucketOf(s *scored) int { return int(s.wait / waitBucket) }
+
+// fasterThan orders two models that tie on price or score: the faster speed class first, then by name, so the
+// order stays stable.
+func fasterThan(a, b *scored) bool {
+	if ba, bb := bucketOf(a), bucketOf(b); ba != bb {
+		return ba < bb
+	}
+	return a.m.ID < b.m.ID
+}
+
+// waitMS is the measured wait to show for a model, 0 when it has none.
+func waitMS(s *scored) int {
+	if !s.waitKnown {
+		return 0
+	}
+	return int(s.wait + 0.5)
+}

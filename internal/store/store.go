@@ -892,3 +892,53 @@ func (s *Store) PresetStats(client, preset string, since time.Time) map[string]*
 	}
 	return out
 }
+
+// WaitStat is how fast a model starts answering, measured over a period.
+type WaitStat struct {
+	Streams int     // streamed answers with a first-token time
+	Total   int     // all requests, failures included
+	Failed  int     // failures of the model (not a caller that left)
+	P50MS   float64 // median wait for the first token
+}
+
+// WaitStats measures, for every model, how long its streamed chat answers took to start since the given time.
+// The result has one entry per "client/preset/model" and one per "*/*/model" over all clients, so a caller can
+// fall back to what the other clients saw when one client has too little traffic of its own.
+func (s *Store) WaitStats(since time.Time) map[string]*WaitStat {
+	rows, err := s.db.Query(`SELECT client, preset, model, ok, ttft_ms, stream FROM requests
+		WHERE ts>=? AND preset!='' AND path LIKE '/v1/%' AND COALESCE(err,'') NOT LIKE 'cancelled%'`, since.UnixMilli())
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := map[string]*WaitStat{}
+	waits := map[string][]int{}
+	add := func(key string, ok, stream, ttft int) {
+		st := out[key]
+		if st == nil {
+			st = &WaitStat{}
+			out[key] = st
+		}
+		st.Total++
+		if ok == 0 {
+			st.Failed++
+		} else if stream == 1 && ttft > 0 {
+			st.Streams++
+			waits[key] = append(waits[key], ttft)
+		}
+	}
+	for rows.Next() {
+		var client, preset, model string
+		var ok, ttft, stream int
+		if rows.Scan(&client, &preset, &model, &ok, &ttft, &stream) != nil {
+			break
+		}
+		add(client+"/"+preset+"/"+model, ok, stream, ttft)
+		add("*/*/"+model, ok, stream, ttft)
+	}
+	for k, w := range waits {
+		sort.Ints(w)
+		out[k].P50MS = float64(w[len(w)/2])
+	}
+	return out
+}

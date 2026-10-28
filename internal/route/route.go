@@ -135,6 +135,7 @@ func (r *Router) Recompute(now time.Time) {
 	in := rank.Inputs{Cfg: cfg, Snap: snap, Pool: r.pool, Now: now}
 	if r.st != nil {
 		in.Bench, _ = r.st.Bench()
+		in.Speed = speedFrom(r.st.WaitStats(now.Add(-speedWindow)))
 	}
 	m := rank.All(in)
 	r.rankings.Store(&m)
@@ -714,4 +715,36 @@ func modalityOfPath(p string) string {
 		return "music"
 	}
 	return ""
+}
+
+// speedWindow is how far back the measured speed looks when it breaks a tie in the ranking (ADR 0032).
+const speedWindow = 7 * 24 * time.Hour
+
+// minSpeedStreams is how many streamed answers a model needs before its speed is believed.
+const minSpeedStreams = 5
+
+// speedFrom turns the measured waits into the lookup the ranking uses: the model's own record in this preset,
+// else what every client saw of it, else nothing. A model that fails often is as slow as the wait it makes the
+// caller pay for a retry, so its wait is raised by its failure rate.
+func speedFrom(stats map[string]*store.WaitStat) func(client, preset, model string) (float64, bool) {
+	if len(stats) == 0 {
+		return nil
+	}
+	pick := func(key string) (float64, bool) {
+		st := stats[key]
+		if st == nil || st.Streams < minSpeedStreams || st.P50MS <= 0 {
+			return 0, false
+		}
+		failShare := 0.0
+		if st.Total > 0 {
+			failShare = float64(st.Failed) / float64(st.Total)
+		}
+		return st.P50MS / (1 - min(failShare, 0.9)), true
+	}
+	return func(client, preset, model string) (float64, bool) {
+		if w, ok := pick(client + "/" + preset + "/" + model); ok {
+			return w, true
+		}
+		return pick("*/*/" + model)
+	}
 }

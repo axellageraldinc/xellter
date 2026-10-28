@@ -815,3 +815,71 @@ func TestFreeModelWithoutEvidenceIsNotLeftOut(t *testing.T) {
 		}
 	}
 }
+
+// Free models all cost nothing, so the price cannot tell them apart; the speed measured on real traffic does
+// (ADR 0032). Without it the free slots went to the models whose names come first in the alphabet.
+func TestTheFreeHalfIsFilledByMeasuredSpeed(t *testing.T) {
+	f := fixture(freeChat("a-slow:free"), freeChat("b-slow:free"), freeChat("c-fast:free"), freeChat("d-fast:free"), freeChat("e-mid:free"), freeChat("z-fast:free"))
+	f.optimize("cheapest")
+	waits := map[string]float64{"a-slow:free": 40000, "b-slow:free": 30000, "c-fast:free": 900, "d-fast:free": 1100, "e-mid:free": 5000, "z-fast:free": 400}
+	r := f.rank(func(in *Inputs) {
+		in.Top = 4 // two free slots
+		in.Speed = func(_, _, m string) (float64, bool) { w, ok := waits[m]; return w, ok }
+	})
+	got := order(r)[:2]
+	if strings.Join(got, ",") != "c-fast:free,d-fast:free" && strings.Join(got, ",") != "d-fast:free,c-fast:free" && !(containsStr(got, "z-fast:free")) {
+		t.Fatalf("the fast models must take the free slots, got %v", got)
+	}
+	for _, m := range order(r) {
+		if m == "a-slow:free" || m == "b-slow:free" {
+			t.Fatalf("a slow model took a free slot: %v", order(r))
+		}
+	}
+	// the reserve is ordered the same way
+	var reserve []string
+	for _, c := range r.Reserve {
+		reserve = append(reserve, c.Model)
+	}
+	if len(reserve) < 2 || reserve[len(reserve)-1] != "a-slow:free" {
+		t.Fatalf("the slowest model must be the last reserve, got %v", reserve)
+	}
+}
+
+// A model nobody has measured is not punished: it counts as average, so it still gets traffic and a measurement.
+func TestAnUnmeasuredModelCountsAsAverage(t *testing.T) {
+	f := fixture(freeChat("a-new:free"), freeChat("b-slow:free"), freeChat("c-fast:free"))
+	f.optimize("cheapest")
+	r := f.rank(func(in *Inputs) {
+		in.Top = 4
+		in.Speed = func(_, _, m string) (float64, bool) {
+			return map[string]float64{"b-slow:free": 30000, "c-fast:free": 800}[m], m != "a-new:free"
+		}
+	})
+	got := order(r)
+	if got[0] != "c-fast:free" || got[len(got)-1] != "b-slow:free" {
+		t.Fatalf("order %v: fast first, slow last, the unmeasured one in between", got)
+	}
+}
+
+// Two models within a bucket of each other are equally fast: the order falls back to the name instead of
+// reshuffling the list over noise.
+func TestSpeedsInTheSameBucketKeepTheNameOrder(t *testing.T) {
+	f := fixture(freeChat("a:free"), freeChat("b:free"))
+	f.optimize("cheapest")
+	r := f.rank(func(in *Inputs) {
+		in.Speed = func(_, _, m string) (float64, bool) {
+			return map[string]float64{"a:free": 1400, "b:free": 600}[m], true
+		}
+	})
+	if got := order(r); got[0] != "a:free" {
+		t.Fatalf("1.4 s and 0.6 s are the same class, the name decides: %v", got)
+	}
+}
+
+func TestNoSpeedDataKeepsTheNameOrder(t *testing.T) {
+	f := fixture(freeChat("b:free"), freeChat("a:free"))
+	f.optimize("cheapest")
+	if got := order(f.rank(nil)); got[0] != "a:free" {
+		t.Fatalf("got %v", got)
+	}
+}
