@@ -11,6 +11,7 @@ package config
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -31,7 +32,7 @@ type Config struct {
 	Server  Server   `yaml:"server" json:"server"`
 	Kenari  Kenari   `yaml:"kenari" json:"kenari"`
 	Routing Routing  `yaml:"routing" json:"routing"`
-	Clients []Client `yaml:"clients" json:"clients"`
+	Clients []Client `yaml:"clients,omitempty" json:"clients"` // kept in SQLite when a store exists (ADR 0037)
 	// LocalModels are models served from this machine instead of kenari (ADR 0033).
 	LocalModels []LocalModel `yaml:"local_models,omitempty" json:"local_models,omitempty"`
 }
@@ -557,13 +558,59 @@ type HistoryStore interface {
 	HasHistory(id string) bool
 }
 
-// Save writes the config atomically (mode 0600) and keeps the previous file in
-// the history store.
+// ClientStore is the part of the database that keeps the clients (ADR 0037): the apps, their keys and their
+// presets. The owner edits them in the panel, so they are data, not configuration. The store implements it next
+// to HistoryStore.
+type ClientStore interface {
+	Clients() (string, bool)
+	SetClients(raw string) error
+}
+
+func encodeClients(cl []Client) (string, error) {
+	if cl == nil {
+		cl = []Client{}
+	}
+	b, err := json.Marshal(cl)
+	return string(b), err
+}
+
+// AttachClients loads the clients from the store into c. A store that holds none yet takes the ones the file
+// still carries (the one-time move, ADR 0037) and the file is rewritten without them.
+func AttachClients(file string, c *Config, h HistoryStore) error {
+	cs, ok := h.(ClientStore)
+	if !ok {
+		return nil
+	}
+	raw, have := cs.Clients()
+	if !have {
+		if len(c.Clients) == 0 {
+			return nil
+		}
+		return Save(file, c, h)
+	}
+	var cl []Client
+	if err := json.Unmarshal([]byte(raw), &cl); err != nil {
+		return fmt.Errorf("clients in the database: %w", err)
+	}
+	c.Clients = cl
+	return Normalize(c)
+}
+
+// Save writes the config atomically (mode 0600) and keeps the previous version in the history store. With a
+// ClientStore the clients go to the database and the file holds only the internal settings; without one they
+// stay in the file.
 func Save(file string, c *Config, h HistoryStore) error {
 	if err := c.Validate(); err != nil {
 		return err
 	}
-	out, err := yaml.Marshal(c)
+	cs, _ := h.(ClientStore)
+	doc := c
+	if cs != nil {
+		cp := *c
+		cp.Clients = nil
+		doc = &cp
+	}
+	out, err := yaml.Marshal(doc)
 	if err != nil {
 		return err
 	}
@@ -574,13 +621,52 @@ func Save(file string, c *Config, h HistoryStore) error {
 			t = t.Add(time.Millisecond)
 			id = t.Format("20060102-150405.000")
 		}
-		h.AddHistory(id, old)
+		h.AddHistory(id, withClients(old, cs))
+	}
+	if cs != nil {
+		raw, err := encodeClients(c.Clients)
+		if err != nil {
+			return err
+		}
+		if err := cs.SetClients(raw); err != nil {
+			return err
+		}
 	}
 	tmp := file + ".tmp"
 	if err := os.WriteFile(tmp, append([]byte("# Managed by xellter (the admin panel rewrites this file; comments are not preserved).\n"), out...), 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, file)
+}
+
+// withClients appends the stored clients to a previous file, so a history entry restores the whole
+// configuration. A file that still carries its own clients is left alone.
+func withClients(old []byte, cs ClientStore) []byte {
+	if cs == nil {
+		return old
+	}
+	var top map[string]any
+	if yaml.Unmarshal(old, &top) != nil {
+		return old
+	}
+	if _, has := top["clients"]; has {
+		return old
+	}
+	raw, ok := cs.Clients()
+	if !ok {
+		return old
+	}
+	var cl []Client
+	if json.Unmarshal([]byte(raw), &cl) != nil || len(cl) == 0 {
+		return old
+	}
+	b, err := yaml.Marshal(struct {
+		Clients []Client `yaml:"clients"`
+	}{cl})
+	if err != nil {
+		return old
+	}
+	return append(append(old, '\n'), b...)
 }
 
 // ReadHistory returns one saved version's YAML.

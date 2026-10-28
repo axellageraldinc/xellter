@@ -47,23 +47,6 @@ var configDocs = map[string]string{
 	"local_models.category":          "audio_transcription or audio_speech (the only two supported).",
 	"local_models.base_url":          "Root of the local server, which must speak the OpenAI API.",
 	"local_models.model":             "Optional: the name the local server knows the model by. Defaults to id.",
-	"clients":                        "A client is one app that calls xellter, with its own kenari keys, one purpose and at most one preset per category.",
-	"clients.name":                   "Client name shown in the panel.",
-	"clients.enabled":                "false = the client's xellter key is refused. Nothing else is deleted.",
-	"clients.purpose":                "How the chat preset is scored: general | coding | agentic | vision | bulk. A purpose reorders models, it never filters them.",
-	"clients.key_hash":               "SHA-256 of the client's xellter key. Created by the panel; do not edit.",
-	"clients.key_hint":               "Last characters of the xellter key, so you can recognise it. Do not edit.",
-	"clients.keys":                   "kenari API keys this client spends from.",
-	"clients.keys.name":              "Name of the key in the panel.",
-	"clients.keys.key_env":           "Name of the secret in the secrets file that holds the key value.",
-	"clients.keys.capability":        "Empty = a normal model key. \"search\" = serves only POST /v1/x/search, is never probed and never serves a model call.",
-	"clients.presets":                "One preset per category. The preset's name is the model name the app asks for.",
-	"clients.presets.*.category":     "What the preset serves: chat | images | videos | audio_speech | audio_transcription | music | systemone. A client holds one preset of each.",
-	"clients.presets.*.optimization": "How the pool is ordered: cheapest | balanced | best_quality.",
-	"clients.presets.*.models":       "The pool of catalog models this preset may route to. Free and discounted models of the category join on their own.",
-	"clients.presets.*.excluded":     "Free or discounted models you unticked; they are never added to this preset again.",
-	"clients.presets.*.sticky":       "true (or absent) = a session keeps one model; false = every turn is routed again.",
-	"clients.note":                   "Free text for yourself.",
 }
 
 const configDocsHeader = "Comments are explanations only: they are regenerated on every load and dropped when you save."
@@ -71,7 +54,9 @@ const configDocsHeader = "Comments are explanations only: they are regenerated o
 // annotatedYAML renders cfg as YAML with configDocs as comments above each key.
 func annotatedYAML(cfg *config.Config) ([]byte, error) {
 	var doc yaml.Node
-	if err := doc.Encode(cfg); err != nil {
+	internal := *cfg
+	internal.Clients = nil // clients are edited in the panel and live in the database (ADR 0037)
+	if err := doc.Encode(&internal); err != nil {
 		return nil, err
 	}
 	if doc.Kind == yaml.DocumentNode && len(doc.Content) > 0 {
@@ -90,12 +75,8 @@ func annotate(n *yaml.Node, path string) {
 	case yaml.MappingNode:
 		for i := 0; i+1 < len(n.Content); i += 2 {
 			k, v := n.Content[i], n.Content[i+1]
-			seg := k.Value
-			if path == "clients.presets" {
-				seg = "*"
-			}
-			p := strings.TrimPrefix(path+"."+seg, ".")
-			if doc, ok := configDocs[p]; ok && seg != "*" {
+			p := strings.TrimPrefix(path+"."+k.Value, ".")
+			if doc, ok := configDocs[p]; ok {
 				k.HeadComment = doc
 			}
 			annotate(v, p)

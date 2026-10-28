@@ -122,7 +122,7 @@ func check(args []string) error {
 	fs := flag.NewFlagSet("check", flag.ExitOnError)
 	path := cfgPath(fs)
 	_ = fs.Parse(args)
-	c, err := config.Load(*path)
+	c, err := loadConfig(*path)
 	if err != nil {
 		return err
 	}
@@ -316,7 +316,7 @@ func clientCmd(args []string) error {
 	purpose := fs.String("purpose", "general", "client purpose: general, coding, agentic, vision or bulk")
 	out := fs.String("out", "", "write the API key to this file (mode 0600) instead of stdout")
 	_ = fs.Parse(args[1:])
-	c, err := config.Load(*path)
+	c, err := loadConfig(*path)
 	if err != nil {
 		return err
 	}
@@ -353,7 +353,7 @@ func keyCmd(args []string) error {
 	if value == "" || *client == "" || *name == "" {
 		return errors.New("need -client, -name and the key on stdin")
 	}
-	c, err := config.Load(*path)
+	c, err := loadConfig(*path)
 	if err != nil {
 		return err
 	}
@@ -385,11 +385,25 @@ func split(s string) []string {
 	return out
 }
 
+// loadConfig reads the config file and the clients kept in the database (ADR 0037).
+func loadConfig(path string) (*config.Config, error) {
+	c, err := config.Load(path)
+	if err != nil {
+		return nil, err
+	}
+	st, err := store.Open(c.Server.DataDir)
+	if err != nil {
+		return nil, err
+	}
+	defer st.Close()
+	return c, config.AttachClients(path, c, st)
+}
+
 // saveConfig writes the config and keeps the previous version in the database.
 func saveConfig(path string, c *config.Config) error {
 	st, err := store.Open(c.Server.DataDir)
 	if err != nil {
-		return config.Save(path, c, nil)
+		return err
 	}
 	defer st.Close()
 	return config.Save(path, c, st)

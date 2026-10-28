@@ -1,5 +1,7 @@
 # Configuration reference
 
+Since ADR 0037 the file holds only the internal settings; `clients[]` below live in the database and are edited in the panel or with `xellter client add` / `key add` (an old file that still has them is moved over once at start).
+
 One YAML file (`xellter -config`, default `xellter.yaml`, or `$XELLTER_CONFIG`). Missing fields take
 the defaults below. The panel's Config tab edits the same file, validates it, keeps a history under
 the database, table `config_history` (last 50) and can restore a version. Run `xellter check` to validate

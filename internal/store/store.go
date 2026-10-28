@@ -560,6 +560,25 @@ func (s *Store) KVSet(k, v string) {
 // KVDel removes a value.
 func (s *Store) KVDel(k string) { _, _ = s.db.Exec(`DELETE FROM kv WHERE k=?`, k) }
 
+// ---- clients (the apps, their keys and presets; ADR 0037) ----
+
+const clientsKey = "clients"
+
+// Clients returns the clients as JSON, and whether any were ever saved.
+func (s *Store) Clients() (string, bool) {
+	var v string
+	if err := s.db.QueryRow(`SELECT v FROM kv WHERE k=?`, clientsKey).Scan(&v); err != nil {
+		return "", false
+	}
+	return v, true
+}
+
+// SetClients replaces the clients.
+func (s *Store) SetClients(raw string) error {
+	_, err := s.db.Exec(`INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v`, clientsKey, raw)
+	return err
+}
+
 // ---- config history (the saved versions of xellter.yaml) ----
 
 // AddHistory keeps one saved version of the config; only the newest 50 are kept.

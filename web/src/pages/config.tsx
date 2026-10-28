@@ -44,7 +44,7 @@ export function ConfigPage() {
   return (
     <Page
       title="Config file"
-      subtitle="The same settings as plain text, with a comment above every setting saying what it does. Saving checks everything first; the previous version is kept."
+      subtitle="Internal settings as plain text, with a comment above each saying what it does. Clients, keys and presets are edited on their own pages. Saving checks everything first; the previous version is kept."
       actions={
         <>
           <Button variant="ghost" size="sm" onClick={load}>
@@ -65,7 +65,7 @@ export function ConfigPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Earlier versions</CardTitle>
+          <CardTitle>Earlier versions (settings and clients)</CardTitle>
         </CardHeader>
         <CardContent>
           {history.length === 0 ? (

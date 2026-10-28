@@ -95,6 +95,10 @@ func New(path string, src catalog.Source) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := config.AttachClients(path, cfg, st); err != nil {
+		_ = st.Close()
+		return nil, err
+	}
 	a := &App{Path: path, St: st, Started: time.Now(), Logf: log.Printf}
 	a.cfg.Store(cfg)
 	if src == nil {

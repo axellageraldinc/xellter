@@ -276,6 +276,7 @@ func (h *Handler) config(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			next = c
+			next.Clients = h.a.Cfg().Clients // the Config tab shows internal settings only (ADR 0037)
 			keepPaths(next, h.a.Cfg())
 		case in.Config != nil:
 			next = in.Config

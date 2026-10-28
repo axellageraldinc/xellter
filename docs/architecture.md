@@ -363,7 +363,8 @@ ui-ux-pro-max reference: primitive, semantic, component (`web/src/styles/tokens.
 
 | What | Where |
 |---|---|
-| config (clients, keys, presets, routing) | `xellter.yaml` (0600), history in SQLite (`config_history`) |
+| internal settings (server, kenari, routing, local_models) | `xellter.yaml` (0600), history in SQLite (`config_history`) |
+| clients, keys, presets | SQLite `kv` key `clients` (ADR 0037) |
 | kenari key values | `data/secrets.env` (0600) |
 | request log, usage, leaderboard rows, admin sessions, video job -> key | `data/xellter.db` (SQLite, WAL) |
 | last good catalog | SQLite (`kv`, key `catalog.snapshot`) |

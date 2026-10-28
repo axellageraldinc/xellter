@@ -43,28 +43,5 @@ routing:
   quarantine_minutes: 30          # first time out; doubles each time it comes back and fails again (up to evict_cooldown_minutes)
   repin_first_token_s: 15         # a pinned model this slow for 2 of a session's last 3 requests loses the session
 
-# A client is one app that calls xellter. It has its own kenari keys, one purpose
-# that decides how its text preset is scored, and at most one preset per category.
-clients:
-  - name: demo
-    enabled: true
-    purpose: general              # general | coding | agentic | vision | bulk
-    key_hash: ""                  # sha256 of the xellter key; created by `xellter client add` or the panel
-    keys:                         # kenari API keys of this client (values live in data/secrets.env)
-      - name: main
-        key_env: KENARI_KEY_DEMO_MAIN
-      # A key that serves one service instead of a model. `search` is the only capability:
-      # it answers POST /v1/x/search, is never probed, never joins a pool and never serves
-      # a model call, so a pay-as-you-go key is only spent on the calls the app asked for.
-      # - name: X-search
-      #   key_env: KENARI_KEY_DEMO_X_SEARCH
-      #   capability: search
-    presets:                      # one entry per category; the name is the model's name (ADR 0021)
-      text:                       # chat   | image: images | video: videos
-        category: chat            # tts: audio_speech | stt: audio_transcription
-        optimization: balanced    # music: music | systemone: systemone
-        models: []                # the pool, picked in the panel; the optimization only orders it
-        sticky: true              # one model per session; false routes every turn again (ADR 0025)
-    # A second preset of the same category is refused: a client holds one of each.
-    # Every free and discounted model of the category is in the pool on its own (ADR 0022).
-    # optimization: cheapest | balanced | best_quality
+# Clients (the apps that call xellter), their kenari keys and presets are not in this file:
+# they live in the database (ADR 0037). Add one in the panel or with `xellter client add`.

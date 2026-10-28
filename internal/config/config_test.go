@@ -317,3 +317,55 @@ func (h *memHistory) ListHistory() []string {
 	}
 	return out
 }
+
+type clientHistory struct {
+	memHistory
+	raw  string
+	have bool
+}
+
+func (h *clientHistory) Clients() (string, bool)   { return h.raw, h.have }
+func (h *clientHistory) SetClients(r string) error { h.raw, h.have = r, true; return nil }
+
+func TestClientsMoveToTheStoreAndOutOfTheFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "xellter.yaml")
+	if err := os.WriteFile(path, []byte("clients:\n  - name: app\n    enabled: true\n    purpose: general\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &clientHistory{}
+	if err := AttachClients(path, c, h); err != nil {
+		t.Fatal(err)
+	}
+	if !h.have || !strings.Contains(h.raw, `"app"`) {
+		t.Fatalf("clients were not imported: %q", h.raw)
+	}
+	b, _ := os.ReadFile(path)
+	if strings.Contains(string(b), "app") || strings.Contains(string(b), "clients:") {
+		t.Fatalf("the file still holds the clients:\n%s", b)
+	}
+	again, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := AttachClients(path, again, h); err != nil || len(again.Clients) != 1 || again.Clients[0].Name != "app" {
+		t.Fatalf("clients not read back: %v %+v", err, again.Clients)
+	}
+	// a later save puts the previous clients in the history entry, so a restore brings them back
+	again.Clients = nil
+	if err := Save(path, again, h); err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, y := range h.m {
+		if strings.Contains(string(y), "name: app") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("history entry lacks the previous clients")
+	}
+}

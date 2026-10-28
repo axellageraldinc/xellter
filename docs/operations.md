@@ -76,7 +76,7 @@ systemctl --user start xellter.service
 
 **Never** copy `xellter.db` with `cp` while the service is running, and never delete `data/` while
 the service is up: the request log, the leaderboard scores and the admin sessions all live there.
-The clients, the keys and the login record are in `xellter.yaml`, `data/secrets.env` and
+The clients and their presets are in `data/xellter.db` (ADR 0037); the key values and the login record are in `data/secrets.env` and
 `data/auth-record.json`; the log itself is a history, and losing it costs the usage history, not
 the service.
 

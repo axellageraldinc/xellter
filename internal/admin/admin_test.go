@@ -574,13 +574,10 @@ func TestPresetStickyIsSavedAndRead(t *testing.T) {
 	if p.IsSticky() {
 		t.Fatalf("the preset must not stick any more: %+v", p)
 	}
-	// and the change is on disk
-	b, err := os.ReadFile(a.Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(b), "sticky: false") {
-		t.Fatalf("the saved config does not carry the toggle:\n%s", b)
+	// and the change is saved with the clients, in the database (ADR 0037)
+	raw, _ := a.St.Clients()
+	if !strings.Contains(raw, `"sticky":false`) {
+		t.Fatalf("the saved clients do not carry the toggle:\n%s", raw)
 	}
 
 	// a save that does not mention the toggle keeps it off
