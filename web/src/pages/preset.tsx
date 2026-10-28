@@ -363,7 +363,7 @@ function ModelPicker({
   const [draft, setDraft] = React.useState<string[]>(selected)
   const [out, setOut] = React.useState<string[]>(excluded)
   // A model xellter adds on its own is ticked until the owner unticks it (ADR 0035).
-  const auto = React.useMemo(() => new Set([...preset.auto_models, ...excluded]), [preset.auto_models, excluded])
+  const auto = React.useMemo(() => new Set([...preset.free_models, ...preset.auto_models, ...excluded]), [preset.free_models, preset.auto_models, excluded])
   const isOn = (id: string) => draft.includes(id) || (auto.has(id) && !out.includes(id))
   const setMany = (ids: string[], on: boolean) => {
     setDraft((d) => {

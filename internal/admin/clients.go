@@ -711,6 +711,9 @@ type presetView struct {
 	OptimizationLabel string   `json:"optimization_label"`
 	Models            []string `json:"models"`
 	AutoModels        []string `json:"auto_models"` // free and promo models xellter added on its own
+	// FreeModels is every free or promo model xellter would add to this preset, including the ones the owner
+	// also ticked by hand: unticking one of those must be recorded in Excluded, or it comes straight back.
+	FreeModels []string `json:"free_models"`
 	// ExcludedModels are free or promo models xellter would add but the owner unticked (ADR 0035).
 	ExcludedModels []string             `json:"excluded_models"`
 	Excluded       []string             `json:"excluded"` // the whole saved list, what the panel sends back
@@ -758,8 +761,9 @@ func (h *Handler) clientDetail(w http.ResponseWriter, r *http.Request) {
 		for _, id := range p.Excluded {
 			skip[id] = true
 		}
-		auto, excluded := []string{}, []string{}
+		auto, excluded, free := []string{}, []string{}, []string{}
 		for _, id := range rank.AutoPool(cfg, h.a.Cat.Snapshot(), h.a.Pool, cl, p.Category, now) {
+			free = append(free, id)
 			switch {
 			case own[id]:
 			case skip[id]:
@@ -771,7 +775,7 @@ func (h *Handler) clientDetail(w http.ResponseWriter, r *http.Request) {
 		presets = append(presets, presetView{
 			Name: n, Category: p.Category, Label: presetLabel(n, p.Category),
 			Optimization: p.Optimization, OptimizationLabel: optimizationLabel[p.Optimization],
-			Models: append([]string{}, p.Models...), AutoModels: auto, ExcludedModels: excluded, Excluded: append([]string{}, p.Excluded...), Sticky: p.IsSticky(),
+			Models: append([]string{}, p.Models...), AutoModels: auto, FreeModels: free, ExcludedModels: excluded, Excluded: append([]string{}, p.Excluded...), Sticky: p.IsSticky(),
 			Ranking:      rk[rank.Key(cl.Name, n)],
 			Evictions:    h.a.Rt.Evictions(cl.Name, n, now),
 			OutOfService: h.a.Rt.OutOfService(cl.Name, n, now),
