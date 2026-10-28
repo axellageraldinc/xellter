@@ -3,7 +3,7 @@
 Server-wide rules: `~/AGENTS.md` (security first, scan before push, commit + push to `main`). This file only adds project specifics. `CLAUDE.md` just imports this file.
 
 ## What this is
-xellter is a Go LLM gateway in front of kenari.id. A *client* (an app) owns one or more kenari keys, one purpose and at most one preset per category (several for chat); a *preset* is an explicit pool of catalog models plus one optimization (Cheapest, Balanced, Best Quality). xellter orders that pool deterministically, routes round-robin over the top ten with a session pin, retries a retriable failure once, evicts a model from one preset after three errors, compresses tool output with RTK, and serves an admin panel. Architecture: `docs/architecture.md`. The accepted design is `docs/rewrite-plan.md`.
+xellter is a Go LLM gateway in front of kenari.id. A *client* (an app) owns one or more kenari keys, one purpose and at most one preset per category (several for chat); a *preset* is an explicit pool of catalog models plus one optimization (Cheapest, Balanced, Best Quality, Fastest). xellter orders that pool deterministically, routes round-robin over the top ten with a session pin, retries a retriable failure once, evicts a model from one preset after three errors, compresses tool output with RTK, and serves an admin panel. Architecture: `docs/architecture.md`. The accepted design is `docs/rewrite-plan.md`.
 
 ## Run / test
 - Go lives at `~/.local/go-root/go/bin` (not on PATH by default). `scripts/ci.sh` sets it up.

@@ -432,6 +432,8 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 		orderCheapest(r, pool, top)
 	case "best_quality":
 		orderQuality(r, pool, top)
+	case "fastest":
+		orderFastest(r, pool, top)
 	default:
 		orderBalanced(r, pool, top)
 	}
@@ -618,6 +620,29 @@ func orderCheapest(r *Ranking, pool []*scored, top int) {
 	emit(r, list, "cheapest: reference request price, free then plan-covered")
 }
 
+// orderFastest puts the models that start answering soonest first (ADR 0039). The speed class decides (1.5 s buckets, the
+// measured wait for the first token with failures counted, a model nobody measured counts as the pool's median), then the
+// price, then the leaderboard score, then the name. The score shown is the speed class, so the panel lists them in this order.
+func orderFastest(r *Ranking, pool []*scored, top int) {
+	for _, s := range pool {
+		s.score = 1 / (1 + float64(bucketOf(s)))
+	}
+	sort.SliceStable(pool, func(i, j int) bool {
+		a, b := pool[i], pool[j]
+		if bucketOf(a) != bucketOf(b) {
+			return bucketOf(a) < bucketOf(b)
+		}
+		if a.cost != b.cost {
+			return a.cost < b.cost
+		}
+		if a.bench != b.bench {
+			return a.bench > b.bench
+		}
+		return a.m.ID < b.m.ID
+	})
+	emit(r, take(&pool, top), "fastest: first-token wait, then price")
+}
+
 // orderBalanced is cost 50 : benchmark 50.
 func orderBalanced(r *Ranking, pool []*scored, top int) {
 	for _, s := range pool {
@@ -732,6 +757,8 @@ func reserveScore(s *scored, optimization string) float64 {
 	case "cheapest":
 		// price ascending becomes score descending, so the cheapest reserve is promoted first
 		return 1 / (1 + s.cost/1000)
+	case "fastest":
+		return 1 / (1 + float64(bucketOf(s)))
 	}
 	return 0.5*s.score + 0.5*s.bench
 }
@@ -742,6 +769,8 @@ func reserveWhy(optimization string) string {
 		return "best quality first"
 	case "cheapest":
 		return "cheapest first"
+	case "fastest":
+		return "fastest first"
 	}
 	return "balanced first"
 }

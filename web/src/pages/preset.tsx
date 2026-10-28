@@ -28,6 +28,7 @@ const OPTIMIZATIONS = [
   { value: 'cheapest', label: 'Cheapest', help: 'Price only: input, output, cache and promos.' },
   { value: 'balanced', label: 'Balanced', help: 'Half price, half quality from the public leaderboards.' },
   { value: 'best_quality', label: 'Best Quality', help: 'The benchmark of this category only.' },
+  { value: 'fastest', label: 'Fastest', help: 'The wait for the first token seen in recent traffic, then price. A model nobody has used yet counts as average.' },
 ]
 
 const KIND_ICON: Record<string, string> = {

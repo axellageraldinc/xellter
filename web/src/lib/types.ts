@@ -1,7 +1,7 @@
 /** The shapes the panel API returns. They mirror the Go structs in internal/admin. */
 
 export type Purpose = 'general' | 'coding' | 'agentic' | 'vision' | 'bulk'
-export type Optimization = 'cheapest' | 'balanced' | 'best_quality'
+export type Optimization = 'cheapest' | 'balanced' | 'best_quality' | 'fastest'
 export type Category =
   | 'chat'
   | 'images'

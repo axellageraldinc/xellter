@@ -31,7 +31,7 @@ var purposeLabel = map[string]string{
 }
 
 var optimizationLabel = map[string]string{
-	"cheapest": "Cheapest", "balanced": "Balanced", "best_quality": "Best Quality",
+	"cheapest": "Cheapest", "balanced": "Balanced", "best_quality": "Best Quality", "fastest": "Fastest",
 }
 
 var categoryLabel = map[string]string{

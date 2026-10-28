@@ -906,3 +906,48 @@ func TestExcludedFreeModelIsNotAddedAutomatically(t *testing.T) {
 		t.Fatalf("a model the owner ticked is in the pool whatever the exclusion says: %v", pool)
 	}
 }
+
+// Fastest orders by the measured wait for the first token before price, an unmeasured model counts as average, and a model
+// that fails often is as slow as its retries (ADR 0039).
+func TestFastestOrdersBySpeedBeforePrice(t *testing.T) {
+	f := fixture(chat("dear-fast", 400, 1200), freeChat("free-slow:free"), freeChat("free-mid:free"), freeChat("new:free"))
+	f.preset("dear-fast", "free-slow:free", "free-mid:free", "new:free")
+	f.optimize("fastest")
+	waits := map[string]float64{"dear-fast": 600, "free-slow:free": 30000, "free-mid:free": 4000}
+	r := f.rank(func(in *Inputs) {
+		in.Top = 4
+		in.Speed = func(_, _, m string) (float64, bool) { w, ok := waits[m]; return w, ok }
+	})
+	got := order(r)
+	if got[0] != "dear-fast" {
+		t.Fatalf("the fastest model leads even though it costs money: %v", got)
+	}
+	if got[len(got)-1] != "free-slow:free" {
+		t.Fatalf("the slowest model is last: %v", got)
+	}
+	if indexOf(got, "new:free") > indexOf(got, "free-slow:free") || indexOf(got, "new:free") < indexOf(got, "dear-fast") {
+		t.Fatalf("an unmeasured model counts as average, between the fast and the slow: %v", got)
+	}
+}
+
+// Within one speed class the cheaper model comes first.
+func TestFastestBreaksATieByPrice(t *testing.T) {
+	f := fixture(chat("a-paid", 100, 300), freeChat("b-free:free"))
+	f.preset("a-paid", "b-free:free")
+	f.optimize("fastest")
+	r := f.rank(func(in *Inputs) {
+		in.Speed = func(_, _, m string) (float64, bool) { return 800, true }
+	})
+	if got := order(r); got[0] != "b-free:free" {
+		t.Fatalf("equally fast: the free model first: %v", got)
+	}
+}
+
+func indexOf(list []string, s string) int {
+	for i, v := range list {
+		if v == s {
+			return i
+		}
+	}
+	return -1
+}

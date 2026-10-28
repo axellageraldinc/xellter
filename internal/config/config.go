@@ -130,7 +130,7 @@ type Client struct {
 // most one preset per category (several for chat, ADR 0038).
 type Preset struct {
 	Category     string   `yaml:"category" json:"category"`         // chat | images | videos | audio_speech | audio_transcription | music | systemone
-	Optimization string   `yaml:"optimization" json:"optimization"` // cheapest | balanced | best_quality
+	Optimization string   `yaml:"optimization" json:"optimization"` // cheapest | balanced | best_quality | fastest
 	Models       []string `yaml:"models" json:"models"`             // the pool, chosen in the panel
 	// Excluded are free or discounted models the owner unticked: xellter does not add them to this preset
 	// on its own. The list is kept across catalog syncs, and across a promo that ends and comes back (ADR 0035).
@@ -188,7 +188,7 @@ func CategoryOfPreset(name string) string {
 var Purposes = []string{"general", "coding", "agentic", "vision", "bulk"}
 
 // Optimizations are the three preset rules.
-var Optimizations = []string{"cheapest", "balanced", "best_quality"}
+var Optimizations = []string{"cheapest", "balanced", "best_quality", "fastest"}
 
 // Default returns the built-in configuration (no upstreams, no clients).
 func Default() *Config {

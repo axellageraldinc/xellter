@@ -163,7 +163,7 @@ a client may hold several chat presets (ADR 0038), for example a fast one for a 
 | key | meaning |
 |---|---|
 | `category` | the kind of model the preset serves; required for a name that is not one of the suggested ones. A config written before ADR 0021 still loads: the old names keep their meaning |
-| `optimization` | `cheapest` \| `balanced` \| `best_quality`; empty means `balanced` |
+| `optimization` | `cheapest` \| `balanced` \| `best_quality` \| `fastest`; empty means `balanced` |
 | `models` | the pool: explicit catalog model ids, no duplicates, no blanks. The optimization only orders what is listed here |
 | `sticky` | `true` keeps one model per session for the life of the session (it moves when the model is taken out, or is slow for the session, ADR 0029); `false` routes every turn again. Absent means `true`, so a config written before ADR 0025 keeps the behaviour it had |
 
