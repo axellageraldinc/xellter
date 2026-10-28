@@ -778,3 +778,39 @@ func TestUsageMarksAClientThatNoLongerExists(t *testing.T) {
 		t.Fatal("a client that exists must not be marked")
 	}
 }
+
+// Traffic served by a local model is in the panel's usage like any other (ADR 0033): its row is listed by model,
+// free, and counted in the totals.
+func TestUsageDrillDownListsLocalModel(t *testing.T) {
+	a := newTestApp(t)
+	h := New(a)
+	c := sessionCookie(t, a)
+	cfg := *a.Cfg()
+	cfg.LocalModels = []config.LocalModel{{ID: "maleo-small-id", Category: "audio_transcription", BaseURL: "http://127.0.0.1:1"}}
+	if err := a.Apply(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Cat.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	a.St.Log(store.Request{TS: time.Now().UnixMilli(), Client: "babu", Preset: "text", Model: "maleo-small-id", Upstream: "local",
+		OK: true, Billing: "free", Session: "s1"})
+	a.St.Flush()
+	rec := do(t, h, c, http.MethodGet, "/api/usage/drill?window=24h&client=babu&preset=text", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		Rows []struct {
+			Model, Billing string
+			Requests       int
+		}
+		Totals struct{ Requests int }
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Rows) != 1 || out.Rows[0].Model != "maleo-small-id" || out.Rows[0].Billing != "free" || out.Totals.Requests != 1 {
+		t.Fatalf("the local model must be listed as free and counted: %s", rec.Body)
+	}
+}

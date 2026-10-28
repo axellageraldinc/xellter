@@ -70,6 +70,47 @@ type Model struct {
 	SunsetAt     *time.Time `json:"sunset_at,omitempty"`
 	Subscriber   bool       `json:"subscriber_only"`
 	FreeSibling  string     `json:"-"` // id of the paid twin of a ":free" model
+	// BaseURL is set on a model served from this machine (ADR 0033): requests go there, with no kenari
+	// key. UpstreamModel is the name that server knows the model by.
+	BaseURL       string `json:"base_url,omitempty"`
+	UpstreamModel string `json:"upstream_model,omitempty"`
+}
+
+// IsLocal reports whether the model runs on this machine instead of at kenari.
+func (m *Model) IsLocal() bool { return m != nil && m.BaseURL != "" }
+
+// Local describes a model served from this machine.
+type Local struct {
+	ID, Category, BaseURL, Model string
+}
+
+// WithLocal returns a source that adds the local models to what src fetches. A model whose id kenari
+// already uses is left alone, so a local entry can never shadow a kenari model. locals is read on every
+// fetch, so a reloaded configuration takes effect at the next refresh.
+func WithLocal(src Source, locals func() []Local) Source { return localSource{src, locals} }
+
+type localSource struct {
+	Source
+	locals func() []Local
+}
+
+func (l localSource) Fetch(ctx context.Context) (*Snapshot, error) {
+	s, err := l.Source.Fetch(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, lm := range l.locals() {
+		if _, taken := s.Models[lm.ID]; taken {
+			continue
+		}
+		up := lm.Model
+		if up == "" {
+			up = lm.ID
+		}
+		s.Models[lm.ID] = &Model{ID: lm.ID, Owner: "local", Endpoint: lm.Category, Endpoints: []string{lm.Category},
+			Free: true, BaseURL: strings.TrimRight(lm.BaseURL, "/"), UpstreamModel: up}
+	}
+	return s, nil
 }
 
 // Plan is a kenari subscription.

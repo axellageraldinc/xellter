@@ -13,6 +13,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -31,7 +32,22 @@ type Config struct {
 	Kenari  Kenari   `yaml:"kenari" json:"kenari"`
 	Routing Routing  `yaml:"routing" json:"routing"`
 	Clients []Client `yaml:"clients" json:"clients"`
+	// LocalModels are models served from this machine instead of kenari (ADR 0033).
+	LocalModels []LocalModel `yaml:"local_models,omitempty" json:"local_models,omitempty"`
 }
+
+// LocalModel is a model that runs on this machine behind an OpenAI-compatible
+// HTTP server. It has no key, no price and no kenari account: it is free, and it
+// joins the pool of every preset of its category automatically (ADR 0033).
+type LocalModel struct {
+	ID       string `yaml:"id" json:"id"`                           // the name a preset lists and the panel shows
+	Category string `yaml:"category" json:"category"`               // only audio_transcription is supported
+	BaseURL  string `yaml:"base_url" json:"base_url"`               // server root, e.g. http://127.0.0.1:8490
+	Model    string `yaml:"model,omitempty" json:"model,omitempty"` // name the server knows; defaults to ID
+}
+
+// LocalCategories are the categories a local model can serve.
+var LocalCategories = []string{"audio_transcription"}
 
 // Server holds listener and storage settings.
 type Server struct {
@@ -353,6 +369,22 @@ func (c *Config) Validate() error {
 	bad := func(f string, a ...any) { errs = append(errs, fmt.Sprintf(f, a...)) }
 	if !strings.Contains(c.Server.Listen, ":") {
 		bad("server.listen must be host:port")
+	}
+	lseen := map[string]bool{}
+	for i, lm := range c.LocalModels {
+		switch {
+		case !nameRe.MatchString(lm.ID):
+			bad("local_models[%d].id is invalid", i)
+		case lseen[lm.ID]:
+			bad("duplicate local model %q", lm.ID)
+		}
+		lseen[lm.ID] = true
+		if !contains(LocalCategories, lm.Category) {
+			bad("local model %q: category must be one of %v", lm.ID, LocalCategories)
+		}
+		if u, err := url.Parse(lm.BaseURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			bad("local model %q: base_url must be an http(s) URL", lm.ID)
+		}
 	}
 	cseen, envSeen := map[string]bool{}, map[string]string{}
 	for i, cl := range c.Clients {

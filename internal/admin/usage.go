@@ -119,6 +119,12 @@ func (h *Handler) usageDrill(w http.ResponseWriter, r *http.Request) {
 			if b == "" {
 				b = billing[u.Model]
 			}
+			if b == "" {
+				// a local model is always free, whether or not the ranking still holds it (ADR 0033)
+				if snap := h.a.Cat.Snapshot(); snap != nil && snap.Models[u.Model].IsLocal() {
+					b = rank.BillingFree
+				}
+			}
 			rows = append(rows, usageRow{
 				Key: u.Model, Label: u.Model, Client: client, Preset: u.Preset, Model: u.Model,
 				Billing: b, BillingLabel: billingLabel(b),

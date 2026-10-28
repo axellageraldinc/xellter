@@ -49,6 +49,28 @@ clients[]:
 | `music_timeout_s` | `900` | music generation timeout |
 | `account_key_env` | `KENARI_ACCOUNT_KEY` | secret name of an optional full-access key. It only reads plan, usage and balance, never serves a request. Must look like `UPPER_SNAKE` |
 
+## local_models[]
+
+Models served from this machine instead of kenari (ADR 0033). Optional; empty by default.
+
+```yaml
+local_models:
+  - id: maleo-small-id
+    category: audio_transcription
+    base_url: http://127.0.0.1:8490
+    model: small-id        # optional: the name the local server knows; defaults to id
+```
+
+| key | meaning |
+|---|---|
+| `id` | the name a preset can list and the panel shows (owner `local`); letters, digits, dot, dash, underscore; unique |
+| `category` | only `audio_transcription` is supported |
+| `base_url` | root of an OpenAI-compatible server (`/v1/audio/transcriptions` is appended); `http` or `https` |
+| `model` | name sent to that server in place of `id` |
+
+A local model is free, needs no key (none is sent), and is in the pool of every preset of its category
+without being listed. A kenari model with the same id wins. A change takes effect at once.
+
 ## routing
 
 Everything a preset or a model decides is not here: the optimization and the stickiness live on the

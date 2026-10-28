@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -76,6 +77,15 @@ func (d dynSource) Fetch(ctx context.Context) (*catalog.Snapshot, error) {
 	return k.Fetch(ctx)
 }
 
+// locals are the local models of the active configuration, in the catalog's terms (ADR 0033).
+func (a *App) locals() []catalog.Local {
+	var out []catalog.Local
+	for _, lm := range a.Cfg().LocalModels {
+		out = append(out, catalog.Local{ID: lm.ID, Category: lm.Category, BaseURL: lm.BaseURL, Model: lm.Model})
+	}
+	return out
+}
+
 // New loads the configuration and builds all components (nothing runs yet).
 func New(path string, src catalog.Source) (*App, error) {
 	cfg, err := config.Load(path)
@@ -91,6 +101,7 @@ func New(path string, src catalog.Source) (*App, error) {
 	if src == nil {
 		src = dynSource{a}
 	}
+	src = catalog.WithLocal(src, a.locals)
 	a.Cat = catalog.New(src, filepath.Join(cfg.Server.DataDir, "catalog.json"))
 	a.Pool = upstream.NewPool()
 	a.Pool.Reload(cfg, config.LoadSecrets(cfg.Server.SecretsFile), st)
@@ -136,7 +147,11 @@ func (a *App) Apply(c *config.Config) error {
 }
 
 func (a *App) activate(c *config.Config) {
-	a.cfg.Store(c)
+	old := a.cfg.Swap(c)
+	if old != nil && !reflect.DeepEqual(old.LocalModels, c.LocalModels) {
+		// a local model added or removed shows up now, not at the next scheduled refresh
+		go func() { _ = a.Cat.Refresh(context.Background()) }()
+	}
 	a.Pool.Reload(c, config.LoadSecrets(c.Server.SecretsFile), a.St)
 	a.Px.SetConfig(c)
 	a.Rt.SetConfig(c)

@@ -6,6 +6,7 @@ package upstream
 
 import (
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"sort"
 	"strings"
@@ -29,6 +30,7 @@ type Key struct {
 	secret   string
 	cfg      config.Upstream
 	acct     *Account
+	local    bool      // the key of models served from this machine: no secret, no kenari account, no limits
 	readOnly bool      // the account key: it reads plan and balance, it never serves requests
 	capable  string    // the kenari service this key is dedicated to ("" = a model key, "search" = the X search endpoint)
 	cooldown time.Time // key unusable until (rejected key)
@@ -42,17 +44,26 @@ type Key struct {
 	lastOK   time.Time
 }
 
+// LocalKey is the stand-in key every attempt on a local model carries (ADR 0033). It has no secret and no
+// kenari account, so none of kenari's limits, cooldowns or breaker apply to it; a model that keeps failing
+// is still taken out of its preset by the router's eviction.
+func (p *Pool) LocalKey() *Key { return p.local }
+
 // Pool is the set of keys and accounts.
 type Pool struct {
 	mu    sync.RWMutex
 	keys  []*Key
 	by    map[string]*Key
 	accts map[string]*Account
+	local *Key
 	rr    atomic.Uint64
 }
 
 // NewPool returns an empty pool.
-func NewPool() *Pool { return &Pool{by: map[string]*Key{}, accts: map[string]*Account{}} }
+func NewPool() *Pool {
+	return &Pool{by: map[string]*Key{}, accts: map[string]*Account{}, local: &Key{Name: "local", label: "local", local: true,
+		acct: &Account{Name: "local"}, blocked: map[string]time.Time{}, blockN: map[string]int{}}}
+}
 
 // DefaultAccount is the name of the one kenari account: there is a single
 // account, and the limits kenari applies are per account.
@@ -301,6 +312,9 @@ const (
 func (k *Key) Check(m *catalog.Model, snap *catalog.Snapshot, now time.Time) string {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if k.local {
+		return OK
+	}
 	if r := k.check(m, now); r != OK {
 		return r
 	}
@@ -358,6 +372,9 @@ func (k *Key) check(m *catalog.Model, now time.Time) string {
 func (k *Key) Reserve(m *catalog.Model, snap *catalog.Snapshot, now time.Time) string {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if k.local {
+		return OK
+	}
 	if r := k.check(m, now); r != OK {
 		return r
 	}
@@ -471,6 +488,11 @@ func (k *Key) Failure(model string, status int, body []byte, retryAfter time.Dur
 	code, msg := errorInfo(body)
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if k.local {
+		// Nothing here is a verdict on a key: the local server is either up or it is not. The router's per-preset
+		// eviction and health tracking take a model that keeps failing out of the preset.
+		return Verdict{Retry: status == 0 || status >= 500, Reason: fmt.Sprintf("local server status %d", status)}
+	}
 	a := k.acct
 	base, max := cooldownBase, cooldownMax
 	blockModel := func(d time.Duration) {

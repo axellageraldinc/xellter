@@ -194,6 +194,9 @@ func hasPlan(pool *upstream.Pool, cl *config.Client, now time.Time) bool {
 
 // callableBy reports whether any key of the client may call the model.
 func callableBy(pool *upstream.Pool, cl *config.Client, m *catalog.Model) bool {
+	if m.IsLocal() { // needs no kenari key (ADR 0033)
+		return true
+	}
 	for _, k := range pool.ClientKeys(cl.Name) {
 		if k.Secret() != "" && k.AllowedModel(m.ID) {
 			return true
@@ -471,6 +474,9 @@ func endpointMatches(m *catalog.Model, category string) bool {
 
 // billingOf reports how this client would pay for the model and whether any of its keys may call it.
 func billingOf(in Inputs, cl *config.Client, m *catalog.Model) (string, bool) {
+	if m.IsLocal() { // free, and needs no key (ADR 0033)
+		return BillingFree, true
+	}
 	usable, plan := false, false
 	for _, k := range in.Pool.ClientKeys(cl.Name) {
 		if k.Secret() == "" || !k.AllowedModel(m.ID) {

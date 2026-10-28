@@ -15,6 +15,14 @@ kenari:
   # and balance; it is never used to serve requests.
   account_key_env: KENARI_ACCOUNT_KEY
 
+# Models served from this machine instead of kenari (ADR 0033). Free, no key, and in the pool of every preset of
+# their category automatically. Only audio_transcription is supported; the server must speak the OpenAI API.
+# local_models:
+#   - id: maleo-small-id
+#     category: audio_transcription
+#     base_url: http://127.0.0.1:8490
+#     model: small-id               # optional: the name the local server knows
+
 # Routing is the same for every client and preset. These are the only knobs left.
 routing:
   rank_refresh_minutes: 5         # rankings are rebuilt on this interval, after a catalog sync, and by Recalculate

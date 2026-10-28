@@ -971,6 +971,9 @@ func categoryOrEndpoint(category string, m *catalog.Model) string {
 // billingOf reports how this client pays for the model, and whether any of its
 // keys may call it at all.
 func (h *Handler) billingOf(cl *config.Client, m *catalog.Model, snap *catalog.Snapshot, now time.Time) (string, bool) {
+	if m.IsLocal() { // free, and needs no key (ADR 0033)
+		return rank.BillingFree, true
+	}
 	usable, plan := false, false
 	for _, k := range h.a.Pool.ClientKeys(cl.Name) {
 		if k.Secret() == "" || !k.AllowedModel(m.ID) {

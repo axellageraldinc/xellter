@@ -441,6 +441,9 @@ func (r *Router) keysFor(cl *config.Client, m *catalog.Model, snap *catalog.Snap
 		k    *upstream.Key
 		tier int
 	}
+	if m.IsLocal() { // served from this machine: no kenari key, no limits (ADR 0033)
+		return []*upstream.Key{r.pool.LocalKey()}
+	}
 	var ks []kc
 	for _, k := range r.pool.ClientKeys(cl.Name) {
 		if why := k.Check(m, snap, now); why != upstream.OK {

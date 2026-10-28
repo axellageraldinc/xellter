@@ -534,7 +534,11 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 				}
 			}
 			attempts++
-			payload, err := body.encodeWith(at.Model.ID, streamUsage, drop)
+			sent := at.Model.ID
+			if at.Model.IsLocal() {
+				sent = at.Model.UpstreamModel
+			}
+			payload, err := body.encodeWith(sent, streamUsage, drop)
 			if err != nil {
 				writeErr(w, r.URL.Path, 400, "bad_request", "cannot encode request: "+err.Error(), 0)
 				return
@@ -683,7 +687,11 @@ func (s *Server) send(r *http.Request, at route.Attempt, payload []byte, ctype s
 	}
 	var timedOut atomic.Bool
 	timer := time.AfterFunc(limit, func() { timedOut.Store(true); cancel() })
-	url := cfg.Kenari.BaseURL + r.URL.Path
+	base := cfg.Kenari.BaseURL
+	if at.Model.IsLocal() {
+		base = at.Model.BaseURL
+	}
+	url := base + r.URL.Path
 	if r.URL.RawQuery != "" {
 		url += "?" + r.URL.RawQuery
 	}
@@ -692,8 +700,10 @@ func (s *Server) send(r *http.Request, at route.Attempt, payload []byte, ctype s
 	if ctype != "" {
 		req.Header.Set("Content-Type", ctype)
 	}
-	req.Header.Set("Authorization", "Bearer "+at.Key.Secret())
-	req.Header.Set("x-api-key", at.Key.Secret())
+	if !at.Model.IsLocal() { // a local server gets no kenari key (ADR 0033)
+		req.Header.Set("Authorization", "Bearer "+at.Key.Secret())
+		req.Header.Set("x-api-key", at.Key.Secret())
+	}
 	req.Header.Set("User-Agent", cfg.Kenari.UserAgent)
 	t0 := s.Now()
 	resp, err := s.hc.Do(req)
