@@ -45,6 +45,12 @@ Measured on the real traffic afterwards, it did not pay for itself:
 
 The advertised context window (largest in the pool) stays as ADR 0026 decided.
 
+## Addendum (2026-10-28)
+
+The code that learned "honours" and "ignores" from responses is gone: `internal/effort` now reads the effort a
+request asks for and remembers refusals, nothing else. The table `effort_facts` keeps only refusals (rows of
+the older kinds are ignored on load), and `effort_thinkers` was dropped.
+
 ## Consequences
 
 - A session keeps one model until that model is evicted or stops answering.

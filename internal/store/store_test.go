@@ -371,65 +371,89 @@ func TestALostDatabaseIsDetected(t *testing.T) {
 	}
 }
 
-// What the gateway learned about models is written to the database, so a restart does
-// not have to learn it again.
+// The models that refuse a reasoning effort are written to the database, so a restart does not make the next
+// request fail again.
 func TestEffortFactsSurviveAReopen(t *testing.T) {
 	dir := t.TempDir()
 	st, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	facts := []EffortFact{
-		{Model: "honest", Level: "none", Verdict: "honours", At: 1000},
+	if err := st.SaveEffortFacts([]EffortFact{
 		{Model: "stubborn", Level: "none", Verdict: "rejects", At: 1000},
-	}
-	thinkers := []EffortThinker{{Model: "honest"}}
-	if err := st.SaveEffortFacts(facts, thinkers); err != nil {
+		{Model: "old-measurement", Level: "none", Verdict: "ignores", At: 1000},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	st.Close()
 
-	// A new process, the same directory.
 	st2, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st2.Close()
-	gotFacts, gotThinkers := st2.EffortFacts()
-	if len(gotFacts) != 2 {
-		t.Fatalf("read back %d facts, wanted 2", len(gotFacts))
-	}
-	if len(gotThinkers) != 1 || gotThinkers[0].Model != "honest" {
-		t.Fatalf("read back the thinkers as %v", gotThinkers)
-	}
-	byModel := map[string]EffortFact{}
-	for _, f := range gotFacts {
-		byModel[f.Model] = f
-	}
-	if byModel["honest"].Verdict != "honours" || byModel["stubborn"].Verdict != "rejects" {
-		t.Fatalf("the facts came back as %v", byModel)
-	}
-	if byModel["honest"].At != 1000 {
-		t.Fatalf("the measurement time was lost: %v", byModel["honest"])
+	got := st2.EffortFacts()
+	if len(got) != 1 || got[0].Model != "stubborn" || got[0].At != 1000 {
+		t.Fatalf("read back %+v: only refusals come back", got)
 	}
 }
 
-// Saving replaces what was there: the gateway's knowledge is the current state, not a
-// log of everything it ever saw.
+// Saving replaces what was there: the knowledge is the current state, not a log.
 func TestSavingEffortFactsReplacesTheOldOnes(t *testing.T) {
 	st, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if err := st.SaveEffortFacts([]EffortFact{{Model: "old", Level: "none", Verdict: "honours", At: 1}}, nil); err != nil {
+	_ = st.SaveEffortFacts([]EffortFact{{Model: "a", Level: "none", Verdict: "rejects", At: 1}})
+	_ = st.SaveEffortFacts([]EffortFact{{Model: "b", Level: "none", Verdict: "rejects", At: 2}})
+	if got := st.EffortFacts(); len(got) != 1 || got[0].Model != "b" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+// A log that silently loses rows makes the usage page and the health rules lie, so the loss is counted.
+func TestRowsThrownAwayAreCounted(t *testing.T) {
+	s := &Store{logC: make(chan Request, 1)} // no writer: the queue fills at once
+	s.Log(Request{})
+	s.Log(Request{})
+	s.Log(Request{})
+	if dropped, lost := s.LogLoss(); dropped != 2 || lost != 0 {
+		t.Fatalf("dropped %d lost %d, want 2 and 0", dropped, lost)
+	}
+}
+
+func TestPresetStatsGiveTheMedianWaitAndTheFailureShare(t *testing.T) {
+	st, err := Open(t.TempDir())
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SaveEffortFacts([]EffortFact{{Model: "new", Level: "none", Verdict: "honours", At: 2}}, nil); err != nil {
+	defer st.Close()
+	now := time.Now()
+	for i, ttft := range []int{1000, 2000, 3000, 4000, 20000} {
+		st.Log(Request{TS: now.UnixMilli() - int64(i), Client: "c", Preset: "p", Model: "m", Path: "/v1/chat/completions", Status: 200, OK: true, Stream: true, TTFTMS: ttft})
+	}
+	st.Log(Request{TS: now.UnixMilli(), Client: "c", Preset: "p", Model: "m", Path: "/v1/chat/completions", Status: 503, Err: "upstream error"})
+	st.Log(Request{TS: now.UnixMilli(), Client: "c", Preset: "p", Model: "m", Path: "/v1/chat/completions", Err: "cancelled by the client"}) // not the model's doing
+	st.Log(Request{TS: now.UnixMilli(), Client: "other", Preset: "p", Model: "m", Path: "/v1/chat/completions", Status: 200, OK: true, Stream: true, TTFTMS: 99999})
+	st.Flush()
+	got := st.PresetStats("c", "p", now.Add(-time.Hour))["m"]
+	if got == nil || got.Requests != 6 || got.Failed != 1 || got.FailPct != 16.7 || got.TTFTp50MS != 3000 || got.TTFTp90MS != 20000 {
+		t.Fatalf("stats = %+v", got)
+	}
+}
+
+func TestModelEventsAreKeptPerPresetNewestFirst(t *testing.T) {
+	st, err := Open(t.TempDir())
+	if err != nil {
 		t.Fatal(err)
 	}
-	facts, _ := st.EffortFacts()
-	if len(facts) != 1 || facts[0].Model != "new" {
-		t.Fatalf("the old facts were kept: %v", facts)
+	defer st.Close()
+	st.AddModelEvent(ModelEvent{TS: 1, Client: "c", Preset: "p", Model: "a", Kind: "slow", Reason: "r1"})
+	st.AddModelEvent(ModelEvent{TS: 2, Client: "c", Preset: "p", Model: "b", Kind: "errors", Reason: "r2"})
+	st.AddModelEvent(ModelEvent{TS: 3, Client: "c", Preset: "other", Model: "z"})
+	got := st.ModelEvents("c", "p", 10)
+	if len(got) != 2 || got[0].Model != "b" || got[1].Model != "a" {
+		t.Fatalf("events = %+v", got)
 	}
 }

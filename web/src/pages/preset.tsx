@@ -2,7 +2,7 @@ import * as React from 'react'
 import { Check, ChevronDown, Pencil, Search, Sparkles, Trash2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import type { CatalogRow, PresetView } from '@/lib/types'
-import { ctx, left, rp } from '@/lib/format'
+import { ctx, left, rp, secs, when } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -66,6 +66,7 @@ export function PresetCard({
     [...models].sort().join('\n') !== [...preset.models].sort().join('\n')
   const ranking = preset.ranking
   const candidates = ranking?.candidates ?? []
+  const outNow = new Set((preset.out_of_service ?? []).map((o) => o.model))
 
   // The card follows the server when it changes underneath it.
   React.useEffect(() => {
@@ -224,6 +225,7 @@ export function PresetCard({
                   <TH>Model</TH>
                   <TH>Billing</TH>
                   <TH className="text-right">Score</TH>
+                  <TH>Last 24 h</TH>
                   <TH>Why it is here</TH>
                 </TR>
               </THead>
@@ -231,11 +233,26 @@ export function PresetCard({
                 {candidates.map((c, i) => (
                   <TR key={c.model}>
                     <TD className="tabular text-text-muted">{i + 1}</TD>
-                    <TD className="mono">{c.model}</TD>
+                    <TD className="mono">
+                      {c.model}
+                      {outNow.has(c.model) && (
+                        <Badge tone="danger" className="ml-2 align-middle">
+                          out
+                        </Badge>
+                      )}
+                    </TD>
                     <TD>
                       <BillingBadge billing={c.billing} />
                     </TD>
                     <TD className="tabular text-right">{c.score.toFixed(3)}</TD>
+                    <TD className="tabular text-xs text-text-muted" data-testid="model-stat">
+                      {(() => {
+                        const st = preset.stats?.[c.model]
+                        if (!st) return 'no traffic'
+                        const wait = st.ttft_p50_ms ? `${secs(st.ttft_p50_ms)} median first token` : 'no stream'
+                        return `${wait} · ${st.fail_pct}% failed · ${st.requests} req`
+                      })()}
+                    </TD>
                     <TD className="max-w-xs text-xs text-text-muted">{c.reason}</TD>
                   </TR>
                 ))}
@@ -259,6 +276,25 @@ export function PresetCard({
               </div>
             ))}
           </div>
+        )}
+
+        {(preset.history?.length ?? 0) > 0 && (
+          <details className="group" data-testid="out-history">
+            <summary className="cursor-pointer list-none text-xs font-semibold tracking-wide text-text-muted uppercase">
+              Taken out before ({preset.history.length})
+            </summary>
+            <div className="mt-2 space-y-1.5">
+              {preset.history.map((h) => (
+                <div key={`${h.ts}-${h.model}`} className="text-xs text-text-muted">
+                  <span className="tabular">{when(h.ts)}</span>
+                  {' · '}
+                  <span className="font-medium text-text">{h.model}</span>
+                  {' · '}
+                  {h.reason}
+                </div>
+              ))}
+            </div>
+          </details>
         )}
 
         {(ranking?.rejected?.length ?? 0) > 0 && (

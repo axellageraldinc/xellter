@@ -3,31 +3,17 @@ package app_test
 import (
 	"context"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/axellageraldinc/xellter/internal/app"
 	"github.com/axellageraldinc/xellter/internal/catalog"
-	"github.com/axellageraldinc/xellter/internal/effort"
+	"github.com/axellageraldinc/xellter/internal/store"
 )
 
-// The verdicts the tests write into the registry. They are spelled out here so the
-// test reads as the behaviour it checks, not as a package qualifier.
-const (
-	effortHonours = effort.Honours
-	effortIgnores = effort.Ignores
-	effortRejects = effort.Rejects
-	effortUnknown = effort.Unknown
-)
-
-func newEffortRegistry() *effort.Registry { return effort.NewRegistry() }
-
-// A reasoning effort is a promise the gateway keeps (ADR 0026). These tests cover the
-// three ways a model can break that promise, and the two things the gateway does
-// about each.
+// A reasoning effort is the client's request to the model. The gateway forwards it, never chooses a model by it
+// (ADR 0028), and serves a model that refuses the field without it (ADR 0026).
 
 // The effort is the client's request to the model, not a routing key (ADR 0028). A side
 // call (a title, a summary) asks for "none" while the conversation asks for something
@@ -44,14 +30,6 @@ func TestTheEffortDoesNotMoveASessionToAnotherModel(t *testing.T) {
 		return resp.Header.Get("X-Xellter-Model")
 	}
 	first := post("minimal")
-	// The pinned model is known to ignore "none" and every other model honours it.
-	for _, m := range []string{"cheap-b", "pro-c", "free-a:free", "promo-d"} {
-		v := effortHonours
-		if m == first {
-			v = effortIgnores
-		}
-		e.a.Rt.Efforts().Record(m, "none", v, time.Now())
-	}
 	for i := 0; i < 6; i++ {
 		effort := []string{"none", "minimal", "low"}[i%3]
 		if got := post(effort); got != first {
@@ -60,16 +38,26 @@ func TestTheEffortDoesNotMoveASessionToAnotherModel(t *testing.T) {
 	}
 }
 
-func TestEffortNoneStillAnswersWhenEveryModelIgnoresIt(t *testing.T) {
+func TestAModelThatRejectsTheEffortIsNotAskedAgain(t *testing.T) {
 	e := setup(t, nil)
-	e.a.Rt.Efforts().Record("cheap-b", "none", effortIgnores, time.Now())
-	e.a.Rt.Efforts().Record("pro-c", "none", effortIgnores, time.Now())
-	e.a.Rt.Efforts().Record("free-a:free", "none", effortIgnores, time.Now())
-	e.a.Rt.Efforts().Record("promo-d", "none", effortIgnores, time.Now())
+	e.a.Rt.Efforts().Record("cheap-b", "none", time.Now())
+	e.a.Rt.Efforts().Record("pro-c", "none", time.Now())
+	e.a.Rt.Efforts().Record("free-a:free", "none", time.Now())
+	e.a.Rt.Efforts().Record("promo-d", "none", time.Now())
 
+	var sawEffort bool
+	e.f.chat = func(c call, n int) (int, string) {
+		if strings.Contains(c.Body, "reasoning_effort") {
+			sawEffort = true
+		}
+		return 0, ""
+	}
 	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", `{"model":"text","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`)
 	if resp.StatusCode != 200 {
-		t.Fatalf("a client must still be answered when no model can honour the effort: status %d %s", resp.StatusCode, body)
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+	if sawEffort {
+		t.Fatal("the effort was sent to a model that is known to reject it")
 	}
 }
 
@@ -90,71 +78,8 @@ func TestAModelThatRejectsTheEffortIsServedWithoutIt(t *testing.T) {
 	}
 	// The refusal was seen: the model is now known to reject the effort, so the next
 	// request does not carry it at all.
-	if got := e.a.Rt.Efforts().Verdict(resp.Header.Get("X-Xellter-Model"), "none"); got != effortRejects {
-		t.Fatalf("the refusal was not recorded: %v", got)
-	}
-}
-
-func TestAModelThatRejectsTheEffortIsNotAskedAgain(t *testing.T) {
-	e := setup(t, nil)
-	e.a.Rt.Efforts().Record("cheap-b", "none", effortRejects, time.Now())
-	e.a.Rt.Efforts().Record("pro-c", "none", effortRejects, time.Now())
-	e.a.Rt.Efforts().Record("free-a:free", "none", effortRejects, time.Now())
-	e.a.Rt.Efforts().Record("promo-d", "none", effortRejects, time.Now())
-
-	var sawEffort bool
-	e.f.chat = func(c call, n int) (int, string) {
-		if strings.Contains(c.Body, "reasoning_effort") {
-			sawEffort = true
-		}
-		return 0, ""
-	}
-	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", `{"model":"text","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`)
-	if resp.StatusCode != 200 {
-		t.Fatalf("status %d: %s", resp.StatusCode, body)
-	}
-	if sawEffort {
-		t.Fatal("the effort was sent to a model that is known to reject it")
-	}
-}
-
-func TestAGradedEffortIsNotARoutingConstraint(t *testing.T) {
-	e := setup(t, nil)
-	// A model that ignores "low" is still a fine model for a "low" request: it
-	// answers, it just answers with more thinking. Refusing to serve it would be
-	// worse than the inaccuracy.
-	e.a.Rt.Efforts().Record("cheap-b", "low", effortIgnores, time.Now())
-	e.a.Rt.Efforts().Record("pro-c", "low", effortIgnores, time.Now())
-	e.a.Rt.Efforts().Record("free-a:free", "low", effortIgnores, time.Now())
-	e.a.Rt.Efforts().Record("promo-d", "low", effortIgnores, time.Now())
-
-	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", `{"model":"text","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"low"}`)
-	if resp.StatusCode != 200 {
-		t.Fatalf("status %d: %s", resp.StatusCode, body)
-	}
-	if served := resp.Header.Get("X-Xellter-Model"); served == "" {
-		t.Fatal("no model served the request")
-	}
-}
-
-// A model that thinks is known to think, so when it stays quiet under "none" it is
-// credited with obeying the effort. A model that has never been seen thinking is not
-// credited with anything: there is no evidence either way.
-func TestASilentModelIsNotCreditedWithObeyingTheEffort(t *testing.T) {
-	reg := newEffortRegistry()
-	now := time.Now()
-	// A model that has never thought, asked to not think, says nothing.
-	if v := reg.Observe("quiet", "none", false, now); v != effortUnknown {
-		t.Fatalf("a model that never thought must stay unknown, got %v", v)
-	}
-	// The same model, seen thinking: now a quiet answer is obedience.
-	reg.Observe("thinker", "none", true, now)
-	if v := reg.Observe("thinker", "none", false, now); v != effortHonours {
-		t.Fatalf("a model that stopped thinking honoured the effort, got %v", v)
-	}
-	// A model that keeps thinking ignores the effort.
-	if v := reg.Observe("thinker", "none", true, now); v != effortIgnores {
-		t.Fatalf("a model that kept thinking ignored the effort, got %v", v)
+	if ok := e.a.Rt.Efforts().Refuses(resp.Header.Get("X-Xellter-Model"), "none"); !ok {
+		t.Fatal("the refusal was not recorded")
 	}
 }
 
@@ -314,166 +239,85 @@ func TestTheModelListCarriesTheSupportedEfforts(t *testing.T) {
 
 // ---- persistence across a restart ----
 
-// A restart must not cost the client the knowledge the gateway had already paid for.
-//
-// The registry is built from traffic, so without saving it every restart starts blind:
-// the first request is served by a model that ignores the effort, and the client waits
-// for a long answer it did not ask for. The gateway writes what it learned to the
-// database and reads it back on the next start.
-func TestWhatTheGatewayLearnedSurvivesARestart(t *testing.T) {
-	e := setup(t, nil)
-	// The gateway learns that two models ignore "none" and two honour it.
-	e.a.Rt.Efforts().Record("cheap-b", "none", effortIgnores, time.Now())
-	e.a.Rt.Efforts().Record("pro-c", "none", effortIgnores, time.Now())
-	e.a.Rt.Efforts().Record("free-a:free", "none", effortHonours, time.Now())
-	e.a.Rt.Efforts().Record("promo-d", "none", effortHonours, time.Now())
-	// The facts are written when the service stops.
-	e.a.Close()
-
-	// A new process over the same data directory: the same as a restart.
-	src := &catalog.Kenari{BaseURL: e.f.srv.URL, UA: "test", HTTP: e.f.srv.Client()}
-	a2, err := app.New(e.path, src)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer a2.Close()
-	if err := a2.Cat.Refresh(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	a2.Rt.Recompute(time.Now())
-
-	// The knowledge came back.
-	if v := a2.Rt.Efforts().Verdict("cheap-b", "none"); v != effortIgnores {
-		t.Fatalf("the verdict for cheap-b came back as %v, wanted ignores", v)
-	}
-	if v := a2.Rt.Efforts().Verdict("free-a:free", "none"); v != effortHonours {
-		t.Fatalf("the verdict for free-a:free came back as %v, wanted honours", v)
-	}
-
-	// And the routing uses it: the request is served by a model that honours the effort.
-	px := httptest.NewServer(a2.Px)
-	defer px.Close()
-	req, _ := http.NewRequest("POST", px.URL+"/v1/chat/completions", strings.NewReader(`{"model":"text","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+e.keyCl)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("status %d", resp.StatusCode)
-	}
-	served := resp.Header.Get("X-Xellter-Model")
-	if served != "free-a:free" && served != "promo-d" {
-		t.Fatalf("after the restart a model that ignores the effort served the request: %s", served)
-	}
-}
-
-// A fact is a measurement, and a provider can change a model's behaviour. A fact older
-// than the trust window is not used, so the model is measured again.
-func TestAnOldFactIsNotUsedAfterARestart(t *testing.T) {
-	e := setup(t, nil)
-	// A fact from long ago: the model honoured "none" back then.
-	old := time.Now().Add(-2 * effort.DefaultTTL)
-	e.a.Rt.Efforts().Record("cheap-b", "none", effortIgnores, old)
-	e.a.Rt.Efforts().Record("pro-c", "none", effortIgnores, old)
-	e.a.Rt.Efforts().Record("free-a:free", "none", effortHonours, old)
-	e.a.Rt.Efforts().Record("promo-d", "none", effortHonours, old)
-	e.a.Close()
-
-	src := &catalog.Kenari{BaseURL: e.f.srv.URL, UA: "test", HTTP: e.f.srv.Client()}
-	a2, err := app.New(e.path, src)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer a2.Close()
-	if err := a2.Cat.Refresh(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	a2.Rt.Recompute(time.Now())
-
-	// The old facts were dropped, so the models are unknown again and the routing does
-	// not prefer the one that honoured the effort back then.
-	if v := a2.Rt.Efforts().Verdict("free-a:free", "none"); v != effortUnknown {
-		t.Fatalf("an expired fact was kept: %v", v)
-	}
-}
-
-// A refusal is a property of the API's parameter validation, not a passing mood. It
-// holds however old it is, and after a restart the model is still not asked with the
-// field.
+// A refusal is a property of the API's parameter validation, not a passing mood. It holds however old it is,
+// and after a restart the model is still not asked with the field.
 func TestARefusalSurvivesARestart(t *testing.T) {
 	e := setup(t, nil)
-	old := time.Now().Add(-100 * effort.DefaultTTL)
-	e.a.Rt.Efforts().Record("cheap-b", "none", effortRejects, old)
+	e.a.Rt.Efforts().Record("cheap-b", "none", time.Now().Add(-1000*24*time.Hour))
 	e.a.Close()
 
-	src := &catalog.Kenari{BaseURL: e.f.srv.URL, UA: "test", HTTP: e.f.srv.Client()}
-	a2, err := app.New(e.path, src)
-	if err != nil {
-		t.Fatal(err)
-	}
+	a2 := reopen(t, e)
 	defer a2.Close()
-	if err := a2.Cat.Refresh(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	a2.Rt.Recompute(time.Now())
-
-	if v := a2.Rt.Efforts().Verdict("cheap-b", "none"); v != effortRejects {
-		t.Fatalf("the refusal did not survive the restart: %v", v)
+	if !a2.Rt.Efforts().Refuses("cheap-b", "none") {
+		t.Fatal("the refusal did not survive the restart")
 	}
 }
 
-// A read-only command such as `xellter explain` builds an app over the same data
-// directory, loads the facts and closes again without serving anything. It must not
-// write that older copy back over what the running gateway has learned since.
+// The table once held what a model did with an effort ("honours", "ignores"). Those rows are not used any more
+// (ADR 0028): they must neither route anything nor be mistaken for a refusal.
+func TestOldMeasurementsAreIgnoredAfterARestart(t *testing.T) {
+	e := setup(t, nil)
+	if err := e.a.St.SaveEffortFacts([]store.EffortFact{
+		{Model: "cheap-b", Level: "none", Verdict: "ignores", At: 1},
+		{Model: "pro-c", Level: "none", Verdict: "honours", At: 1},
+		{Model: "free-a:free", Level: "none", Verdict: "rejects", At: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	e.a.Close()
+
+	a2 := reopen(t, e)
+	defer a2.Close()
+	if a2.Rt.Efforts().Refuses("cheap-b", "none") || a2.Rt.Efforts().Refuses("pro-c", "none") {
+		t.Fatal("a measurement that is not a refusal was loaded as one")
+	}
+	if !a2.Rt.Efforts().Refuses("free-a:free", "none") {
+		t.Fatal("a refusal was not loaded")
+	}
+}
+
+// A read-only command such as `xellter explain` builds an app over the same data directory, loads the refusals
+// and closes again without serving anything. It must not write its older copy back over what the running
+// gateway has learned since.
 func TestAReadOnlyCommandDoesNotOverwriteWhatWasLearned(t *testing.T) {
 	e := setup(t, nil)
-	e.a.Rt.Efforts().Record("cheap-b", "none", effortIgnores, time.Now())
-	e.a.Close() // a planned stop writes what was learned
+	e.a.Rt.Efforts().Record("cheap-b", "none", time.Now())
+	e.a.Close()
 
 	src := &catalog.Kenari{BaseURL: e.f.srv.URL, UA: "test", HTTP: e.f.srv.Client()}
-
-	// A read-only command starts: it loads the facts and holds them.
-	reader, err := app.New(e.path, src)
+	reader, err := app.New(e.path, src) // the read-only command: loads, holds
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := reader.Cat.Refresh(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
-	// Meanwhile the running gateway learns something new and writes it.
-	running, err := app.New(e.path, src)
+	running, err := app.New(e.path, src) // the running gateway learns something new and writes it
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := running.Cat.Refresh(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	running.Rt.Efforts().Record("pro-c", "none", effortHonours, time.Now())
+	running.Rt.Efforts().Record("pro-c", "none", time.Now())
 	running.Close()
+	reader.Close() // it learned nothing, so it writes nothing
 
-	// The read-only command now finishes and closes. It learned nothing, so it must
-	// not write its older copy back over what the running gateway just wrote.
-	reader.Close()
-
-	// The facts are still the ones the running gateway wrote.
 	verify, err := app.New(e.path, src)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer verify.Close()
-	facts, _ := verify.St.EffortFacts()
-	if len(facts) != 2 {
-		t.Fatalf("the read-only command overwrote the facts: %v", facts)
+	if n := len(verify.St.EffortFacts()); n != 2 {
+		t.Fatalf("the read-only command overwrote the refusals: %v", verify.St.EffortFacts())
 	}
-	byModel := map[string]string{}
-	for _, f := range facts {
-		byModel[f.Model] = f.Verdict
+}
+
+// reopen builds a new app over the data directory of e, as a restart does.
+func reopen(t *testing.T, e *env) *app.App {
+	t.Helper()
+	src := &catalog.Kenari{BaseURL: e.f.srv.URL, UA: "test", HTTP: e.f.srv.Client()}
+	a, err := app.New(e.path, src)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if byModel["pro-c"] != "honours" || byModel["cheap-b"] != "ignores" {
-		t.Fatalf("the facts came back as %v", byModel)
+	if err := a.Cat.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
 	}
+	a.Rt.Recompute(time.Now())
+	return a
 }

@@ -46,9 +46,9 @@ The tunnel (`~/.cloudflared/xellter.yml`, `cloudflared-xellter.service`) points
 ## Restarts
 
 State that survives a restart: the configuration, the request log, the learned leaderboard rows, the
-**session pins** (so a restart does not move conversations, ADR 0028) and the effort refusals. State
-that does not: evictions and health records, round-robin counters, key cooldowns and breakers. A restart
-forgives every model and key, which is the safe direction.
+**session pins** (so a restart does not move conversations, ADR 0028), the effort refusals, and the models
+that are out with their health records (ADR 0029). State that does not: round-robin counters, key cooldowns and
+breakers, and the token-estimate correction. A restart forgives every key, which is the safe direction.
 
 ## Backups
 
@@ -122,8 +122,9 @@ out of **that preset only**; the ring skips it and the next best model takes its
 
 A model that comes back is judged afresh, on half as many requests. If it is bad again it goes out for
 twice as long, up to `evict_cooldown_minutes`; a healthy judgement resets the doubling. A preset is
-never emptied: the last two models stay in whatever their record. Evictions and records are in memory,
-so a restart forgives every model; a model that is really bad is taken out again within a few requests.
+never emptied: the last two models stay in whatever their record. The models that are out and their records
+are saved every minute and on shutdown, so a restart does not forgive them. Every time a model is taken out an
+event is stored; the preset card shows them under "Taken out before".
 
 **A conversation leaves a slow model.** If the model a session is pinned to waits longer than
 `repin_first_token_s` (15) for two of the session's last three requests, the pin is dropped and the
@@ -132,10 +133,10 @@ model goes to the end of that session's order. The next model that answers becom
 ### Runbook: replies are slow
 
 1. Open the client's preset in the panel. **Out for now** shows who has already been taken out and why.
-2. The panel does not chart latency yet. The recent requests (`GET /api/requests`, behind the login) carry
-   `latency_ms` and `ttft_ms` per request and per model: a model with a long first-token wait that has
-   not been taken out is either under `health_min_requests` or under the limit. Lower
-   `slow_first_token_s` or `health_min_requests` for a stricter rule.
+2. The **Last 24 h** column of the same card gives, per model, the median first-token wait, the share of
+   failed requests and the request count. A model with a long wait that is not out is either under
+   `health_min_requests` or under the limit; lower `slow_first_token_s` or `health_min_requests` for a stricter
+   rule. **Taken out before** lists who went out earlier, and why. `GET /api/requests` has the raw rows.
 3. Remove a model that is always slow from the preset's pool in the panel. The free models of the
    category are added to every pool on their own (ADR 0022) and cannot be removed from one preset; the
    health rules are what keep the slow ones out.
@@ -152,6 +153,12 @@ Check that the client sends a session id (`X-Xellter-Session`, `X-Session-Id` or
 one xellter identifies the conversation by its first user message (ADR 0030); a client that rewrites that
 message (for example after compressing its history) starts a new session. `GET /v1/session?session=<id>`
 shows the live pin and every model the session has used. Also check that the preset is sticky.
+
+## Is the request log complete?
+
+`GET /healthz` reports `log_dropped` (rows thrown away because the write queue was full) and `log_lost` (rows the
+database refused). Both should be `0`. If they are not, the usage page and the health rules are working from
+fewer requests than were served; the log also says so once a minute. The usual cause is a slow or full disk.
 
 ## Security model
 - Client keys: random 192-bit, stored as sha256, shown once; a key belongs to one client.

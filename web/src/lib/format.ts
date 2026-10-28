@@ -55,3 +55,16 @@ export function ctx(n: number): string {
 export function pl(n: number, word: string): string {
   return `${n} ${word}${n === 1 ? '' : 's'}`
 }
+
+/** secs formats a wait given in milliseconds: 0.8 s, 12 s. */
+export function secs(ms: number): string {
+  if (!ms) return '—'
+  const s = ms / 1000
+  return (s < 10 ? s.toFixed(1) : Math.round(s).toString()) + ' s'
+}
+
+/** when says when a moment (unix milliseconds) was, relative to now. */
+export function when(ms: number): string {
+  const s = Math.max(0, (Date.now() - ms) / 1000)
+  return human(s) + ' ago'
+}

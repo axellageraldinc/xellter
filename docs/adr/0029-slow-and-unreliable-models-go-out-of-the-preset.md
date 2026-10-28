@@ -52,6 +52,16 @@ failed over: the response was already committed to the caller.
    requests (limit 10s)`), when they come back and how many times in a row they went out. The same line
    goes to the log.
 
+## Addendum (2026-10-28)
+
+- The models that are out, their strikes (the doubling) and the health records of the last hour are saved
+  in the database (`kv`, `model_health`) every minute and on shutdown, and loaded at start-up. A restart no
+  longer forgives a slow model.
+- Every time a model is taken out, an event (when, which model, why, until when) is written to the table
+  `model_events`, kept as long as the request log. The panel shows the latest events of a preset under
+  "Taken out before", and for every model of the preset the median first-token wait, the failure share and the
+  request count of the last 24 hours, with an "out" badge on the models that are out.
+
 ## Alternatives considered
 
 - **Rank by latency.** The ranking rotates over the models it keeps; sorting by speed would send

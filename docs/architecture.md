@@ -20,8 +20,9 @@ ADR [0017](adr/0017-three-optimizations.md), [0018](adr/0018-client-purpose-chan
 [0023](adr/0023-the-panel-is-the-site.md),
 [0025](adr/0025-sticky-is-a-per-preset-toggle.md),
 [0028](adr/0028-the-effort-does-not-choose-the-model.md),
-[0029](adr/0029-slow-and-unreliable-models-go-out-of-the-preset.md) and
-[0030](adr/0030-a-conversation-is-told-apart-by-its-first-user-message.md).
+[0029](adr/0029-slow-and-unreliable-models-go-out-of-the-preset.md),
+[0030](adr/0030-a-conversation-is-told-apart-by-its-first-user-message.md) and
+[0031](adr/0031-the-size-of-a-request-is-estimated-from-its-content.md).
 
 ## Components
 
@@ -29,11 +30,11 @@ ADR [0017](adr/0017-three-optimizations.md), [0018](adr/0018-client-purpose-chan
 |---|---|
 | `internal/config` | YAML schema, defaults, validation, retired-key refusal, history, secrets file, migration |
 | `internal/catalog` | kenari catalog + prices + promos + plans -> immutable `Snapshot`; System One on its own endpoint |
-| `internal/store` | SQLite (modernc, no CGO): request log, usage aggregates, leaderboard rows, admin sessions, video job -> key, learned effort facts |
+| `internal/store` | SQLite (modernc, no CGO): request log, usage aggregates, leaderboard rows, admin sessions, video job -> key, learned effort refusals, model events |
 | `internal/upstream` | per-key and per-account limits: rpm, free quota, plan ledger, cooldown, breaker, learned allow list |
 | `internal/rank` | pure ranking of one preset: pool -> rejections -> cost/quality -> top list, with reasons |
 | `internal/route` | rankings cache, effective pools, round-robin ring, session pin (saved across restarts), per-preset eviction, model health (slow / unreliable), key ordering |
-| `internal/effort` | the reasoning effort a request asks for, and the models known to refuse it (served without the field). It does not choose models (ADR 0028) |
+| `internal/effort` | reads the reasoning effort a request asks for, and remembers the models that refuse it (served without the field), saved across restarts. It does not choose models (ADR 0028) |
 | `internal/proxy` | data plane: auth, body rewrite, streaming relay, usage accounting, read-only endpoints |
 | `internal/rtk` | tool-output compression, always on |
 | `internal/bench` | public leaderboards -> one 0..1 value per model and arena |
@@ -99,7 +100,7 @@ otherwise an ignored key would look like it still works. `xellter migrate` conve
 6. **Attempts.** For each `(model, key)`: reserve (rpm, free quota, plan window), rewrite `model`,
    send with the client's headers. For a streamed chat request the first bytes of the answer are read
    **before** the response is committed to the caller: if nothing arrives within
-   `routing.first_token_timeout_s` (+1 s per 10k prompt tokens) the request is cancelled and the next model
+   `routing.first_token_timeout_s` (+1 s per 10k prompt tokens, an estimate: ADR 0031) the request is cancelled and the next model
    is tried (never for the last model that can be tried). Then streaming bodies are copied through in
    16 KB chunks with a flush each; only the head and tail are kept to read `usage`.
 7. **Failure.** `Key.Failure` classifies the status and applies its account/key effect; a retriable
@@ -266,8 +267,8 @@ Five rules, in this order.
    (the pool members the top list left out, in the optimization's order) takes its place, so the preset
    keeps routing against the same number of models. A session pinned to it moves on its next request. The
    rankings are not recomputed: scores do not depend on who is out. A preset is never emptied (the last
-   two models stay in). Eviction state is per client and preset, in memory, and survives a rank rebuild;
-   a restart forgives a model. Direct model pins (a caller naming a real model) are not evicted.
+   two models stay in). Eviction state is per client and preset and survives a rank rebuild and a restart
+   (the models that are out and their strikes are saved with the health records). Direct model pins (a caller naming a real model) are not evicted.
 5. **A session leaves a slow model.** If the pinned model's first token took longer than
    `repin_first_token_s` for two of the session's last three requests, the pin is dropped and that model
    goes to the end of that session's order.
@@ -293,7 +294,7 @@ them all and reports the moment of the last run.
 | `GET /v1/usage/keys` | the same traffic split by the kenari key name that served it |
 | `GET /v1/usage/models?preset=` | the same traffic per preset and model |
 | `GET /v1/account/balance`, `/v1/account/quota` | the account state xellter already keeps |
-| `GET /healthz` | `{ok, models, catalog_age_s, degraded}` |
+| `GET /healthz` | `{ok, models, catalog_age_s, degraded, log_dropped, log_lost}`: the last two count request rows thrown away because the log queue was full and rows the database refused, since the process started |
 
 No protocol translation: a body is forwarded to kenari with only `model` rewritten (and
 `stream_options.include_usage` added for streamed chat completions).
@@ -332,7 +333,7 @@ remaining knobs live in `xellter.yaml` and the Config tab edits that file (ADR 0
 |---|---|
 | Overview | status banner with alerts, 24 h requests / failures / cost at list price / characters saved by RTK, kenari plan windows and balance, hourly chart, per-client table, Refresh catalog |
 | Clients | one row per client: purpose, key names, presets, 24 h requests and cost; New client (name, purpose, optional kenari key) and the xellter key shown once |
-| Client detail | purpose and enabled; kenari keys with probe state and the models they may call (add, rename, remove); one card per preset: its name (renameable), optimization, the sticky-session toggle, pool picker grouped by vendor with a family checkbox and a price line, the free and discounted models xellter added on its own, "Serving now" (rank, model, billing, score, why), "Out for now" (the models taken out of the preset, the reason with its numbers, when each returns), and "Left out" grouped by reason; Look up a session; New xellter key; Recalculate; Delete client |
+| Client detail | purpose and enabled; kenari keys with probe state and the models they may call (add, rename, remove); one card per preset: its name (renameable), optimization, the sticky-session toggle, pool picker grouped by vendor with a family checkbox and a price line, the free and discounted models xellter added on its own, "Serving now" (rank, model, billing, score, why), "Out for now" (the models taken out of the preset, the reason with its numbers, when each returns), "Taken out before" (the history), and a "Last 24 h" column on every model (median first token, failure share, requests), and "Left out" grouped by reason; Look up a session; New xellter key; Recalculate; Delete client |
 | Usage | 24 h or 30 d; all clients -> one client -> its presets -> the models in a preset; totals, chart, and kenari's own plan windows and balance next to xellter's numbers |
 | Config file | the YAML, checked and applied on save, with earlier versions restorable |
 
@@ -362,7 +363,9 @@ ui-ux-pro-max reference: primitive, semantic, component (`web/src/styles/tokens.
 | admin login | `data/auth-record.json` (0600), `login-state.json`, `recovery-used.json` |
 | session pins | `data/xellter.db` (`kv`), written every minute and on shutdown |
 | learned effort refusals | `data/xellter.db` (`effort_facts`) |
-| round-robin counters, evictions, health records, key cooldowns | memory only |
+| the models that are out, their strikes, the health records of the last hour | `data/xellter.db` (`kv`, `model_health`), written every minute and on shutdown |
+| when each model was taken out and why | `data/xellter.db` (`model_events`), kept as long as the request log |
+| round-robin counters, key cooldowns, breakers, the token-estimate correction | memory only |
 
 Account counters (rpm, free quota, plan ledger, client spend) are rebuilt from the request log at
 start-up.

@@ -36,7 +36,8 @@ nothing there.
   an hour take it out for 12 hours; a median first token above 10 s, or 40 % of its requests failing,
   take it out for 30 minutes (ADR 0029). It comes back on its own with a clean record; if it is bad
   again it goes out for twice as long. A preset is never emptied: the last two models stay in. The
-  panel lists who is out, why and when they return.
+  panel lists who is out, why and when they return, keeps the history, and shows the median first token and
+  the failure share of every model of the preset over the last 24 hours.
 - **A silent stream fails over.** A streamed chat answer that sends no first token within 15 s (plus
   1 s per 10 000 prompt tokens) is cancelled and the next model is tried. A conversation whose pinned
   model is slow for two of its last three requests moves to another model.
@@ -338,11 +339,13 @@ Money is micro-Rupiah throughout (`1_000_000` micro = Rp 1).
 No key, no client. For a load balancer or a monitor.
 
 ```json
-{"ok":true,"models":120,"catalog_age_s":31,"degraded":false}
+{"ok":true,"models":120,"catalog_age_s":31,"degraded":false,"log_dropped":0,"log_lost":0}
 ```
 
 `503` with `{"ok":false,"reason":"catalog not loaded"}` until the first catalogue sync lands;
-`degraded` means the last sync failed and the snapshot is stale.
+`degraded` means the last sync failed and the snapshot is stale. `log_dropped` and `log_lost` count request
+rows that were thrown away (the log queue was full) or refused by the database since the process started: when
+they are not zero the usage numbers are short by that much.
 
 ### Panel
 

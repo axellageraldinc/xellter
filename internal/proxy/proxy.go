@@ -44,7 +44,9 @@ type Server struct {
 	// efforts is what each model is known to do with a reasoning effort. It is the
 	// same registry the router reads, so a measurement taken while serving one
 	// request changes where the next one goes (ADR 0026).
-	efforts *effort.Registry
+	efforts *effort.Refusals
+	// scale corrects the token estimate with what each client's upstream reports (ADR 0031).
+	scale tokenScale
 
 	smu   sync.Mutex
 	spend map[string]*daySpend
@@ -132,7 +134,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			io.WriteString(w, `{"ok":false,"reason":"catalog not loaded"}`)
 			return
 		}
-		fmt.Fprintf(w, `{"ok":true,"models":%d,"catalog_age_s":%d,"degraded":%t}`, len(snap.Models), int(time.Since(snap.Fetched).Seconds()), snap.Degraded)
+		dropped, lost := s.st.LogLoss()
+		fmt.Fprintf(w, `{"ok":true,"models":%d,"catalog_age_s":%d,"degraded":%t,"log_dropped":%d,"log_lost":%d}`, len(snap.Models), int(time.Since(snap.Fetched).Seconds()), snap.Degraded, dropped, lost)
 	case strings.HasPrefix(r.URL.Path, "/v1/"):
 		s.api(w, r)
 	default:
@@ -332,6 +335,7 @@ type reqBody struct {
 	boundary  string
 	ctype     string
 	model     string
+	est       int // estimated prompt tokens, from estimateTokens; 0 until asked
 }
 
 func (s *Server) readBody(w http.ResponseWriter, r *http.Request) (*reqBody, *route.Error) {
@@ -386,18 +390,6 @@ func (b *reqBody) encodeWith(model string, streamUsage bool, drop map[string]boo
 		}
 	}
 	return json.Marshal(m)
-}
-
-// bodyTokens is a rough estimate of how many tokens a request body carries.
-//
-// It is used to order the models of a preset, never to refuse a request: a rough
-// estimate that turned a request away would be worse than a failed one (ADR 0026).
-// Four characters per token is the usual rule of thumb for English text.
-func bodyTokens(b *reqBody) int {
-	if b == nil {
-		return 0
-	}
-	return len(b.raw) / 4
 }
 
 // effortFields returns the top-level fields that carry the reasoning effort, so they
@@ -481,7 +473,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 	// nothing is not a request for "none": an unset effort lets the upstream apply its
 	// own default, which for a hosted reasoning model is often its ceiling (ADR 0026).
 	asked, hasEffort := s.effortOf(body)
-	plan, perr := s.rt.PlanEffort(cl, body.model, session, r.URL.Path, start, bodyTokens(body))
+	plan, perr := s.rt.PlanEffort(cl, body.model, session, r.URL.Path, start, s.estimate(cl.Name, body))
 	if perr != nil {
 		writeErr(w, r.URL.Path, perr.Status, perr.Code, perr.Message, perr.RetryAfter)
 		return
@@ -506,7 +498,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 	// failure and then abandoned, so its remaining keys are skipped: the retry is a property of the model, not
 	// of the key (requirement 15).
 	dead := map[string]bool{}
-	ftLimit := s.firstTokenLimit(cfg, body, plan.Modality, isStream)
+	ftLimit := s.firstTokenLimit(cfg, s.estimate(cl.Name, body), plan.Modality, isStream)
 	for ai, at := range plan.Attempts {
 		if dead[at.Model.ID] {
 			continue
@@ -529,7 +521,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 		// A refusal is exempt from the trust window: it is a property of the API's
 		// parameter validation rather than a passing mood, so it holds however old it is.
 		drop := map[string]bool(nil)
-		if hasEffort && s.efforts.VerdictAt(at.Model.ID, asked, s.Now(), effort.DefaultTTL) == effort.Rejects {
+		if hasEffort && s.efforts.Refuses(at.Model.ID, asked) {
 			drop = effortFields()
 		}
 		for try := 1; try <= 2; try++ {
@@ -599,7 +591,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 				if res.err == nil && res.resp.StatusCode < 300 {
 					// The field was the problem: the model is known to reject it, and
 					// the request is served.
-					s.efforts.Record(at.Model.ID, asked, effort.Rejects, s.Now())
+					s.efforts.Record(at.Model.ID, asked, s.Now())
 					s.rt.Succeeded(cl.Name, plan.Preset, at.Model.ID)
 					if plan.Preset != "" {
 						s.rt.Pin(cl.Name, plan.Preset, session, at.Model.ID, s.Now())
@@ -822,6 +814,9 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, cl *config.Client
 	}
 	u := findUsage(head, tail.bytes())
 	row.InTok, row.OutTok, row.CachedTok = u.in, u.out, u.cached
+	if body != nil && !body.multipart && body.est > 0 {
+		s.scale.learn(row.Client, body.est, u.in)
+	}
 	if copyErr == nil {
 		var waited time.Duration
 		if stream && plan.Modality == "chat" && ttft > 0 {
@@ -1064,7 +1059,7 @@ func (s *Server) observe(client string, plan *route.Plan, session, model string,
 
 // firstTokenLimit is how long a streamed chat answer may stay silent before the next model is tried. It
 // grows with the size of the request, because a long prompt legitimately takes longer to read.
-func (s *Server) firstTokenLimit(cfg *config.Config, b *reqBody, modality string, stream bool) time.Duration {
+func (s *Server) firstTokenLimit(cfg *config.Config, promptTokens int, modality string, stream bool) time.Duration {
 	secs := cfg.Routing.FirstTokenSecs
 	if secs < 0 || !stream || modality != "chat" {
 		return 0
@@ -1072,7 +1067,7 @@ func (s *Server) firstTokenLimit(cfg *config.Config, b *reqBody, modality string
 	if secs == 0 {
 		secs = 15
 	}
-	d := time.Duration(secs+bodyTokens(b)/10000) * time.Second
+	d := time.Duration(secs+promptTokens/10000) * time.Second
 	return min(d, 60*time.Second)
 }
 

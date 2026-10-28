@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/axellageraldinc/xellter/internal/config"
+	"github.com/axellageraldinc/xellter/internal/store"
 )
 
 // A model that sends its headers and then nothing is a model queueing. The caller must not wait for it
@@ -108,5 +109,66 @@ func TestModelsAdvertiseTheWholePool(t *testing.T) {
 	}
 	if strings.Contains(body, "over 1 models") {
 		t.Fatalf("the preset lists only the owner's one model, not the free ones added to its pool: %s", body)
+	}
+}
+
+// A restart must not forgive a model that was taken out a minute ago, and the panel keeps the history of who
+// was taken out and why (ADR 0029).
+func TestAModelThatIsOutStaysOutAfterARestartAndIsRecorded(t *testing.T) {
+	e := setup(t, nil)
+	now := time.Now()
+	var why string
+	for i := 0; i < 6; i++ {
+		why, _ = e.a.Rt.Observe("babu", "text", "", "cheap-b", 20*time.Second, true, now.Add(time.Duration(i)*time.Second))
+	}
+	if why == "" {
+		t.Fatal("six slow requests did not take the model out")
+	}
+	// the event is written off the request path
+	var events []store.ModelEvent
+	for i := 0; i < 50 && len(events) == 0; i++ {
+		events = e.a.St.ModelEvents("babu", "text", 10)
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(events) != 1 || events[0].Model != "cheap-b" || events[0].Kind != "slow" || events[0].Reason != why {
+		t.Fatalf("events = %+v", events)
+	}
+	e.a.Close()
+
+	a2 := reopen(t, e)
+	defer a2.Close()
+	out := a2.Rt.OutOfService("babu", "text", time.Now())
+	if len(out) != 1 || out[0].Model != "cheap-b" || out[0].Reason != why {
+		t.Fatalf("after the restart the model is out as %+v", out)
+	}
+}
+
+func TestPresetStatsCountWhatTheHealthRulesLookAt(t *testing.T) {
+	e := setup(t, nil)
+	for i := 0; i < 3; i++ {
+		resp, body := e.post(t, e.keyCl, "/v1/chat/completions", `{"model":"text","stream":true,"messages":[{"role":"user","content":"q`+string(rune('a'+i))+`"}]}`)
+		if resp.StatusCode != 200 {
+			t.Fatalf("status %d: %s", resp.StatusCode, body)
+		}
+	}
+	e.a.St.Flush()
+	stats := e.a.St.PresetStats("babu", "text", time.Now().Add(-time.Hour))
+	n := 0
+	for _, s := range stats {
+		n += s.Requests
+		if s.Failed != 0 {
+			t.Fatalf("stats = %+v", s)
+		}
+	}
+	if n != 3 {
+		t.Fatalf("counted %d requests, want 3: %+v", n, stats)
+	}
+}
+
+func TestHealthzReportsLostLogRows(t *testing.T) {
+	e := setup(t, nil)
+	resp, body := e.get(t, "", "/healthz")
+	if resp.StatusCode != 200 || !strings.Contains(body, `"log_dropped":0`) || !strings.Contains(body, `"log_lost":0`) {
+		t.Fatalf("healthz = %d %s", resp.StatusCode, body)
 	}
 }

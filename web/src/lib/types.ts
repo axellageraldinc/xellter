@@ -73,6 +73,31 @@ export type PresetView = {
   evictions: Record<string, string>
   /** The models that are out of this preset, and why. */
   out_of_service: OutOfService[]
+  /** How each model did in this preset over the last 24 hours. */
+  stats: Record<string, ModelStat>
+  /** Who was taken out of this preset, newest first. */
+  history: ModelEvent[]
+}
+
+export type ModelStat = {
+  model: string
+  requests: number
+  failed: number
+  fail_pct: number
+  /** Median wait for the first token of the streamed answers, in ms; 0 = no data. */
+  ttft_p50_ms: number
+  ttft_p90_ms: number
+}
+
+export type ModelEvent = {
+  /** Unix milliseconds. */
+  ts: number
+  model: string
+  kind: string
+  reason: string
+  /** Unix milliseconds. */
+  until: number
+  strikes: number
 }
 
 export type OutOfService = {

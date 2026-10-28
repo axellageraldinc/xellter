@@ -9,8 +9,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -55,8 +57,11 @@ type ModelStat struct {
 type Store struct {
 	db   *sql.DB
 	logC chan Request
-	wg   sync.WaitGroup
-	stop chan struct{}
+	// dropped counts rows thrown away because the queue was full, lost counts rows the database refused. Both are
+	// shown on /healthz: a log that silently loses requests makes the usage page and the health rules lie.
+	dropped, lost atomic.Uint64
+	wg            sync.WaitGroup
+	stop          chan struct{}
 	// closeOnce makes Close safe to call twice: the shutdown path and a test's cleanup
 	// can both reach it, and closing a closed channel is a panic.
 	closeOnce sync.Once
@@ -75,7 +80,9 @@ CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, exp INTEGER NOT NULL, i
 CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, upstream TEXT NOT NULL, ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);
 CREATE TABLE IF NOT EXISTS effort_facts(model TEXT, level TEXT, verdict TEXT, at INTEGER NOT NULL, PRIMARY KEY(model,level));
-CREATE TABLE IF NOT EXISTS effort_thinkers(model TEXT PRIMARY KEY);
+DROP TABLE IF EXISTS effort_thinkers;
+CREATE TABLE IF NOT EXISTS model_events(id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, client TEXT, preset TEXT, model TEXT, kind TEXT, reason TEXT, until_ts INTEGER, strikes INTEGER);
+CREATE INDEX IF NOT EXISTS ev_cp ON model_events(client, preset, ts);
 CREATE TABLE IF NOT EXISTS bench(model TEXT NOT NULL, arena TEXT NOT NULL, value REAL, rating REAL, lo REAL, hi REAL, matched TEXT, date TEXT, votes REAL, PRIMARY KEY(model, arena));
 `
 
@@ -175,8 +182,13 @@ func (s *Store) Log(r Request) {
 	select {
 	case s.logC <- r:
 	default:
+		s.dropped.Add(1)
 	}
 }
+
+// LogLoss reports how many request rows were dropped because the queue was full, and how many the database
+// refused to write, since the process started.
+func (s *Store) LogLoss() (dropped, lost uint64) { return s.dropped.Load(), s.lost.Load() }
 
 func (s *Store) writer() {
 	defer s.wg.Done()
@@ -189,17 +201,25 @@ func (s *Store) writer() {
 		}
 		tx, err := s.db.Begin()
 		if err != nil {
+			s.lost.Add(uint64(len(batch)))
 			batch = batch[:0]
 			return
 		}
 		st, err := tx.Prepare(`INSERT INTO requests(ts,client,preset,requested,model,upstream,path,status,ok,latency_ms,ttft_ms,in_tok,out_tok,cached_tok,cost,billing,stream,attempt,rtk_saved,err,session,api_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 		if err == nil {
 			for _, r := range batch {
-				_, _ = st.Exec(r.TS, r.Client, r.Preset, r.Requested, r.Model, r.Upstream, r.Path, r.Status, b2i(r.OK), r.LatencyMS, r.TTFTMS, r.InTok, r.OutTok, r.CachedTok, r.CatalogCost, r.Billing, b2i(r.Stream), r.Attempt, r.RTKSaved, r.Err, r.Session, r.Key)
+				_, err = st.Exec(r.TS, r.Client, r.Preset, r.Requested, r.Model, r.Upstream, r.Path, r.Status, b2i(r.OK), r.LatencyMS, r.TTFTMS, r.InTok, r.OutTok, r.CachedTok, r.CatalogCost, r.Billing, b2i(r.Stream), r.Attempt, r.RTKSaved, r.Err, r.Session, r.Key)
+				if err != nil {
+					s.lost.Add(1)
+				}
 			}
 			st.Close()
+		} else {
+			s.lost.Add(uint64(len(batch)))
 		}
-		_ = tx.Commit()
+		if err := tx.Commit(); err != nil {
+			s.lost.Add(uint64(len(batch)))
+		}
 		batch = batch[:0]
 	}
 	for {
@@ -470,6 +490,7 @@ func (s *Store) Recent(limit int, client string) ([]RecentRow, error) {
 func (s *Store) Purge(retentionDays int) {
 	cut := time.Now().AddDate(0, 0, -retentionDays).UnixMilli()
 	_, _ = s.db.Exec(`DELETE FROM requests WHERE ts<?`, cut)
+	_, _ = s.db.Exec(`DELETE FROM model_events WHERE ts<?`, cut)
 	_, _ = s.db.Exec(`DELETE FROM sessions WHERE exp<?`, time.Now().Unix())
 	_, _ = s.db.Exec(`DELETE FROM jobs WHERE ts<?`, time.Now().AddDate(0, 0, -3).Unix())
 }
@@ -535,36 +556,22 @@ func (s *Store) KVSet(k, v string) {
 	_, _ = s.db.Exec(`INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v`, k, v)
 }
 
-// ---- effort facts (what each model is known to do with a reasoning effort) ----
+// ---- effort refusals (the models that answer HTTP 400 to a reasoning effort) ----
 
-// EffortFact is one measured fact: what one model does with one reasoning effort.
+// EffortFact is one remembered refusal: one model refuses one reasoning effort.
 //
-// The table exists so the gateway does not have to learn the same thing again after
-// every restart. A fact is a measurement, so it carries the time it was made: a fact
-// older than the trust window is dropped and the model is measured again, because a
-// provider can change a model's behaviour. A refusal is kept regardless of age — it is
-// a property of the API's parameter validation, not a passing mood.
+// The table exists so a restart does not make the next request fail again. A refusal is kept whatever its
+// age: it is a property of the API's parameter validation, not a passing mood. (The table once held what a
+// model did with an effort too; those rows are ignored on load, ADR 0028.)
 type EffortFact struct {
 	Model   string `json:"model"`
 	Level   string `json:"level"`
-	Verdict string `json:"verdict"` // honours | ignores | rejects
-	At      int64  `json:"at"`      // unix seconds of the measurement
+	Verdict string `json:"verdict"` // rejects
+	At      int64  `json:"at"`      // unix seconds
 }
 
-// EffortThinker records that a model was seen producing reasoning at all.
-//
-// It travels with the facts because "honours" means the model was seen thinking once
-// and then stopped: without this, a restored "honours" would not survive the next
-// quiet answer.
-type EffortThinker struct {
-	Model string `json:"model"`
-}
-
-// SaveEffortFacts replaces the stored facts and thinkers with what the caller measured.
-//
-// One transaction, so a crash cannot leave half the knowledge behind: a gateway that
-// came back with half its facts would serve some models as if it had never met them.
-func (s *Store) SaveEffortFacts(facts []EffortFact, thinkers []EffortThinker) error {
+// SaveEffortFacts replaces the stored refusals with what the caller holds, in one transaction.
+func (s *Store) SaveEffortFacts(facts []EffortFact) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -573,66 +580,35 @@ func (s *Store) SaveEffortFacts(facts []EffortFact, thinkers []EffortThinker) er
 	if _, err := tx.Exec(`DELETE FROM effort_facts`); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM effort_thinkers`); err != nil {
-		return err
-	}
-	insFact, err := tx.Prepare(`INSERT INTO effort_facts(model,level,verdict,at) VALUES(?,?,?,?)`)
+	ins, err := tx.Prepare(`INSERT INTO effort_facts(model,level,verdict,at) VALUES(?,?,?,?)`)
 	if err != nil {
 		return err
 	}
+	defer ins.Close()
 	for _, f := range facts {
-		if _, err := insFact.Exec(f.Model, f.Level, f.Verdict, f.At); err != nil {
-			insFact.Close()
+		if _, err := ins.Exec(f.Model, f.Level, f.Verdict, f.At); err != nil {
 			return err
 		}
 	}
-	insFact.Close()
-	insThinker, err := tx.Prepare(`INSERT OR IGNORE INTO effort_thinkers(model) VALUES(?)`)
-	if err != nil {
-		return err
-	}
-	for _, t := range thinkers {
-		if _, err := insThinker.Exec(t.Model); err != nil {
-			insThinker.Close()
-			return err
-		}
-	}
-	insThinker.Close()
 	return tx.Commit()
 }
 
-// EffortFacts returns every stored fact and every model known to think.
-func (s *Store) EffortFacts() ([]EffortFact, []EffortThinker) {
-	rows, err := s.db.Query(`SELECT model,level,verdict,at FROM effort_facts`)
+// EffortFacts returns the stored refusals.
+func (s *Store) EffortFacts() []EffortFact {
+	rows, err := s.db.Query(`SELECT model,level,verdict,at FROM effort_facts WHERE verdict='rejects'`)
 	if err != nil {
-		return nil, nil
+		return nil
 	}
 	defer rows.Close()
 	var facts []EffortFact
 	for rows.Next() {
 		var f EffortFact
 		if err := rows.Scan(&f.Model, &f.Level, &f.Verdict, &f.At); err != nil {
-			return facts, nil
+			break
 		}
 		facts = append(facts, f)
 	}
-	if err := rows.Err(); err != nil {
-		return facts, nil
-	}
-	trows, err := s.db.Query(`SELECT model FROM effort_thinkers`)
-	if err != nil {
-		return facts, nil
-	}
-	defer trows.Close()
-	var thinkers []EffortThinker
-	for trows.Next() {
-		var t EffortThinker
-		if err := trows.Scan(&t.Model); err != nil {
-			return facts, thinkers
-		}
-		thinkers = append(thinkers, t)
-	}
-	return facts, thinkers
+	return facts
 }
 
 // ---- benchmark scores (mapped from public leaderboards, see package bench) ----
@@ -824,4 +800,95 @@ func writeMarker(path string) error {
 		return err
 	}
 	return nil
+}
+
+// ---- model events: when a model was taken out of a preset, and why ----
+
+// ModelEvent is one time a model was taken out of a preset (ADR 0029).
+type ModelEvent struct {
+	TS      int64  `json:"ts"` // unix milliseconds
+	Client  string `json:"client"`
+	Preset  string `json:"preset"`
+	Model   string `json:"model"`
+	Kind    string `json:"kind"` // errors | slow | unreliable
+	Reason  string `json:"reason"`
+	Until   int64  `json:"until"` // unix milliseconds
+	Strikes int    `json:"strikes"`
+}
+
+// AddModelEvent records that a model was taken out of a preset.
+func (s *Store) AddModelEvent(e ModelEvent) {
+	_, _ = s.db.Exec(`INSERT INTO model_events(ts,client,preset,model,kind,reason,until_ts,strikes) VALUES(?,?,?,?,?,?,?,?)`,
+		e.TS, e.Client, e.Preset, e.Model, e.Kind, e.Reason, e.Until, e.Strikes)
+}
+
+// ModelEvents lists the latest events of one preset, newest first.
+func (s *Store) ModelEvents(client, preset string, limit int) []ModelEvent {
+	rows, err := s.db.Query(`SELECT ts,client,preset,model,kind,reason,until_ts,strikes FROM model_events
+		WHERE client=? AND preset=? ORDER BY ts DESC LIMIT ?`, client, preset, limit)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []ModelEvent
+	for rows.Next() {
+		var e ModelEvent
+		if rows.Scan(&e.TS, &e.Client, &e.Preset, &e.Model, &e.Kind, &e.Reason, &e.Until, &e.Strikes) != nil {
+			break
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// PresetModelStat is how one model did in one preset over a period: what the health rules look at, shown in the panel.
+type PresetModelStat struct {
+	Model     string  `json:"model"`
+	Requests  int     `json:"requests"`
+	Failed    int     `json:"failed"`
+	FailPct   float64 `json:"fail_pct"`
+	TTFTp50MS int     `json:"ttft_p50_ms"` // median wait for the first token of the streamed answers; 0 = no data
+	TTFTp90MS int     `json:"ttft_p90_ms"`
+}
+
+// PresetStats returns, per model, the requests of one preset since the given time. A request the caller
+// cancelled is not counted: it says nothing about the model.
+func (s *Store) PresetStats(client, preset string, since time.Time) map[string]*PresetModelStat {
+	rows, err := s.db.Query(`SELECT model, ok, ttft_ms, stream FROM requests
+		WHERE client=? AND preset=? AND ts>=? AND path LIKE '/v1/%' AND COALESCE(err,'') NOT LIKE 'cancelled%'`,
+		client, preset, since.UnixMilli())
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := map[string]*PresetModelStat{}
+	waits := map[string][]int{}
+	for rows.Next() {
+		var model string
+		var ok, stream int
+		var ttft int
+		if rows.Scan(&model, &ok, &ttft, &stream) != nil {
+			break
+		}
+		st := out[model]
+		if st == nil {
+			st = &PresetModelStat{Model: model}
+			out[model] = st
+		}
+		st.Requests++
+		if ok == 0 {
+			st.Failed++
+		} else if stream == 1 && ttft > 0 {
+			waits[model] = append(waits[model], ttft)
+		}
+	}
+	for m, st := range out {
+		st.FailPct = float64(int(1000*float64(st.Failed)/float64(st.Requests)+0.5)) / 10
+		if w := waits[m]; len(w) > 0 {
+			sort.Ints(w)
+			st.TTFTp50MS = w[len(w)/2]
+			st.TTFTp90MS = w[min(len(w)-1, int(float64(len(w))*0.9))]
+		}
+	}
+	return out
 }

@@ -78,15 +78,17 @@ type Router struct {
 	// efforts is what each model is known to do with a reasoning effort. The only
 	// fact the gateway acts on is a refusal: a model that answers HTTP 400 to the
 	// field is served without it (ADR 0026, ADR 0028).
-	efforts *effort.Registry
+	efforts *effort.Refusals
 
 	smu  sync.Mutex
 	pins map[string]pin // session key -> model
 	// pinVer counts the writes to pins, so a saver can tell whether there is anything new to keep.
 	pinVer uint64
-	health map[string][]healthSample // client|preset|model -> recent requests (ADR 0029)
-	sess   map[string]*sessState     // client|preset|session -> how the pinned model has been doing
-	evict  map[string]*eviction
+	// healthVer counts the changes to the health records and evictions, so a saver knows when there is news.
+	healthVer uint64
+	health    map[string][]healthSample // client|preset|model -> recent requests (ADR 0029)
+	sess      map[string]*sessState     // client|preset|session -> how the pinned model has been doing
+	evict     map[string]*eviction
 }
 
 type pin struct {
@@ -108,13 +110,13 @@ type eviction struct {
 
 // New builds a router.
 func New(cfg *config.Config, cat *catalog.Catalog, pool *upstream.Pool, st *store.Store) *Router {
-	r := &Router{cat: cat, pool: pool, st: st, rr: map[string]uint64{}, pins: map[string]pin{}, evict: map[string]*eviction{}, efforts: effort.NewRegistry()}
+	r := &Router{cat: cat, pool: pool, st: st, rr: map[string]uint64{}, pins: map[string]pin{}, evict: map[string]*eviction{}, efforts: effort.NewRefusals()}
 	r.cfg.Store(cfg)
 	return r
 }
 
-// Efforts returns the registry of what each model is known to do with an effort.
-func (r *Router) Efforts() *effort.Registry { return r.efforts }
+// Efforts returns what is known about the models that refuse an effort.
+func (r *Router) Efforts() *effort.Refusals { return r.efforts }
 
 // SetConfig swaps the configuration and recomputes rankings.
 func (r *Router) SetConfig(c *config.Config) {
@@ -590,10 +592,12 @@ func (r *Router) FailedWhy(client, preset, model, why string, now time.Time) boo
 		e.fails = nil
 		e.replaced = true
 		e.kind, e.since = "errors", now
+		r.healthVer++
 		e.reason = fmt.Sprintf("%d errors within %d minutes", cfg.Routing.EvictErrors, cfg.Routing.EvictWindowMin)
 		if why != "" {
 			e.reason += ", the last: " + why
 		}
+		r.recordEvent(client, preset, model, e, now)
 		return true
 	}
 	return false

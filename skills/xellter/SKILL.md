@@ -158,8 +158,12 @@ moment it returns. **This preset of this client only.** Three rules (ADR 0020, 0
 
 A model that comes back is judged afresh on half as many requests; if it is bad again the time out
 doubles (up to `evict_cooldown_minutes`). A preset is never emptied: the last two models stay in. A
-session pinned to a model that goes out moves on the next request. Evictions are in memory: a restart
-forgives every model.
+session pinned to a model that goes out moves on the next request. The models that are out are saved,
+so a restart does not forgive them.
+
+**Last 24 h** (a column of Serving now) — per model: the median wait for the first token, the share of
+failed requests and the number of requests; an `out` badge marks a model that is out. **Taken out
+before** lists earlier events with their reason. Use them to decide whether a model belongs in the pool.
 
 **Left out** — every model in the pool that is not serving, grouped by reason: not in the kenari
 catalog, wrong endpoint, subscriber-only without a plan, sunsets soon, no key may call it, no quality

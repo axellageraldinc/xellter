@@ -15,6 +15,7 @@ import (
 	"github.com/axellageraldinc/xellter/internal/proxy"
 	"github.com/axellageraldinc/xellter/internal/rank"
 	"github.com/axellageraldinc/xellter/internal/route"
+	"github.com/axellageraldinc/xellter/internal/store"
 	"github.com/axellageraldinc/xellter/internal/upstream"
 )
 
@@ -699,6 +700,9 @@ type presetView struct {
 	Ranking           *rank.Ranking        `json:"ranking"`
 	Evictions         map[string]time.Time `json:"evictions"`
 	OutOfService      []route.Out          `json:"out_of_service"` // the same models, with the reason each is out
+	// Stats is how each model did in this preset over the last 24 hours; History is who was taken out and why.
+	Stats   map[string]*store.PresetModelStat `json:"stats"`
+	History []store.ModelEvent                `json:"history"`
 }
 
 func (h *Handler) clientDetail(w http.ResponseWriter, r *http.Request) {
@@ -745,6 +749,8 @@ func (h *Handler) clientDetail(w http.ResponseWriter, r *http.Request) {
 			Ranking:      rk[rank.Key(cl.Name, n)],
 			Evictions:    h.a.Rt.Evictions(cl.Name, n, now),
 			OutOfService: h.a.Rt.OutOfService(cl.Name, n, now),
+			Stats:        h.a.St.PresetStats(cl.Name, n, now.Add(-24*time.Hour)),
+			History:      h.a.St.ModelEvents(cl.Name, n, 30),
 		})
 	}
 	jok(w, map[string]any{

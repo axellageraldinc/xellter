@@ -1,11 +1,13 @@
 package route
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"time"
 
 	"github.com/axellageraldinc/xellter/internal/rank"
+	"github.com/axellageraldinc/xellter/internal/store"
 )
 
 // Model health (ADR 0029). A model that answers too slowly, or fails too often, is taken out of the
@@ -87,6 +89,7 @@ func (r *Router) Observe(client, preset, session, model string, ttft time.Durati
 			keep = append(keep, x)
 		}
 	}
+	r.healthVer++
 	keep = append(keep, healthSample{at: now, ttft: ttft, ok: ok})
 	if len(keep) > 40 {
 		keep = keep[len(keep)-40:]
@@ -132,6 +135,8 @@ func (r *Router) Observe(client, preset, session, model string, ttft time.Durati
 	e.until, e.since, e.reason = now.Add(cool), now, out
 	e.fails, e.replaced = nil, true
 	delete(r.health, key) // measured afresh when it comes back
+	r.healthVer++
+	r.recordEvent(client, preset, model, e, now)
 	return out, moved
 }
 
@@ -221,4 +226,103 @@ func (r *Router) inServiceLocked(client, preset, except string, now time.Time) i
 		count(c.Model)
 	}
 	return n
+}
+
+// recordEvent writes down, off the request path, that a model was taken out of a preset. smu is held.
+func (r *Router) recordEvent(client, preset, model string, e *eviction, now time.Time) {
+	if r.st == nil {
+		return
+	}
+	ev := store.ModelEvent{TS: now.UnixMilli(), Client: client, Preset: preset, Model: model, Kind: e.kind,
+		Reason: e.reason, Until: e.until.UnixMilli(), Strikes: e.strikes}
+	go r.st.AddModelEvent(ev)
+}
+
+// The health records and the models that are out are kept in the database, so a restart does not forgive a
+// model that was slow a minute ago and make the first requests after it pay for the same lesson again.
+
+type evictSnap struct {
+	Key     string `json:"k"`
+	Until   int64  `json:"u"`
+	Since   int64  `json:"s"`
+	Reason  string `json:"r"`
+	Kind    string `json:"t"`
+	Strikes int    `json:"n"`
+}
+
+type sampleSnap struct {
+	Key  string `json:"k"`
+	At   int64  `json:"a"`
+	TTFT int64  `json:"w"` // milliseconds
+	OK   bool   `json:"o"`
+}
+
+type healthSnap struct {
+	Evict   []evictSnap  `json:"evict"`
+	Samples []sampleSnap `json:"samples"`
+}
+
+// HealthState returns the models that are out (or have a record of being out) and the recent samples, as JSON,
+// with a version that changes whenever any of it does.
+func (r *Router) HealthState() ([]byte, uint64) {
+	r.smu.Lock()
+	defer r.smu.Unlock()
+	var h healthSnap
+	for k, e := range r.evict {
+		if e.until.IsZero() && e.strikes == 0 {
+			continue
+		}
+		h.Evict = append(h.Evict, evictSnap{Key: k, Until: e.until.UnixMilli(), Since: e.since.UnixMilli(), Reason: e.reason, Kind: e.kind, Strikes: e.strikes})
+	}
+	for k, list := range r.health {
+		for _, x := range list {
+			h.Samples = append(h.Samples, sampleSnap{Key: k, At: x.at.UnixMilli(), TTFT: x.ttft.Milliseconds(), OK: x.ok})
+		}
+	}
+	raw, _ := json.Marshal(h)
+	return raw, r.healthVer
+}
+
+// RestoreHealth loads what HealthState saved: the models still out, the strikes that make the next cooldown
+// longer, and the samples that are still inside the window. It returns how many models are still out.
+func (r *Router) RestoreHealth(raw []byte, now time.Time) (out int, version uint64) {
+	var h healthSnap
+	if len(raw) == 0 || json.Unmarshal(raw, &h) != nil {
+		return 0, r.healthVersion()
+	}
+	window := time.Duration(r.cfg.Load().Routing.EvictWindowMin) * time.Minute
+	r.smu.Lock()
+	defer r.smu.Unlock()
+	if r.health == nil {
+		r.health = map[string][]healthSample{}
+		r.sess = map[string]*sessState{}
+	}
+	for _, x := range h.Evict {
+		if r.evict[x.Key] != nil {
+			continue
+		}
+		e := &eviction{until: time.UnixMilli(x.Until), since: time.UnixMilli(x.Since), reason: x.Reason, kind: x.Kind, strikes: x.Strikes, replaced: true}
+		if x.Until == 0 {
+			e.until, e.since = time.Time{}, time.Time{}
+		}
+		r.evict[x.Key] = e
+		if now.Before(e.until) {
+			out++
+		}
+	}
+	for _, x := range h.Samples {
+		at := time.UnixMilli(x.At)
+		if now.Sub(at) > window {
+			continue
+		}
+		r.health[x.Key] = append(r.health[x.Key], healthSample{at: at, ttft: time.Duration(x.TTFT) * time.Millisecond, ok: x.OK})
+	}
+	r.healthVer++
+	return out, r.healthVer
+}
+
+func (r *Router) healthVersion() uint64 {
+	r.smu.Lock()
+	defer r.smu.Unlock()
+	return r.healthVer
 }

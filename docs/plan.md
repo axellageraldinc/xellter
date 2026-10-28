@@ -31,6 +31,7 @@ decisions. Rollout and tuning continue (see "Next").
 | The effort routing hurt more than it helped | measured on real traffic, most models ignore or refuse "none", and routing by it moved a session's side calls (titles, summaries) off the pinned model and moved the pin with them, so a conversation changed model several times in minutes | done: the effort is forwarded and chooses nothing; a refusing model is still served without the field; the pin is kept across restarts and the pinned model stays first (ADR 0028) |
 | Replies were slow | free upstreams queue for 10–90 s before the first token; a conversation that landed on one stayed slow because of stickiness; a stream whose headers arrived but whose first token did not could not fail over | done: models are judged per client and preset on first-token wait and failure rate and taken out for a while (30 min, doubling), a silent stream moves to the next model, a session leaves a slow model, the panel says who is out and why (ADR 0029) |
 | Clients without a session id shared one pin | a long system prompt made every conversation of an agent hash to the same session | done: told apart by the first user message (ADR 0030) |
+| Health survived nothing | a restart forgave every slow model, the dead effort-learning code still ran, rows could be lost from the log without a trace, the size of a request was guessed as bytes/4 and the panel showed no speed | done: the models that are out are saved and their history is kept (ADR 0029), the effort code keeps only refusals (ADR 0028), lost log rows are counted on `/healthz`, the size is estimated from the JSON and corrected by what the upstream reports (ADR 0031), and the preset card shows the first-token wait and failure share of every model |
 | The model name showed from the second turn | `/v1/session` answered 404 until the request was logged, which happens when the answer ends | done: it answers from the pin |
 
 ## Earlier phases (first build)
@@ -57,7 +58,6 @@ decisions. Rollout and tuning continue (see "Next").
 | A weights/quality-gate/strategy vocabulary | one optimization per preset replaces weights, `min_quality`, `rr_band`, `max_candidates`, `strategy` and `mode` (ADR 0017) |
 | Generated or seeded presets | the owner creates one preset per category and names it; nothing appears by itself (ADR 0021) |
 | A round-robin band | equal scores are adjacent in the ring, so ties rotate without a knob (ADR 0020) |
-| Persisting evictions and health records | a restart forgiving a model is the safe direction; a model that is really bad is judged again within a few requests. (Session pins are persisted: forgetting those moves conversations, ADR 0028) |
 | A model or judge producing a score | scoring is a deterministic function of the catalog, the account state and the leaderboard snapshot (ADR 0016) |
 | A switch for the free and discounted models | they are always in the pool (ADR 0022); a knob would only decide whether the owner's rule is followed |
 
@@ -86,7 +86,7 @@ Found while rewriting the docs; not fixed here because the fix is code, not pros
 
 ## Next (not scheduled)
 - Panel: change password / re-enrol 2FA (today: CLI), request playground.
-- Prometheus `/metrics`.
+- Prometheus `/metrics` (considered and skipped for now: the request log and `/healthz` carry what is needed).
 - A second upstream provider (the catalog/route/proxy seams are provider-shaped but only kenari is
   implemented).
 - Weekly digest to the operator (discounts ending, new models, sunsets).
