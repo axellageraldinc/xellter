@@ -218,6 +218,10 @@ export type CatalogRow = {
   promo_ends?: string
   sunset_at?: string
   subscriber_only: boolean
+  reasoning: boolean
+  effort_levels?: string[]
+  effort_toggle?: boolean
+  effort_refused?: string[]
 }
 
 export type UsageRow = {

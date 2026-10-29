@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { Check, ChevronDown, Pencil, Search, Sparkles, Trash2 } from 'lucide-react'
+import { Brain, Check, ChevronDown, Pencil, Search, Sparkles, Trash2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import type { CatalogRow, PresetView } from '@/lib/types'
 import { ctx, rp, secs } from '@/lib/format'
@@ -475,24 +475,29 @@ function ModelPicker({
                             <label
                               key={m.id}
                               className={cn(
-                                'flex cursor-pointer items-center gap-3 border-b border-border-subtle px-3 py-2 text-xs last:border-0',
+                                'flex cursor-pointer items-start gap-3 border-b border-border-subtle px-3 py-2 text-xs last:border-0',
                                 on && 'bg-primary-soft/40',
                               )}
                             >
                               <input
                                 type="checkbox"
-                                className="size-3.5 rounded border-border-strong accent-primary"
+                                className="mt-0.5 size-3.5 shrink-0 rounded border-border-strong accent-primary"
                                 checked={on}
                                 onChange={(e) => toggle(m.id, e.target.checked)}
                               />
-                              <span className="mono min-w-0 flex-1 truncate">{m.id}</span>
-                              {m.callable && <BillingBadge billing={m.billing} />}
-                              {m.promo_off > 0 && <Badge tone="warning">promo −{Math.round(m.promo_off)}%</Badge>}
-                              {!m.callable && <Badge tone="danger">no key may call it</Badge>}
-                              <span className="tabular w-14 shrink-0 text-right text-text-muted">{ctx(m.context)}</span>
-                              <span className="tabular w-28 shrink-0 text-right text-text-muted">
-                                {priceLine(m)}
-                              </span>
+                              <div className="min-w-0 flex-1 space-y-1">
+                                <div className="flex items-center gap-2">
+                                  <span className="mono min-w-0 flex-1 truncate">{m.id}</span>
+                                  <span className="tabular shrink-0 text-text-muted">{ctx(m.context)}</span>
+                                </div>
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  {m.callable && <BillingBadge billing={m.billing} />}
+                                  {m.promo_off > 0 && <Badge tone="warning">promo −{Math.round(m.promo_off)}%</Badge>}
+                                  {!m.callable && <Badge tone="danger">no key may call it</Badge>}
+                                  <EffortBadge m={m} />
+                                  <span className="tabular ml-auto text-text-muted">{priceLine(m)}</span>
+                                </div>
+                              </div>
                             </label>
                           )
                         })}
@@ -576,6 +581,43 @@ function RenamePresetDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+const effortShort: Record<string, string> = { none: 'none', minimal: 'min', low: 'low', medium: 'med', high: 'high', xhigh: 'xhigh', max: 'max' }
+
+/**
+ * EffortBadge says whether a model reasons and which efforts it takes. The catalog's levels are a hint, not a
+ * promise (ADR 0026): an effort the gateway has seen the model refuse is struck out, and the tooltip has the
+ * full wording. A model that publishes nothing and does not reason shows nothing, to keep the row quiet.
+ */
+function EffortBadge({ m }: { m: CatalogRow }) {
+  const levels = m.effort_levels ?? []
+  const refused = m.effort_refused ?? []
+  if (!m.reasoning && levels.length === 0 && !m.effort_toggle) return null
+  const title = [
+    levels.length ? `Efforts the catalog lists: ${levels.join(', ')}.` : 'The catalog lists no effort levels.',
+    m.effort_toggle ? 'Reasoning can be switched off.' : '',
+    refused.length ? `Seen answering HTTP 400 to: ${refused.join(', ')} (xellter sends it without).` : '',
+  ]
+    .filter(Boolean)
+    .join(' ')
+  return (
+    <Badge tone="accent" title={title}>
+      <Brain className="size-3" aria-hidden />
+      {levels.length === 0 ? (
+        'thinks'
+      ) : (
+        <span>
+          {levels.map((l, i) => (
+            <span key={l} className={cn(refused.includes(l) && 'line-through opacity-60')}>
+              {i > 0 && ' · '}
+              {effortShort[l] ?? l}
+            </span>
+          ))}
+        </span>
+      )}
+    </Badge>
   )
 }
 

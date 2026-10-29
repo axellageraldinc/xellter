@@ -15,6 +15,7 @@ import (
 	"github.com/axellageraldinc/xellter/internal/auth"
 	"github.com/axellageraldinc/xellter/internal/catalog"
 	"github.com/axellageraldinc/xellter/internal/config"
+	"github.com/axellageraldinc/xellter/internal/effort"
 	"github.com/axellageraldinc/xellter/internal/store"
 )
 
@@ -470,6 +471,34 @@ func TestCatalogModelsForAPreset(t *testing.T) {
 	rec = do(t, h, c, http.MethodGet, "/api/catalog/models?category=images", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("catalog images: %d", rec.Code)
+	}
+}
+
+// The picker says which efforts a model lists and which it has been seen to refuse, weakest first.
+func TestCatalogModelsCarryEffort(t *testing.T) {
+	a := newTestApp(t)
+	h := New(a)
+	c := sessionCookie(t, a)
+	a.Rt.Efforts().Record("cheap-b", effort.High, time.Now())
+	a.Rt.Efforts().Record("cheap-b", effort.None, time.Now())
+	rec := do(t, h, c, http.MethodGet, "/api/catalog/models?client=babu&category=chat", nil)
+	var out struct {
+		Models []struct {
+			ID            string   `json:"id"`
+			EffortRefused []string `json:"effort_refused"`
+		}
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range out.Models {
+		want := ""
+		if m.ID == "cheap-b" {
+			want = "none,high"
+		}
+		if got := strings.Join(m.EffortRefused, ","); got != want {
+			t.Fatalf("%s refused %q, want %q", m.ID, got, want)
+		}
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"github.com/axellageraldinc/xellter/internal/effort"
 	"net/http"
 	"regexp"
 	"slices"
@@ -954,6 +955,13 @@ type catalogRow struct {
 	PromoEnds     *time.Time     `json:"promo_ends,omitempty"`
 	SunsetAt      *time.Time     `json:"sunset_at,omitempty"`
 	Subscriber    bool           `json:"subscriber_only"`
+	// Reasoning says the model thinks before it answers. EffortLevels are the efforts the catalog publishes for
+	// it, EffortToggle that its reasoning can be switched off, and EffortRefused the efforts this gateway has
+	// seen it answer HTTP 400 to (ADR 0026). The catalog does not predict behaviour, so all three are hints.
+	Reasoning     bool     `json:"reasoning"`
+	EffortLevels  []string `json:"effort_levels,omitempty"`
+	EffortToggle  bool     `json:"effort_toggle,omitempty"`
+	EffortRefused []string `json:"effort_refused,omitempty"`
 }
 
 func (h *Handler) catalogModels(w http.ResponseWriter, r *http.Request) {
@@ -973,6 +981,10 @@ func (h *Handler) catalogModels(w http.ResponseWriter, r *http.Request) {
 		jok(w, out)
 		return
 	}
+	refused := map[string][]string{}
+	for _, f := range h.a.Rt.Efforts().All() {
+		refused[f.Model] = append(refused[f.Model], f.Level)
+	}
 	rows := make([]catalogRow, 0, len(snap.Models))
 	for _, id := range snap.IDs() {
 		m := snap.Models[id]
@@ -984,6 +996,8 @@ func (h *Handler) catalogModels(w http.ResponseWriter, r *http.Request) {
 			ToolCall: m.ToolCall, Free: m.Free, Billing: rank.BillingBalance, Callable: cl == nil,
 			InIDR: m.InIDR, OutIDR: m.OutIDR, CacheReadIDR: m.CachedIDR, CacheWriteIDR: m.CacheWrite,
 			HasCacheWrite: m.CacheWrite > 0, Lines: m.Lines, SunsetAt: m.SunsetAt, Subscriber: m.Subscriber,
+			Reasoning: m.Reasoning, EffortLevels: m.EffortLevels, EffortToggle: m.EffortToggle,
+			EffortRefused: sortedLevels(refused[id]),
 		}
 		if cl != nil {
 			row.Billing, row.Callable = h.billingOf(cl, m, snap, now)
@@ -1050,4 +1064,20 @@ func modalitiesOf(m *catalog.Model) string {
 		return "text+image"
 	}
 	return "text"
+}
+
+// sortedLevels orders efforts from weakest to strongest, the order a client thinks of them in.
+func sortedLevels(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	var out []string
+	for _, l := range effort.Levels {
+		for _, v := range in {
+			if v == string(l) {
+				out = append(out, v)
+			}
+		}
+	}
+	return out
 }
