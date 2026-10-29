@@ -407,9 +407,17 @@ func (s *Store) MediaSpend(group string, since time.Time, client, preset string)
 	if col == "" {
 		return nil, errors.New("bad group")
 	}
-	rows, err := s.db.Query(fmt.Sprintf(`SELECT %s k, unit, COALESCE(SUM(units),0), COALESCE(SUM(cost),0)
-		FROM requests WHERE ts>=? AND ok=1 AND unit IS NOT NULL AND unit!='' AND (?='' OR client=?) AND (?='' OR preset=?)
-		GROUP BY k, unit`, col), since.UnixMilli(), client, client, preset, preset)
+	// Rows logged before the unit columns existed are told apart by what they were: X search is a "service",
+	// and a media call with no recorded units is "legacy". Neither is priced by any model, but both leave the
+	// text side, so their rupiah are not mistaken for chat spend.
+	rows, err := s.db.Query(fmt.Sprintf(`SELECT k, u, COALESCE(SUM(units),0), COALESCE(SUM(cost),0) FROM (
+		SELECT %s k, units, cost, CASE
+			WHEN unit IS NOT NULL AND unit!='' THEN unit
+			WHEN model='x/search' THEN 'service'
+			WHEN path LIKE '/v1/images%%' OR path LIKE '/v1/audio/%%' OR path LIKE '/v1/videos%%' OR path LIKE '/v1/music%%' THEN 'legacy'
+			ELSE '' END u
+		FROM requests WHERE ts>=? AND ok=1 AND (?='' OR client=?) AND (?='' OR preset=?)) WHERE u!='' GROUP BY k, u`,
+		col), since.UnixMilli(), client, client, preset, preset)
 	if err != nil {
 		return nil, err
 	}

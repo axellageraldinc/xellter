@@ -553,6 +553,23 @@ func TestMediaRoutingPrefersFreeAndMultipartModelRewrite(t *testing.T) {
 	if resp.StatusCode != 200 || resp.Header.Get("X-Xellter-Model") != "img-free:free" {
 		t.Fatalf("image should use the free model first: %d %s %s", resp.StatusCode, resp.Header.Get("X-Xellter-Model"), body)
 	}
+	// the log records what was made, in the unit the catalog bills it in, even for a free model (the saved-cost card)
+	e.a.St.Flush()
+	spend, err := e.a.St.MediaSpend("client", time.Now().Add(-time.Hour), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var made float64
+	for _, group := range spend {
+		for _, u := range group {
+			if u.Unit == "image" {
+				made += u.Units
+			}
+		}
+	}
+	if made != 1 {
+		t.Fatalf("one image was made, the log says %v: %+v", made, spend)
+	}
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
 	mw.WriteField("model", "stt")

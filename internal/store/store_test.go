@@ -484,3 +484,32 @@ func TestSearchSummary(t *testing.T) {
 		t.Fatalf("all clients: %+v", all)
 	}
 }
+
+// MediaSpend sums units per kind of work; a media row logged before units existed and an X search are told
+// apart by what they were, and a chat row or a failed call is not counted at all.
+func TestMediaSpendSeparatesUnitsLegacyAndServices(t *testing.T) {
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now().UnixMilli()
+	st.Log(Request{TS: now, Client: "c", Preset: "pic", Model: "img", Path: "/v1/images/generations", OK: true, CatalogCost: 3, Unit: "image", Units: 2})
+	st.Log(Request{TS: now, Client: "c", Preset: "pic", Model: "img", Path: "/v1/images/generations", OK: true, CatalogCost: 1, Unit: "image", Units: 1})
+	st.Log(Request{TS: now, Client: "c", Preset: "pic", Model: "img", Path: "/v1/images/generations", OK: true, CatalogCost: 7}) // before units
+	st.Log(Request{TS: now, Client: "c", Preset: "", Model: "x/search", Path: "/v1/x/search", OK: true, CatalogCost: 5})
+	st.Log(Request{TS: now, Client: "c", Preset: "pic", Model: "img", Path: "/v1/images/generations", OK: false, Unit: "image", Units: 9})
+	st.Log(Request{TS: now, Client: "c", Preset: "text", Model: "m", Path: "/v1/chat/completions", OK: true, CatalogCost: 11})
+	st.Flush()
+	got, err := st.MediaSpend("client", time.Now().Add(-time.Hour), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	by := map[string]UnitSpend{}
+	for _, u := range got["c"] {
+		by[u.Unit] = u
+	}
+	if len(by) != 3 || by["image"].Units != 3 || by["image"].Cost != 4 || by["legacy"].Cost != 7 || by["service"].Cost != 5 {
+		t.Fatalf("got %+v", got)
+	}
+}
