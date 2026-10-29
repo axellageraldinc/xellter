@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { AlertTriangle, ArrowLeft, Coins, Wallet, Zap } from 'lucide-react'
 import { api } from '@/lib/api'
 import type { Usage, UsageCall } from '@/lib/types'
-import { idr, num, wib } from '@/lib/format'
+import { idr, num, secs, wib } from '@/lib/format'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardHeader, CardTitle } from '@/components/ui/card'
@@ -182,6 +182,8 @@ export function UsagePage() {
         )}
       </Card>
 
+      {data?.search && <SearchCard s={data.search} />}
+
       <CallsCard calls={data?.calls ?? []} level={level} />
     </Page>
   )
@@ -260,5 +262,41 @@ function CallsCard({ calls, level }: { calls: UsageCall[]; level: 'client' | 'pr
         </>
       )}
     </Card>
+  )
+}
+
+/**
+ * SearchCard is the X search service. It is not a model and has no tokens: it is
+ * billed per answer, and kenari's own 503 ("no usable answer") is retried for
+ * free, so a failure here is a call that gave up and cost nothing.
+ */
+function SearchCard({ s }: { s: NonNullable<Usage['search']> }) {
+  return (
+    <Card className="mb-4">
+      <CardHeader>
+        <CardTitle>X search</CardTitle>
+        <span className="text-xs text-text-muted">a service of kenari, billed per answer</span>
+      </CardHeader>
+      <div className="grid grid-cols-2 gap-x-6 gap-y-3 px-4 pb-4 text-sm lg:grid-cols-6">
+        <Fact label="Calls" value={num(s.calls)} />
+        <Fact label="Answered (charged)" value={num(s.ok)} />
+        <Fact label="Gave up (free)" value={num(s.failed)} tone={s.failed ? 'danger' : undefined} />
+        <Fact label="Free retries" value={num(s.retries)} />
+        <Fact label="Average answer" value={s.ok ? secs(s.avg_ms) : '—'} />
+        <Fact label="Spent" value={'Rp ' + idr(s.cost_idr)} />
+      </div>
+      <div className="border-t border-border-subtle px-4 py-2 text-xs text-text-muted">
+        Model: {s.model ? <span className="mono text-text">{s.model}</span> : 'not reported by kenari'}
+      </div>
+    </Card>
+  )
+}
+
+function Fact({ label, value, tone }: { label: string; value: string; tone?: 'danger' }) {
+  return (
+    <div>
+      <div className="text-xs text-text-muted">{label}</div>
+      <div className={tone === 'danger' ? 'tabular text-danger-text' : 'tabular'}>{value}</div>
+    </div>
   )
 }

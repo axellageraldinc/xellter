@@ -289,6 +289,16 @@ export type Usage = {
     cost_idr?: number
   }
   series: UsageSeriesPoint[]
+  search?: {
+    calls: number
+    ok: number
+    failed: number
+    retries: number
+    cost_idr: number
+    avg_ms: number
+    model: string
+    last_ts: number
+  }
   kenari?: {
     configured: boolean
     account?: { plan?: string; plan_source?: string; balance_idr?: number }

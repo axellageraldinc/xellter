@@ -25,6 +25,7 @@ import (
 //	  "calls": [{ "ts", "client", "preset", "model", "ok", "status", "in_tok", "out_tok",
 //	             "cached_tok", "rtk_saved", "cost_idr" }],   // newest 100 of this level
 //	  "series": [UsageRow...],   // hourly buckets, for the chart
+//	  "search": { calls, ok, failed, retries, cost_idr, avg_ms, model, last_ts },  // X search, when there was any
 //	  "kenari": { ... }          // kenari's own plan windows and balance
 //	}
 
@@ -103,6 +104,10 @@ func (h *Handler) usageDrill(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{
 		"window": window, "since": since, "client": client, "preset": preset,
 		"series": series, "kenari": h.kenariStrip(now),
+	}
+	// X search is a service, not a model: it gets its own summary beside the tables.
+	if sr, err := h.a.St.Search(since, client); err == nil && sr.Calls > 0 {
+		out["search"] = sr
 	}
 	var rows []usageRow
 	switch {

@@ -457,3 +457,30 @@ func TestModelEventsAreKeptPerPresetNewestFirst(t *testing.T) {
 		t.Fatalf("events = %+v", got)
 	}
 }
+
+// X search is summarised on its own: charged answers, free give-ups, free
+// retries, and the model kenari names when it names one.
+func TestSearchSummary(t *testing.T) {
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now().UnixMilli()
+	st.Log(Request{TS: now - 3000, Client: "a", Model: "x/search", OK: true, Attempt: 2, LatencyMS: 30000, CatalogCost: 100})
+	st.Log(Request{TS: now - 2000, Client: "a", Model: "x/search", OK: true, Attempt: 1, LatencyMS: 10000, CatalogCost: 100, UpstreamModel: "grok-x"})
+	st.Log(Request{TS: now - 1000, Client: "a", Model: "x/search", Status: 503, Attempt: 3})
+	st.Log(Request{TS: now, Client: "b", Model: "x/search", OK: true, Attempt: 1, CatalogCost: 100})
+	st.Log(Request{TS: now, Client: "a", Model: "m", OK: true})
+	st.Flush()
+	got, err := st.Search(time.Now().Add(-time.Hour), "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Calls != 3 || got.OK != 2 || got.Failed != 1 || got.Retries != 3 || got.Cost != 200 || got.AvgMS != 20000 || got.Model != "grok-x" {
+		t.Fatalf("got %+v", got)
+	}
+	if all, _ := st.Search(time.Now().Add(-time.Hour), ""); all.Calls != 4 {
+		t.Fatalf("all clients: %+v", all)
+	}
+}

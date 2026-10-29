@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strconv"
@@ -70,6 +71,7 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request, cl *config.Clien
 	var status int
 	var raw []byte
 	var ctype string
+	var res0Header http.Header
 	attempts := 0
 	for attempt := 1; attempt <= searchAttempts; attempt++ {
 		attempts = attempt
@@ -89,7 +91,7 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request, cl *config.Clien
 			}
 			break
 		}
-		status, ctype = res.StatusCode, res.Header.Get("Content-Type")
+		status, ctype, res0Header = res.StatusCode, res.Header.Get("Content-Type"), res.Header
 		raw, _ = io.ReadAll(io.LimitReader(res.Body, 4<<20))
 		res.Body.Close()
 		// 503 is kenari's own "could not answer, not charged, retry"; 429 asks the
@@ -102,6 +104,7 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request, cl *config.Clien
 	row := store.Request{TS: start.UnixMilli(), Client: cl.Name, Requested: "x/search", Model: "x/search",
 		Upstream: cl.Name + "/" + key.Label(), Path: r.URL.Path, Billing: "payg", Attempt: attempts, Key: cl.KeyHint}
 	row.Status = status
+	row.UpstreamModel = searchModel(res0Header, raw)
 	row.OK = status >= 200 && status < 300
 	row.LatencyMS = int(s.Now().Sub(start) / time.Millisecond)
 	if row.OK {
@@ -125,6 +128,24 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request, cl *config.Clien
 	w.Header().Set("X-Xellter-Attempt", strconv.Itoa(attempts))
 	w.WriteHeader(status)
 	_, _ = w.Write(raw)
+}
+
+// searchModel is the model kenari reports for an answer, if it reports one: a
+// "model" field in the JSON body or an X-Model header. xellter never asks and
+// never sends a model, so an answer that names none leaves the field empty.
+func searchModel(h http.Header, body []byte) string {
+	var v struct {
+		Model string `json:"model"`
+	}
+	if json.Unmarshal(body, &v) == nil && v.Model != "" {
+		return v.Model
+	}
+	for _, k := range []string{"X-Model", "X-Upstream-Model"} {
+		if m := h.Get(k); m != "" {
+			return m
+		}
+	}
+	return ""
 }
 
 // sendSearch makes one attempt against the upstream search endpoint.

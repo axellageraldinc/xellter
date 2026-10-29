@@ -42,6 +42,8 @@ type Request struct {
 	Err         string
 	Session     string // session id the request belonged to ("" when none)
 	Key         string // hint of the xellter API key the caller used (never the key itself)
+	// UpstreamModel is the model the upstream says it used, for a service call that names one (X search); "" otherwise.
+	UpstreamModel string
 }
 
 // ModelStat is aggregated health of one model.
@@ -135,7 +137,7 @@ func Open(dir string) (*Store, error) {
 		return nil, err
 	}
 	// the session and api_key columns arrived with the rewrite: the panel's per-session and per-key views need them
-	for _, col := range []string{"session", "api_key"} {
+	for _, col := range []string{"session", "api_key", "upstream_model"} {
 		if db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('requests') WHERE name=?`, col).Scan(&n) == nil && n == 0 {
 			if _, err := db.Exec(`ALTER TABLE requests ADD COLUMN ` + col + ` TEXT`); err != nil {
 				return nil, err
@@ -206,10 +208,10 @@ func (s *Store) writer() {
 			batch = batch[:0]
 			return
 		}
-		st, err := tx.Prepare(`INSERT INTO requests(ts,client,preset,requested,model,upstream,path,status,ok,latency_ms,ttft_ms,in_tok,out_tok,cached_tok,cost,billing,stream,attempt,rtk_saved,err,session,api_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		st, err := tx.Prepare(`INSERT INTO requests(ts,client,preset,requested,model,upstream,path,status,ok,latency_ms,ttft_ms,in_tok,out_tok,cached_tok,cost,billing,stream,attempt,rtk_saved,err,session,api_key,upstream_model) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 		if err == nil {
 			for _, r := range batch {
-				_, err = st.Exec(r.TS, r.Client, r.Preset, r.Requested, r.Model, r.Upstream, r.Path, r.Status, b2i(r.OK), r.LatencyMS, r.TTFTMS, r.InTok, r.OutTok, r.CachedTok, r.CatalogCost, r.Billing, b2i(r.Stream), r.Attempt, r.RTKSaved, r.Err, r.Session, r.Key)
+				_, err = st.Exec(r.TS, r.Client, r.Preset, r.Requested, r.Model, r.Upstream, r.Path, r.Status, b2i(r.OK), r.LatencyMS, r.TTFTMS, r.InTok, r.OutTok, r.CachedTok, r.CatalogCost, r.Billing, b2i(r.Stream), r.Attempt, r.RTKSaved, r.Err, r.Session, r.Key, r.UpstreamModel)
 				if err != nil {
 					s.lost.Add(1)
 				}
@@ -1056,4 +1058,41 @@ func (s *Store) WaitStats(since time.Time) map[string]*WaitStat {
 		out[k].P50MS = float64(w[len(w)/2])
 	}
 	return out
+}
+
+// SearchSummary is the X search service over a window: it is a service, not a
+// model, so it has no tokens and gets its own summary.
+type SearchSummary struct {
+	Calls   int     `json:"calls"`    // every call the client made
+	OK      int     `json:"ok"`       // answered and charged
+	Failed  int     `json:"failed"`   // gave up after the retries; not charged
+	Retries int     `json:"retries"`  // extra attempts spent on 503/429, all free
+	Cost    float64 `json:"cost_idr"` // what the successful calls were worth
+	AvgMS   int     `json:"avg_ms"`   // mean latency of the successful calls
+	Model   string  `json:"model"`    // the model the upstream reported on the newest call that named one
+	LastTS  int64   `json:"last_ts"`  // newest call, unix ms
+}
+
+// Search summarises the x/search rows of one client ("" = all) since a time.
+func (s *Store) Search(since time.Time, client string) (SearchSummary, error) {
+	var o SearchSummary
+	var avg sql.NullFloat64
+	var last sql.NullInt64
+	err := s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(ok),0), COALESCE(SUM(CASE WHEN attempt>1 THEN attempt-1 ELSE 0 END),0),
+		COALESCE(SUM(cost),0), AVG(CASE WHEN ok=1 THEN latency_ms END), MAX(ts)
+		FROM requests WHERE ts>=? AND model='x/search' AND (?='' OR client=?)`, since.UnixMilli(), client, client).
+		Scan(&o.Calls, &o.OK, &o.Retries, &o.Cost, &avg, &last)
+	if err != nil {
+		return o, err
+	}
+	o.Failed = o.Calls - o.OK
+	o.AvgMS = int(avg.Float64)
+	o.LastTS = last.Int64
+	var m sql.NullString
+	if err := s.db.QueryRow(`SELECT upstream_model FROM requests WHERE ts>=? AND model='x/search' AND upstream_model!='' AND upstream_model IS NOT NULL
+		AND (?='' OR client=?) ORDER BY ts DESC LIMIT 1`, since.UnixMilli(), client, client).Scan(&m); err != nil && err != sql.ErrNoRows {
+		return o, err
+	}
+	o.Model = m.String
+	return o, nil
 }
