@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -109,7 +110,7 @@ type keyRow struct {
 	Probed       bool      `json:"probed"`
 	Unrestricted bool      `json:"unrestricted"` // may call every model
 	Allowed      int       `json:"allowed"`      // models in the learned allow list (0 + unrestricted = all)
-	Blocked      int       `json:"blocked"`      // models kenari refused on this key right now
+	Blocked      int       `json:"blocked"`      // models the provider refused on this key right now
 	CooldownEnd  time.Time `json:"cooldown_until"`
 	BreakerEnd   time.Time `json:"breaker_until"`
 	LastError    string    `json:"last_error"`
@@ -169,13 +170,13 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 	var accts []upstream.AccountStatus
-	var accountKey *keyRow
+	accountKeys := map[string]*keyRow{} // provider -> its read-only account key
 	if snap != nil {
 		out["catalog"] = map[string]any{"models": len(snap.Models), "age_s": int(now.Sub(snap.Fetched).Seconds()), "degraded": snap.Degraded, "plans": len(snap.Plans), "tier": snap.Tier, "usd_idr": snap.USDIDR}
 		for _, k := range h.a.Pool.Keys() {
-			if k.Owner() == "" && k.Provider() == config.DefaultProvider { // the read-only account key of kenari
+			if k.Owner() == "" { // a read-only account key
 				row := h.keyRow(k, now)
-				accountKey = &row
+				accountKeys[k.Provider()] = &row
 			}
 		}
 		for _, a := range h.a.Pool.Accounts() {
@@ -189,7 +190,12 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 	}
 	out["accounts"] = accts
 	out["providers"] = h.providerOptions(cfg)
-	out["account_key"] = map[string]any{"configured": accountKey != nil, "status": accountKey, "env": cfg.Kenari.AccountKeyEnv}
+	var keysOut []map[string]any
+	for _, pc := range cfg.ProviderList() {
+		row := accountKeys[pc.ID]
+		keysOut = append(keysOut, map[string]any{"provider": pc.ID, "configured": row != nil, "status": row, "env": accountKeyEnv(pc)})
+	}
+	out["account_keys"] = keysOut
 	rows := h.clientRows(cfg, now, 24*time.Hour)
 	out["clients"] = rows
 	out["alerts"], out["status"] = h.alerts(snap, rows, accts, now)
@@ -320,14 +326,14 @@ func (h *Handler) alerts(snap *catalog.Snapshot, clients []clientRow, accts []up
 	if snap == nil {
 		add("bad", "Model catalog not loaded yet.", "")
 	} else if snap.Degraded {
-		add("warn", "kenari is unreachable: serving from the last known catalog.", "")
+		add("warn", "The model catalog could not be refreshed: serving from the last known one.", "")
 	}
 	if len(clients) == 0 {
-		add("info", "No clients yet. Add one, then give it a kenari key.", "")
+		add("info", "No clients yet. Add one, then give it an API key.", "")
 	}
 	for _, c := range clients {
 		if len(c.Keys) == 0 {
-			add("info", fmt.Sprintf("%s has no kenari key yet, so it cannot serve requests.", c.Name), c.Name)
+			add("info", fmt.Sprintf("%s has no API key yet, so it cannot serve requests.", c.Name), c.Name)
 		}
 		for _, k := range c.Keys {
 			switch {
@@ -348,24 +354,24 @@ func (h *Handler) alerts(snap *catalog.Snapshot, clients []clientRow, accts []up
 	}
 	for _, a := range accts {
 		if a.QuotaKey == "" && a.Plan != "" {
-			add("info", "Plan usage is estimated. Add the account key (Overview, Kenari plan) to read the real numbers.", "")
+			add("info", fmt.Sprintf("%s plan usage is estimated. Add its account key (Overview, Providers) to read the real numbers.", a.Provider), "")
 		}
 		for name, w := range a.Windows {
 			switch {
 			case w.UsedFrac >= 0.97:
-				add("bad", fmt.Sprintf("Plan %s budget is %.0f%% used; plan models are paused until it resets.", windowName(name), w.UsedFrac*100), "")
+				add("bad", fmt.Sprintf("%s plan %s budget is %.0f%% used; plan models are paused until it resets.", a.Provider, windowName(name), w.UsedFrac*100), "")
 			case w.UsedFrac >= 0.8:
-				add("warn", fmt.Sprintf("Plan %s budget is %.0f%% used.", windowName(name), w.UsedFrac*100), "")
+				add("warn", fmt.Sprintf("%s plan %s budget is %.0f%% used.", a.Provider, windowName(name), w.UsedFrac*100), "")
 			}
 		}
 		if a.Cooldown.After(now) {
-			add("warn", "kenari is rate limiting the account; requests wait or move to other models.", "")
+			add("warn", fmt.Sprintf("%s is rate limiting the account; requests wait or move to other models.", a.Provider), "")
 		}
 		if a.FreeBlocked.After(now) {
-			add("warn", "Free models are paused (free quota used).", "")
+			add("warn", fmt.Sprintf("%s: free models are paused (free quota used).", a.Provider), "")
 		}
 		if a.PlanBlocked.After(now) {
-			add("warn", "kenari reported the plan limit; plan models are paused for a few minutes.", "")
+			add("warn", fmt.Sprintf("%s reported the plan limit; plan models are paused for a few minutes.", a.Provider), "")
 		}
 	}
 	for _, sp := range h.a.SpendSpikes(now) {
@@ -462,7 +468,7 @@ func (h *Handler) clients(w http.ResponseWriter, r *http.Request) {
 		Purpose  string `json:"purpose"`
 		Enabled  *bool  `json:"enabled"`
 		Note     string `json:"note"`
-		Key      string `json:"key"` // optional kenari key on create
+		Key      string `json:"key"` // optional API key on create (the built-in provider's)
 		KeyName  string `json:"key_name"`
 		KeepNote bool   `json:"keep_note"`
 	}
@@ -716,19 +722,40 @@ func (h *Handler) keys(w http.ResponseWriter, r *http.Request) {
 	jok(w, map[string]any{"ok": true, "computed_at": h.a.Rt.Computed()})
 }
 
-// accountKey stores or removes the optional full-access key used to read plan quota and balance.
+// accountKeyEnv is the secret name of a provider's account key: the configured one, else the conventional one.
+func accountKeyEnv(pc config.ProviderConn) string {
+	if pc.AccountKeyEnv != "" {
+		return pc.AccountKeyEnv
+	}
+	return strings.Trim(nonEnv.ReplaceAllString(strings.ToUpper(pc.ID), "_"), "_") + "_ACCOUNT_KEY"
+}
+
+// accountKey stores or removes a provider's optional full-access key, used to read plan quota and balance.
 func (h *Handler) accountKey(w http.ResponseWriter, r *http.Request) {
-	var in struct{ Key string }
+	var in struct {
+		Key      string
+		Provider string // empty: the built-in one
+	}
 	if r.Method != http.MethodPost || readJSON(r, &in) != nil {
-		jerr(w, 400, "POST {key}")
+		jerr(w, 400, "POST {key, provider}")
 		return
 	}
 	cfg := h.a.Cfg()
 	next := cloneConfig(cfg)
-	env := next.Kenari.AccountKeyEnv
-	if env == "" {
-		env = "KENARI_ACCOUNT_KEY"
+	pc, ok := next.Provider(in.Provider)
+	if !ok {
+		jerr(w, 404, "no such provider")
+		return
+	}
+	env := accountKeyEnv(pc)
+	if pc.ID == config.DefaultProvider {
 		next.Kenari.AccountKeyEnv = env
+	} else {
+		for i := range next.Providers {
+			if next.Providers[i].ID == pc.ID {
+				next.Providers[i].AccountKeyEnv = env
+			}
+		}
 	}
 	if k := strings.TrimSpace(in.Key); k != "" {
 		if err := config.SetSecret(next.Server.SecretsFile, env, k); err != nil {
@@ -744,6 +771,88 @@ func (h *Handler) accountKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jok(w, map[string]any{"ok": true})
+}
+
+// providers adds, edits and removes the extra providers (ADR 0040). The built-in one is configured in the
+// `kenari:` section and cannot be removed.
+func (h *Handler) providers(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		jok(w, map[string]any{"providers": h.providerOptions(h.a.Cfg())})
+		return
+	}
+	var in struct {
+		Action  string `json:"action"` // add | update | remove
+		ID      string `json:"id"`
+		BaseURL string `json:"base_url"`
+	}
+	if r.Method != http.MethodPost || readJSON(r, &in) != nil {
+		jerr(w, 400, "POST {action, id, base_url}")
+		return
+	}
+	in.ID, in.BaseURL = strings.ToLower(strings.TrimSpace(in.ID)), strings.TrimSpace(in.BaseURL)
+	next := cloneConfig(h.a.Cfg())
+	idx := -1
+	for i, p := range next.Providers {
+		if p.ID == in.ID {
+			idx = i
+		}
+	}
+	switch in.Action {
+	case "add":
+		if idx >= 0 || in.ID == config.DefaultProvider {
+			jerr(w, 422, fmt.Sprintf("provider %q already exists", in.ID))
+			return
+		}
+		next.Providers = append(next.Providers, config.Provider{ID: in.ID, Kenari: config.Kenari{BaseURL: in.BaseURL}})
+	case "update":
+		switch {
+		case in.ID == config.DefaultProvider:
+			next.Kenari.BaseURL = in.BaseURL
+		case idx < 0:
+			jerr(w, 404, "no such provider")
+			return
+		default:
+			next.Providers[idx].BaseURL = in.BaseURL
+		}
+	case "remove":
+		if idx < 0 {
+			jerr(w, 404, "no such provider")
+			return
+		}
+		for _, cl := range next.Clients {
+			for _, k := range cl.Keys {
+				if k.ProviderID() == in.ID {
+					jerr(w, 422, fmt.Sprintf("client %q still has key %q at this provider; remove the key first", cl.Name, k.Name))
+					return
+				}
+			}
+			for name, p := range cl.Presets {
+				for _, m := range p.Models {
+					if strings.HasPrefix(m, in.ID+"/") {
+						jerr(w, 422, fmt.Sprintf("client %q preset %q still lists %s; untick it first", cl.Name, name, m))
+						return
+					}
+				}
+			}
+		}
+		if env := next.Providers[idx].AccountKeyEnv; env != "" {
+			_ = config.DeleteSecret(next.Server.SecretsFile, env)
+		}
+		next.Providers = append(next.Providers[:idx:idx], next.Providers[idx+1:]...)
+	default:
+		jerr(w, 400, "action must be add, update or remove")
+		return
+	}
+	if err := config.Normalize(&next); err != nil {
+		jerr(w, 422, err.Error())
+		return
+	}
+	if err := h.a.Apply(&next); err != nil {
+		jerr(w, 422, err.Error())
+		return
+	}
+	go func() { _ = h.a.Cat.Refresh(context.Background()) }() // list the new provider's models now, not in ten minutes
+	jok(w, map[string]any{"ok": true, "providers": h.providerOptions(&next)})
 }
 
 // ---- one client: the whole page in one payload ----

@@ -2,7 +2,7 @@ import * as React from 'react'
 import { useNavigate } from 'react-router-dom'
 import { AlertTriangle, CheckCircle2, Coins, RefreshCw, Wallet, Zap } from 'lucide-react'
 import { api } from '@/lib/api'
-import type { Overview, Usage } from '@/lib/types'
+import type { Account, Overview, ProviderOption, Usage } from '@/lib/types'
 import { idr, left, num, pl } from '@/lib/format'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -11,6 +11,7 @@ import { Table, TBody, TD, TH, THead, TR, Empty } from '@/components/ui/table'
 import { Stat, StatRow } from '@/components/stat'
 import { Chart } from '@/components/chart'
 import { Page } from '@/components/shell'
+import { ProvidersCard } from '@/components/providers-card'
 import { useToast } from '@/components/ui/toast'
 
 /** The plan windows, shortest first: the five-hour one, then the week, then the month. */
@@ -52,12 +53,11 @@ export function OverviewPage() {
 
   const t = usage?.totals ?? {}
   const accounts = data.accounts ?? []
-  const plan = accounts.find((a) => a.plan) ?? accounts[0]
 
   return (
     <Page
       title="Overview"
-      subtitle={`Up ${Math.round((data.uptime_s ?? 0) / 60)} min · ${num(data.catalog?.models)} models known to kenari`}
+      subtitle={`Up ${Math.round((data.uptime_s ?? 0) / 60)} min · ${num(data.catalog?.models)} models`}
       actions={
         <Button
           variant="outline"
@@ -141,60 +141,16 @@ export function OverviewPage() {
           </CardContent>
         </Card>
 
-        <Card className="lg:col-span-2">
-          <CardHeader>
-            <CardTitle>kenari plan &amp; balance</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {plan ? (
-              <>
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium">{plan.plan ?? 'No plan'}</span>
-                  <Badge tone={plan.plan_source === 'kenari' ? 'success' : 'warning'}>
-                    {plan.plan_source === 'kenari' ? 'live from kenari' : 'estimated'}
-                  </Badge>
-                </div>
-                {plan.windows && Object.keys(plan.windows).length > 0 ? (
-                  WINDOW_ORDER.filter((n) => plan.windows?.[n]).map((name) => {
-                    const w = plan.windows![name]
-                    const pct = w.budget_rp > 0 ? Math.min(100, (w.used_rp / w.budget_rp) * 100) : 0
-                    return (
-                      <div key={name}>
-                        <div className="mb-1 flex justify-between text-xs">
-                          <span className="text-text-secondary">{WINDOW_LABEL[name] ?? name}</span>
-                          <span className="tabular text-text-muted">
-                            Rp {idr(w.used_rp)} of {idr(w.budget_rp)}
-                          </span>
-                        </div>
-                        <div className="h-1.5 overflow-hidden rounded-full bg-surface-muted">
-                          <div
-                            className={pct > 97 ? 'h-full bg-danger' : pct > 80 ? 'h-full bg-warning' : 'h-full bg-primary'}
-                            style={{ width: `${pct}%` }}
-                          />
-                        </div>
-                        {w.resets_at && !w.resets_at.startsWith('0001') && (
-                          <div className="mt-1 text-xs text-text-muted">Resets {left(w.resets_at)}</div>
-                        )}
-                      </div>
-                    )
-                  })
-                ) : (
-                  <p className="text-xs text-text-muted">
-                    kenari has not reported the plan windows yet. Add the account key to read them.
-                  </p>
-                )}
-                {plan.balance_idr !== undefined && (
-                  <div className="flex justify-between border-t border-border pt-3 text-xs">
-                    <span className="text-text-secondary">Balance</span>
-                    <span className="tabular font-medium">Rp {idr(plan.balance_idr)}</span>
-                  </div>
-                )}
-              </>
-            ) : (
-              <p className="text-xs text-text-muted">No kenari key yet. Add one to a client to read plan and balance.</p>
-            )}
-          </CardContent>
-        </Card>
+        <div className="space-y-4 lg:col-span-2">
+          {(data.providers ?? []).map((p) => (
+            <PlanCard
+              key={p.id}
+              provider={p}
+              account={accounts.find((a) => a.provider === p.id)}
+              multi={(data.providers ?? []).length > 1}
+            />
+          ))}
+        </div>
       </div>
 
       <Card className="mt-4">
@@ -234,6 +190,66 @@ export function OverviewPage() {
           </Table>
         )}
       </Card>
+      <ProvidersCard data={data} reload={load} />
     </Page>
+  )
+}
+
+/** PlanCard is one provider's plan windows and balance. A provider with no key yet says so instead. */
+function PlanCard({ provider, account, multi }: { provider: ProviderOption; account?: Account; multi: boolean }) {
+  const live = account?.plan_source === 'api'
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{multi ? `${provider.id} plan & balance` : 'Plan & balance'}</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {account ? (
+          <>
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium">{account.plan || 'No plan'}</span>
+              <Badge tone={live ? 'success' : 'warning'}>{live ? 'live' : 'estimated'}</Badge>
+            </div>
+            {account.windows && Object.keys(account.windows).length > 0 ? (
+              WINDOW_ORDER.filter((n) => account.windows?.[n]).map((name) => {
+                const w = account.windows![name]
+                const pct = w.budget_rp > 0 ? Math.min(100, (w.used_rp / w.budget_rp) * 100) : 0
+                return (
+                  <div key={name}>
+                    <div className="mb-1 flex justify-between text-xs">
+                      <span className="text-text-secondary">{WINDOW_LABEL[name] ?? name}</span>
+                      <span className="tabular text-text-muted">
+                        Rp {idr(w.used_rp)} of {idr(w.budget_rp)}
+                      </span>
+                    </div>
+                    <div className="h-1.5 overflow-hidden rounded-full bg-surface-muted">
+                      <div
+                        className={pct > 97 ? 'h-full bg-danger' : pct > 80 ? 'h-full bg-warning' : 'h-full bg-primary'}
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                    {w.resets_at && !w.resets_at.startsWith('0001') && (
+                      <div className="mt-1 text-xs text-text-muted">Resets {left(w.resets_at)}</div>
+                    )}
+                  </div>
+                )
+              })
+            ) : (
+              <p className="text-xs text-text-muted">
+                {provider.id} has not reported the plan windows yet. Add its account key (Providers, below) to read them.
+              </p>
+            )}
+            {account.balance_idr !== undefined && (
+              <div className="flex justify-between border-t border-border pt-3 text-xs">
+                <span className="text-text-secondary">Balance</span>
+                <span className="tabular font-medium">Rp {idr(account.balance_idr)}</span>
+              </div>
+            )}
+          </>
+        ) : (
+          <p className="text-xs text-text-muted">No key at {provider.id} yet. Add one to a client to read plan and balance.</p>
+        )}
+      </CardContent>
+    </Card>
   )
 }

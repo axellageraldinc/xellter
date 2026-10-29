@@ -160,6 +160,7 @@ export type PlanWindow = {
 
 export type Account = {
   name?: string
+  provider?: string
   tier?: string
   plan?: string
   plan_source?: string
@@ -176,7 +177,8 @@ export type Overview = {
   uptime_s: number
   alerts: Alert[]
   accounts: Account[]
-  account_key: { configured: boolean }
+  providers: ProviderOption[]
+  account_keys: { provider: string; configured: boolean; env: string }[]
   catalog?: { models: number; degraded: boolean }
   clients: ClientRow[]
 }

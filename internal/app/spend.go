@@ -36,6 +36,33 @@ func (a *App) SpendSpikes(now time.Time) []spend.Spike {
 	return spend.Find(cost(now.Add(-time.Hour)), cost(now.Add(-time.Duration(spend.Window)*time.Hour)), al.SpikeFactor, al.SpikeMinIDR)
 }
 
+// alertKey is where the send times are kept, so a restart does not send an alert again within alertRepeat.
+const alertKey = "alerts.sent"
+
+// loadAlerted restores the times alerts were last sent from the database.
+func (a *App) loadAlerted() {
+	var saved map[string]int64
+	if json.Unmarshal([]byte(a.St.KVGet(alertKey)), &saved) != nil {
+		return
+	}
+	a.alertMu.Lock()
+	defer a.alertMu.Unlock()
+	for c, t := range saved {
+		a.alerted[c] = time.Unix(t, 0)
+	}
+}
+
+// saveAlerted writes the send times; the caller holds alertMu.
+func (a *App) saveAlerted() {
+	out := make(map[string]int64, len(a.alerted))
+	for c, t := range a.alerted {
+		out[c] = t.Unix()
+	}
+	if b, err := json.Marshal(out); err == nil {
+		a.St.KVSet(alertKey, string(b))
+	}
+}
+
 // SpikeText is the sentence the panel and the webhook show for a spike.
 func SpikeText(s spend.Spike) string {
 	if s.UsualIDR < 1 {
@@ -77,6 +104,7 @@ func (a *App) NotifySpikes(ctx context.Context, now time.Time) {
 		}
 		a.alertMu.Lock()
 		a.alerted[s.Client] = now
+		a.saveAlerted()
 		a.alertMu.Unlock()
 	}
 }

@@ -247,9 +247,10 @@ func (a *Account) reset() {
 // AccountStatus is the dashboard view of an account.
 type AccountStatus struct {
 	Name        string            `json:"name"`
+	Provider    string            `json:"provider"` // the upstream the account belongs to
 	Tier        string            `json:"tier"`
 	Plan        string            `json:"plan"`
-	PlanSource  string            `json:"plan_source"` // kenari (read from the API) | configured
+	PlanSource  string            `json:"plan_source"` // api (read from the provider) | detected
 	QuotaKey    string            `json:"quota_key"`
 	Windows     map[string]Window `json:"windows"`         // from kenari when known
 	Estimated   [3]float64        `json:"estimated_spend"` // our own estimate: 5h, week, month
@@ -272,7 +273,7 @@ func (a *Account) Status(snap *catalog.Snapshot, now time.Time) AccountStatus {
 	rpm, daily := a.limits(snap.Tier, now)
 	a.rpm = prune(a.rpm, now.Add(-time.Minute).UnixMilli())
 	a.free = prune(a.free, startOfUTCDay(now).UnixMilli())
-	st := AccountStatus{Name: a.Name, Tier: a.tier(now), Plan: a.planName(now), PlanSource: "detected", QuotaKey: a.infoKey,
+	st := AccountStatus{Name: a.Name, Provider: ProviderOfAccount(a.Name), Tier: a.tier(now), Plan: a.planName(now), PlanSource: "detected", QuotaKey: a.infoKey,
 		RPMLimit: rpm, RPMUsed: len(a.rpm), DailyLimit: daily, DailyUsed: len(a.free), BalanceIDR: a.balanceIDR, BalanceAt: a.balanceAt,
 		Cooldown: a.cooldown, PlanBlocked: a.planBlocked}
 	st.FreeBlocked = a.freeDailyUntil
@@ -280,7 +281,7 @@ func (a *Account) Status(snap *catalog.Snapshot, now time.Time) AccountStatus {
 		st.FreeBlocked = a.freeRPMUntil
 	}
 	if a.info != nil && a.info.Name != "" {
-		st.PlanSource, st.Windows = "kenari", a.info.Windows
+		st.PlanSource, st.Windows = "api", a.info.Windows
 	}
 	if pl := snap.Plan(st.Plan); pl != nil {
 		st.Estimated[0], st.Estimated[1], st.Estimated[2] = a.sums(now)

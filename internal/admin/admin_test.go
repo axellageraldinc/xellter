@@ -890,3 +890,64 @@ func TestCatalogModelsPriceTheClientsOwnMix(t *testing.T) {
 		t.Fatalf("known=%v cost=%v mix=%v", known, cost, mixKnown)
 	}
 }
+
+// Providers are added, edited and removed from the panel; one that still has a key or a ticked model cannot go.
+func TestProvidersCanBeManaged(t *testing.T) {
+	a := newTestApp(t)
+	h := New(a)
+	c := sessionCookie(t, a)
+	post := func(body map[string]any) int {
+		return do(t, h, c, http.MethodPost, "/api/providers", body).Code
+	}
+	if code := post(map[string]any{"action": "add", "id": "alt", "base_url": "http://127.0.0.1:1"}); code != http.StatusOK {
+		t.Fatalf("add: %d", code)
+	}
+	if code := post(map[string]any{"action": "add", "id": "alt", "base_url": "http://127.0.0.1:1"}); code != http.StatusUnprocessableEntity {
+		t.Fatalf("a second add of the same id: %d", code)
+	}
+	if code := post(map[string]any{"action": "add", "id": "kenari", "base_url": "http://x"}); code != http.StatusUnprocessableEntity {
+		t.Fatalf("the built-in id: %d", code)
+	}
+	if code := post(map[string]any{"action": "add", "id": "bad one", "base_url": "http://x"}); code != http.StatusUnprocessableEntity {
+		t.Fatalf("a bad id: %d", code)
+	}
+	if code := post(map[string]any{"action": "update", "id": "alt", "base_url": "http://127.0.0.1:2"}); code != http.StatusOK {
+		t.Fatalf("update: %d", code)
+	}
+	if pc, _ := a.Cfg().Provider("alt"); pc.BaseURL != "http://127.0.0.1:2" {
+		t.Fatalf("base url: %q", pc.BaseURL)
+	}
+	// a key at the provider pins it
+	if code := do(t, h, c, http.MethodPost, "/api/keys", map[string]any{"client": "babu", "action": "add", "name": "x", "key": "secret", "provider": "alt"}).Code; code != http.StatusOK {
+		t.Fatalf("add key: %d", code)
+	}
+	if code := post(map[string]any{"action": "remove", "id": "alt"}); code != http.StatusUnprocessableEntity {
+		t.Fatalf("remove with a key: %d", code)
+	}
+	if code := do(t, h, c, http.MethodPost, "/api/keys", map[string]any{"client": "babu", "action": "remove", "name": "x"}).Code; code != http.StatusOK {
+		t.Fatalf("remove key: %d", code)
+	}
+	if code := post(map[string]any{"action": "remove", "id": "alt"}); code != http.StatusOK {
+		t.Fatalf("remove: %d", code)
+	}
+	if len(a.Cfg().Providers) != 0 {
+		t.Fatalf("providers left: %+v", a.Cfg().Providers)
+	}
+}
+
+// An account key is stored per provider, under the provider's own secret name.
+func TestAccountKeysArePerProvider(t *testing.T) {
+	a := newTestApp(t)
+	h := New(a)
+	c := sessionCookie(t, a)
+	do(t, h, c, http.MethodPost, "/api/providers", map[string]any{"action": "add", "id": "alt", "base_url": "http://127.0.0.1:1"})
+	if code := do(t, h, c, http.MethodPost, "/api/account-key", map[string]any{"key": "kn-alt", "provider": "alt"}).Code; code != http.StatusOK {
+		t.Fatalf("account key: %d", code)
+	}
+	if got := a.Secrets()["ALT_ACCOUNT_KEY"]; got != "kn-alt" {
+		t.Fatalf("secret: %q", got)
+	}
+	if code := do(t, h, c, http.MethodPost, "/api/account-key", map[string]any{"key": "x", "provider": "nope"}).Code; code != http.StatusNotFound {
+		t.Fatalf("unknown provider: %d", code)
+	}
+}

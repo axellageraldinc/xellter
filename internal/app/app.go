@@ -143,6 +143,7 @@ func New(path string, src catalog.Source) (*App, error) {
 	a.SWEPage = bench.DefaultSWEURL
 	a.AiderYAML = bench.DefaultAiderURL
 	a.loadEffortFacts()
+	a.loadAlerted()
 	a.loadPins()
 	a.loadHealth()
 	a.Cat.OnUpdate(func(s *catalog.Snapshot) {

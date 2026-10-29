@@ -264,7 +264,7 @@ func TestAccountQuotaFromUnrestrictedKeyIsRead(t *testing.T) {
 	}
 	e.a.ProbeKeys(context.Background())
 	st := e.a.Pool.Accounts()[0].Status(e.a.Cat.Snapshot(), time.Now())
-	if st.Plan != "Indie" || st.PlanSource != "kenari" || st.QuotaKey != "babu/topup" || st.Windows["week"].UsedRP != 990 {
+	if st.Plan != "Indie" || st.PlanSource != "api" || st.QuotaKey != "babu/topup" || st.Windows["week"].UsedRP != 990 {
 		t.Fatalf("account not read from kenari: %+v", st)
 	}
 	if st.BalanceIDR != 24998.5 {

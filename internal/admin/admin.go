@@ -64,6 +64,7 @@ func New(a *app.App) *Handler {
 	api("presets", h.presets)
 	api("keys", h.keys)
 	api("account-key", h.accountKey)
+	api("providers", h.providers)
 	api("keys/reset", h.resetKey)
 	api("keys/probe", h.probeKeys)
 	api("ranking", h.ranking)

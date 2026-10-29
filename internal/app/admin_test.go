@@ -343,7 +343,7 @@ func TestAdminKeysAndOverview(t *testing.T) {
 	}
 	noKey := false
 	for _, a := range ov.Alerts {
-		if a.Level == "info" && strings.Contains(a.Text, "off has no kenari key") {
+		if a.Level == "info" && strings.Contains(a.Text, "off has no API key") {
 			noKey = true
 		}
 	}

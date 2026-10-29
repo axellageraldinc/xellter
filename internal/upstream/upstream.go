@@ -32,7 +32,7 @@ type Key struct {
 	acct     *Account
 	local    bool      // the key of models served from this machine: no secret, no kenari account, no limits
 	readOnly bool      // the account key: it reads plan and balance, it never serves requests
-	capable  string    // the kenari service this key is dedicated to ("" = a model key, "search" = the X search endpoint)
+	capable  string    // the service of the provider this key is dedicated to ("" = a model key, "search" = the X search endpoint)
 	cooldown time.Time // key unusable until (rejected key)
 	fails    int       // consecutive failures
 	breaker  time.Time
@@ -68,6 +68,14 @@ func NewPool() *Pool {
 // DefaultAccount is the name of the built-in provider's account: the limits kenari applies are per account, and
 // there is a single one. A provider added later has an account named after it (ADR 0040).
 const DefaultAccount = "main"
+
+// ProviderOfAccount is the provider an account name stands for: the inverse of AccountName.
+func ProviderOfAccount(name string) string {
+	if name == DefaultAccount {
+		return config.DefaultProvider
+	}
+	return name
+}
 
 // AccountName is the name of the account that holds the limits of a provider.
 func AccountName(provider string) string {

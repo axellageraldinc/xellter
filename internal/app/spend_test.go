@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/axellageraldinc/xellter/internal/app"
+	"github.com/axellageraldinc/xellter/internal/catalog"
 	"github.com/axellageraldinc/xellter/internal/config"
 	"github.com/axellageraldinc/xellter/internal/store"
 )
@@ -73,5 +75,32 @@ func TestASpendSpikeIsSentOnceToTheWebhook(t *testing.T) {
 	}
 	if err := json.Unmarshal([]byte(bodies[0]), &m); err != nil || m.Client != "babu" || m.Hour != 200000 || !strings.Contains(m.Text, "babu") {
 		t.Fatalf("body %s: %v", bodies[0], err)
+	}
+}
+
+// A restart does not send the same alert again: the send times are kept in the database.
+func TestASentAlertSurvivesARestart(t *testing.T) {
+	var mu sync.Mutex
+	n := 0
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { mu.Lock(); n++; mu.Unlock() }))
+	defer hook.Close()
+	e := setup(t, func(c *config.Config) { c.Alerts.WebhookURL = hook.URL })
+	now := time.Now()
+	logSpend(e, "babu", now.Add(-10*time.Minute), 4, 50000)
+	e.a.St.Flush()
+	e.a.NotifySpikes(t.Context(), now)
+
+	// a second app over the same data directory is what a restart is
+	e.a.Close()
+	b, err := app.New(e.path, &catalog.Kenari{BaseURL: e.f.srv.URL, UA: "test", HTTP: e.f.srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	b.NotifySpikes(t.Context(), now.Add(time.Minute))
+	mu.Lock()
+	defer mu.Unlock()
+	if n != 1 {
+		t.Fatalf("webhook calls: %d, want 1", n)
 	}
 }
