@@ -133,7 +133,7 @@ func AutoPool(cfg *config.Config, snap *catalog.Snapshot, pool *upstream.Pool, c
 	if snap == nil || cl == nil {
 		return nil
 	}
-	anyPlan := hasPlan(pool, cl, now)
+	plans := plansOf(pool, cl, now)
 	avoid := time.Duration(cfg.Routing.AvoidSunsetDays) * 24 * time.Hour
 	out := []string{}
 	for _, id := range snap.IDs() {
@@ -144,7 +144,7 @@ func AutoPool(cfg *config.Config, snap *catalog.Snapshot, pool *upstream.Pool, c
 		if !m.Free && !m.PromoActive(now, 0) {
 			continue
 		}
-		if m.Subscriber && !anyPlan {
+		if m.Subscriber && !plans[m.ProviderID()] {
 			continue
 		}
 		if m.SunsetAt != nil && m.SunsetAt.Sub(now) < avoid {
@@ -198,14 +198,16 @@ func AutoPoolFor(cfg *config.Config, snap *catalog.Snapshot, pool *upstream.Pool
 	return out
 }
 
-// hasPlan reports whether any key of the client is on a plan right now.
-func hasPlan(pool *upstream.Pool, cl *config.Client, now time.Time) bool {
+// plansOf reports, per provider, whether any key of the client is on a plan there right now. A plan is an
+// account's, and an account belongs to one provider.
+func plansOf(pool *upstream.Pool, cl *config.Client, now time.Time) map[string]bool {
+	out := map[string]bool{}
 	for _, k := range pool.ClientKeys(cl.Name) {
 		if k.Account().Tier(now) == "plan" {
-			return true
+			out[k.Provider()] = true
 		}
 	}
-	return false
+	return out
 }
 
 // callableBy reports whether any key of the client may call the model.
@@ -214,7 +216,7 @@ func callableBy(pool *upstream.Pool, cl *config.Client, m *catalog.Model) bool {
 		return true
 	}
 	for _, k := range pool.ClientKeys(cl.Name) {
-		if k.Secret() != "" && k.AllowedModel(m.ID) {
+		if k.Offers(m) {
 			return true
 		}
 	}
@@ -345,12 +347,7 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 	reject := func(id, why string) { r.Rejected = append(r.Rejected, Rejected{id, why}) }
 
 	// A subscriber-only model needs a plan on some key of this client.
-	anyPlan := false
-	for _, k := range in.Pool.ClientKeys(cl.Name) {
-		if k.Account().Tier(in.Now) == "plan" {
-			anyPlan = true
-		}
-	}
+	plans := plansOf(in.Pool, cl, in.Now)
 
 	seen := map[string]bool{}
 	var pool []*scored
@@ -367,14 +364,14 @@ func One(in Inputs, cl *config.Client, name string, sh config.Preset) *Ranking {
 		seen[id] = true
 		m := in.Snap.Models[id]
 		if m == nil {
-			reject(id, "not in the kenari catalog")
+			reject(id, "not in the catalog")
 			continue
 		}
 		if !endpointMatches(m, sh.Category) {
 			reject(id, "is a "+m.Endpoint+" model, not "+sh.Category)
 			continue
 		}
-		if m.Subscriber && !anyPlan {
+		if m.Subscriber && !plans[m.ProviderID()] {
 			reject(id, "subscriber only and the account has no plan")
 			continue
 		}
@@ -497,7 +494,7 @@ func billingOf(in Inputs, cl *config.Client, m *catalog.Model) (string, bool) {
 	}
 	usable, plan := false, false
 	for _, k := range in.Pool.ClientKeys(cl.Name) {
-		if k.Secret() == "" || !k.AllowedModel(m.ID) {
+		if !k.Offers(m) {
 			continue
 		}
 		usable = true

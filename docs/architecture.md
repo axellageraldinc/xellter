@@ -30,7 +30,7 @@ ADR [0017](adr/0017-three-optimizations.md), [0018](adr/0018-client-purpose-chan
 | Package | Role |
 |---|---|
 | `internal/config` | YAML schema, defaults, validation, retired-key refusal, history, secrets file, migration |
-| `internal/catalog` | kenari catalog + prices + promos + plans -> immutable `Snapshot`; System One on its own endpoint |
+| `internal/catalog` | each provider's catalog + prices + promos + plans -> one immutable `Snapshot` (`catalog.Merge`, ADR 0040); System One on its own endpoint |
 | `internal/store` | SQLite (modernc, no CGO): request log, usage aggregates, leaderboard rows, admin sessions, video job -> key, learned effort refusals, model events |
 | `internal/upstream` | per-key and per-account limits: rpm, free quota, plan ledger, cooldown, breaker, learned allow list |
 | `internal/rank` | pure ranking of one preset: pool -> rejections -> cost/quality -> top list, with reasons |
@@ -61,7 +61,7 @@ Refresh loops:
 
 | Loop | Interval |
 |---|---|
-| catalog | `kenari.sync_minutes` (10) and at start |
+| catalog | the shortest `sync_minutes` of any provider (`kenari.sync_minutes`, 10, and each `providers[].sync_minutes`) and at start |
 | plan quota + balance | 5 minutes |
 | key probe (which models a key may call) | 6 hours, at start, and after a config change |
 | leaderboards | at start when older than 24 h, then re-checked every 6 h |
@@ -417,3 +417,11 @@ gaps" in `docs/plan.md`).
 the purpose becomes `general`, every preset keeps its name, category and model list, and the
 optimization becomes `balanced`. Notes name every preset whose pool is empty and every preset that
 was dropped because its name is not one of the fixed seven.
+
+## Providers (ADR 0040)
+
+An upstream is a *provider*: `kenari` (the `kenari:` section) and any number under `providers:`. A key names its
+provider and is used only for that provider's models; each provider has its own account. A model of the built-in
+provider keeps its bare id, a model of another is `<provider>/<id>` everywhere (pools, log, `X-Xellter-Model`) and is
+sent upstream under its bare name (`Model.WireID`). The catalog is merged from every provider; one that is down keeps
+its last good models. Plans, the free tier and X search stay kenari's.

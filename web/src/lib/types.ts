@@ -30,7 +30,11 @@ export type KeyRow = {
   tier: string
   state: string
   capability: string
+  provider: string
 }
+
+/** ProviderOption is one upstream; the panel offers a provider choice only when there are two or more. */
+export type ProviderOption = { id: string; type: string; base_url: string; models: number; keys: number }
 
 export type Candidate = {
   model: string
@@ -185,6 +189,7 @@ export type ClientDetail = {
   purposes: Option[]
   optimizations: Option[]
   categories: CategoryOption[]
+  providers: ProviderOption[]
   computed_at: string
   routing: {
     rank_refresh_minutes: number
@@ -218,6 +223,7 @@ export type CatalogRow = {
   promo_ends?: string
   sunset_at?: string
   subscriber_only: boolean
+  provider: string
   reasoning: boolean
   effort_levels?: string[]
   effort_toggle?: boolean

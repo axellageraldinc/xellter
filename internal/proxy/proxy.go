@@ -534,10 +534,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 				}
 			}
 			attempts++
-			sent := at.Model.ID
-			if at.Model.IsLocal() {
-				sent = at.Model.UpstreamModel
-			}
+			sent := at.Model.WireID()
 			payload, err := body.encodeWith(sent, streamUsage, drop)
 			if err != nil {
 				writeErr(w, r.URL.Path, 400, "bad_request", "cannot encode request: "+err.Error(), 0)
@@ -586,7 +583,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 				s.Logf("%s refused a request that carried reasoning effort %q; retrying without it", at.Model.ID, asked)
 				dead[at.Model.ID] = true
 				// The same model, once more, with the effort removed.
-				payload, err = body.encodeWith(at.Model.ID, streamUsage, effortFields())
+				payload, err = body.encodeWith(at.Model.WireID(), streamUsage, effortFields())
 				if err != nil {
 					writeErr(w, r.URL.Path, 400, "bad_request", "cannot encode request: "+err.Error(), 0)
 					return
@@ -676,18 +673,29 @@ type failure struct {
 	contextOverflow bool
 }
 
+// conn is the connection settings of a provider. A model or key naming a provider the configuration no longer
+// has (it was removed while a request was in flight) falls back to the built-in one rather than panicking.
+func (s *Server) conn(cfg *config.Config, provider string) config.ProviderConn {
+	if c, ok := cfg.Provider(provider); ok {
+		return c
+	}
+	c, _ := cfg.Provider("")
+	return c
+}
+
 func (s *Server) send(r *http.Request, at route.Attempt, payload []byte, ctype string, stream bool, cfg *config.Config) sendResult {
 	ctx, cancel := context.WithCancel(r.Context())
-	limit := time.Duration(cfg.Kenari.FirstByteSecs) * time.Second
+	conn := s.conn(cfg, at.Model.ProviderID())
+	limit := time.Duration(conn.FirstByteSecs) * time.Second
 	switch {
 	case at.Model.Endpoint == "music":
-		limit = time.Duration(cfg.Kenari.MusicTimeoutSec) * time.Second
+		limit = time.Duration(conn.MusicTimeoutSec) * time.Second
 	case !stream:
 		limit *= 3
 	}
 	var timedOut atomic.Bool
 	timer := time.AfterFunc(limit, func() { timedOut.Store(true); cancel() })
-	base := cfg.Kenari.BaseURL
+	base := conn.BaseURL
 	if at.Model.IsLocal() {
 		base = at.Model.BaseURL
 	}
@@ -700,11 +708,11 @@ func (s *Server) send(r *http.Request, at route.Attempt, payload []byte, ctype s
 	if ctype != "" {
 		req.Header.Set("Content-Type", ctype)
 	}
-	if !at.Model.IsLocal() { // a local server gets no kenari key (ADR 0033)
+	if !at.Model.IsLocal() { // a local server gets no upstream key (ADR 0033)
 		req.Header.Set("Authorization", "Bearer "+at.Key.Secret())
 		req.Header.Set("x-api-key", at.Key.Secret())
 	}
-	req.Header.Set("User-Agent", cfg.Kenari.UserAgent)
+	req.Header.Set("User-Agent", conn.UserAgent)
 	t0 := s.Now()
 	resp, err := s.hc.Do(req)
 	timer.Stop()
@@ -975,9 +983,10 @@ func (s *Server) job(w http.ResponseWriter, r *http.Request, cl *config.Client, 
 	cfg := s.cfg.Load()
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, cfg.Kenari.BaseURL+r.URL.Path, nil)
+	conn := s.conn(cfg, key.Provider())
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, conn.BaseURL+r.URL.Path, nil)
 	req.Header.Set("Authorization", "Bearer "+key.Secret())
-	req.Header.Set("User-Agent", cfg.Kenari.UserAgent)
+	req.Header.Set("User-Agent", conn.UserAgent)
 	resp, err := s.hc.Do(req)
 	if err != nil {
 		writeErr(w, p, 502, "upstream_unavailable", trimErr(err), 5*time.Second)

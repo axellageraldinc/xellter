@@ -76,7 +76,7 @@ Found while rewriting the docs; not fixed here because the fix is code, not pros
 | The Cheapest halves follow `top_models` | The plan says five free + five plan-covered; the code uses `top/2` per half, which is 5 with the default `top_models: 10`. Lowering the knob lowers the halves too, which is consistent but not what the plan states |
 | No retry-once switch | The plan lists `routing.retry_once: true`; the code has no such key — retry-once is unconditional in the proxy. The docs describe the behaviour, not a knob |
 | Sticky is a boolean, not minutes | The plan lists `sticky_minutes: 0`; the code has a `sticky` flag on the preset (ADR 0025), i.e. a pin that never expires. Behaviour matches the intent |
-| `/v1/usage/keys` keys on the kenari key | The plan calls it "usage broken down by xellter API key". The request row's `api_key` column holds the kenari key name (`at.Key.Label()`), so the endpoint splits by kenari key, not by the xellter key the client used. There is one xellter key per client, so the two coincide per client but not when a client has several kenari keys |
+| `/v1/usage/keys` keys on the upstream key | It is scoped to the calling client and splits that client's traffic by the upstream key's name, which is what the endpoint is for. A client's total is `/v1/usage`. Not a gap; the earlier wording ("by xellter API key") was the plan's, not the code's |
 
 ## Rollout
 1. Run on the tailnet only; owner tests with curl and the panel.
@@ -88,8 +88,8 @@ Found while rewriting the docs; not fixed here because the fix is code, not pros
 ## Next (not scheduled)
 - Panel: change password / re-enrol 2FA (today: CLI), request playground.
 - Prometheus `/metrics` (considered and skipped for now: the request log and `/healthz` carry what is needed).
-- A second upstream provider (the catalog/route/proxy seams are provider-shaped but only kenari is
-  implemented).
+- A provider *type* other than `kenari` (ADR 0040 made the seams real: providers, per-provider keys and accounts, a merged
+  catalog; only the `kenari` wire protocol exists).
 - Weekly digest to the operator (discounts ending, new models, sunsets).
 - `benchmarks` coverage: more sources for TTS, music and System One, which are price-only today.
 

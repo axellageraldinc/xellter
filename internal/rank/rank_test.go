@@ -421,7 +421,7 @@ func TestPoolMembershipAndRejections(t *testing.T) {
 		t.Fatalf("order: %v", got)
 	}
 	want := map[string]string{
-		"ghost": "not in the kenari catalog",
+		"ghost": "not in the catalog",
 		"dying": "sunsets " + t1.Format("2006-01-02"),
 		"sub":   "subscriber only and the account has no plan",
 		"img":   "is a images model, not chat",

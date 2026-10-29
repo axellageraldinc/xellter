@@ -2,7 +2,7 @@ import * as React from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Activity, Copy, KeyRound, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { api } from '@/lib/api'
-import type { ClientDetail, CategoryOption } from '@/lib/types'
+import type { ClientDetail, CategoryOption, ProviderOption } from '@/lib/types'
 import { ago, left, num, pl } from '@/lib/format'
 import { Badge, Dot } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -59,7 +59,7 @@ export function ClientDetailPage() {
           {!d.client.enabled && <Badge tone="danger">disabled</Badge>}
         </span>
       }
-      subtitle={`${pl(d.keys.length, 'kenari key')} · ${pl(d.presets.length, 'preset')} · xellter key ${d.client.key_hint || 'none'}`}
+      subtitle={`${pl(d.keys.length, 'key')} · ${pl(d.presets.length, 'preset')} · xellter key ${d.client.key_hint || 'none'}`}
       actions={
         <>
           <Button variant="outline" size="sm" onClick={() => nav(`/usage?client=${encodeURIComponent(d.client.name)}`)}>
@@ -105,7 +105,7 @@ export function ClientDetailPage() {
             variant="outline"
             size="sm"
             onClick={async () => {
-              if (!confirm(`Delete client “${d.client.name}”? Its presets, kenari keys and xellter key are removed. Usage history stays.`)) return
+              if (!confirm(`Delete client “${d.client.name}”? Its presets, keys and xellter key are removed. Usage history stays.`)) return
               try {
                 await api('clients', { method: 'POST', body: { action: 'delete', name: d.client.name } })
                 toast.push('Client deleted')
@@ -124,14 +124,14 @@ export function ClientDetailPage() {
       <div className="grid gap-4 lg:grid-cols-3">
         <Card className="min-w-0 lg:col-span-2">
           <CardHeader>
-            <CardTitle>kenari API keys</CardTitle>
+            <CardTitle>API keys</CardTitle>
             <Button variant="outline" size="sm" onClick={() => setAddKeyOpen(true)}>
               <Plus />
               Add key
             </Button>
           </CardHeader>
           {d.keys.length === 0 ? (
-            <Empty>No kenari key yet. Add one; xellter asks kenari which models it may call.</Empty>
+            <Empty>No key yet. Add one; xellter asks its provider which models it may call.</Empty>
           ) : (
             <Table>
               <THead>
@@ -156,7 +156,10 @@ export function ClientDetailPage() {
                   return (
                     <TR key={k.name}>
                       <TD>
-                        <div className="font-medium">{k.name}</div>
+                        <div className="flex items-center gap-2 font-medium">
+                          {k.name}
+                          {d.providers.length > 1 && <Badge tone="outline">{k.provider}</Badge>}
+                        </div>
                         {k.last_error && <div className="mt-0.5 text-xs text-danger-text">{k.last_error}</div>}
                       </TD>
                       <TD className="mono text-text-muted">{k.hint || '—'}</TD>
@@ -193,7 +196,7 @@ export function ClientDetailPage() {
                             size="icon-sm"
                             title="Remove key"
                             onClick={async () => {
-                              if (!confirm(`Remove key “${k.name}” from ${d.client.name}? It stays valid at kenari.`)) return
+                              if (!confirm(`Remove key “${k.name}” from ${d.client.name}? It stays valid at its provider.`)) return
                               try {
                                 await api('keys', {
                                   method: 'POST',
@@ -345,10 +348,11 @@ export function ClientDetailPage() {
       {addKeyOpen && (
         <AddKeyDialog
           client={d.client.name}
+          providers={d.providers}
           onClose={() => setAddKeyOpen(false)}
           onDone={async () => {
             setAddKeyOpen(false)
-            toast.push('Key added; asking kenari which models it can use…')
+            toast.push('Key added; asking its provider which models it can use…')
             await load()
           }}
         />
@@ -462,16 +466,19 @@ function AddPresetDialog({
   )
 }
 
-/** AddKeyDialog adds a kenari key to a client. */
+/** AddKeyDialog adds a key to a client. The provider is asked only when there is a choice. */
 function AddKeyDialog({
   client,
+  providers,
   onClose,
   onDone,
 }: {
   client: string
+  providers: ProviderOption[]
   onClose: () => void
   onDone: () => void
 }) {
+  const [provider, setProvider] = React.useState(providers[0]?.id ?? 'kenari')
   const [name, setName] = React.useState('main')
   const [key, setKey] = React.useState('')
   const [busy, setBusy] = React.useState(false)
@@ -481,7 +488,7 @@ function AddKeyDialog({
     setBusy(true)
     setError('')
     try {
-      await api('keys', { method: 'POST', body: { client, action: 'add', name, key } })
+      await api('keys', { method: 'POST', body: { client, action: 'add', name, key, provider } })
       onDone()
     } catch (e) {
       setError((e as Error).message)
@@ -494,12 +501,28 @@ function AddKeyDialog({
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Add a kenari key</DialogTitle>
+          <DialogTitle>Add a key</DialogTitle>
           <DialogDescription>
-            Paste a key from the kenari dashboard. It is stored on this server only, never in the config file.
+            Paste a key from your provider's dashboard. It is stored on this server only, never in the config file.
           </DialogDescription>
         </DialogHeader>
         <DialogBody className="space-y-4">
+          {providers.length > 1 && (
+            <Field label="Provider">
+              <Select value={provider} onValueChange={setProvider}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {providers.map((p) => (
+                    <SelectItem key={p.id} value={p.id}>
+                      {p.id}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+          )}
           <Field label="Name" htmlFor="key-name">
             <Input id="key-name" value={name} onChange={(e) => setName(e.target.value)} />
           </Field>

@@ -360,6 +360,7 @@ function ModelPicker({
   onSave: (models: string[], excluded: string[]) => void
 }) {
   const [rows, setRows] = React.useState<CatalogRow[] | null>(null)
+  const [multi, setMulti] = React.useState(false)
   const [draft, setDraft] = React.useState<string[]>(selected)
   const [out, setOut] = React.useState<string[]>(excluded)
   // A model xellter adds on its own is ticked until the owner unticks it (ADR 0035).
@@ -380,10 +381,13 @@ function ModelPicker({
   const toast = useToast()
 
   React.useEffect(() => {
-    api<{ models: CatalogRow[] }>(
+    api<{ models: CatalogRow[]; providers: { id: string }[] }>(
       `catalog/models?client=${encodeURIComponent(client)}&category=${encodeURIComponent(preset.category)}`,
     )
-      .then((r) => setRows(r.models))
+      .then((r) => {
+        setRows(r.models)
+        setMulti((r.providers?.length ?? 0) > 1)
+      })
       .catch((e) => toast.push(e.message, 'bad'))
   }, [client, preset.category, toast])
 
@@ -424,7 +428,7 @@ function ModelPicker({
           {!rows ? (
             <p className="py-8 text-center text-sm text-text-muted">Loading the catalog…</p>
           ) : families.length === 0 ? (
-            <p className="py-8 text-center text-sm text-text-muted">kenari has no model of this kind.</p>
+            <p className="py-8 text-center text-sm text-text-muted">No provider has a model of this kind.</p>
           ) : (
             <div className="space-y-2">
               {families.map(([owner, list]) => {
@@ -494,6 +498,7 @@ function ModelPicker({
                                   {m.callable && <BillingBadge billing={m.billing} />}
                                   {m.promo_off > 0 && <Badge tone="warning">promo −{Math.round(m.promo_off)}%</Badge>}
                                   {!m.callable && <Badge tone="danger">no key may call it</Badge>}
+                                  {multi && m.provider !== 'local' && <Badge tone="outline">{m.provider}</Badge>}
                                   <EffortBadge m={m} />
                                   <span className="tabular ml-auto text-text-muted">{priceLine(m)}</span>
                                 </div>

@@ -192,6 +192,13 @@ type env struct {
 
 func setup(t testing.TB, mutate func(*config.Config)) *env {
 	t.Helper()
+	return setupWith(t, mutate, nil)
+}
+
+// setupWith is setup with the catalog source chosen by the test: by default the fake kenari alone, which is what
+// the app builds itself from the configuration. A test of several providers passes a merged source.
+func setupWith(t testing.TB, mutate func(*config.Config), source func(f *fake) catalog.Source) *env {
+	t.Helper()
 	f := newFake(t)
 	dir := t.TempDir()
 	cfg := config.Default()
@@ -235,7 +242,10 @@ func setup(t testing.TB, mutate func(*config.Config)) *env {
 			t.Fatal(err)
 		}
 	}
-	src := &catalog.Kenari{BaseURL: f.srv.URL, UA: "test", HTTP: f.srv.Client()}
+	var src catalog.Source = &catalog.Kenari{BaseURL: f.srv.URL, UA: "test", HTTP: f.srv.Client()}
+	if source != nil {
+		src = source(f)
+	}
 	a, err := app.New(path, src)
 	if err != nil {
 		t.Fatal(err)

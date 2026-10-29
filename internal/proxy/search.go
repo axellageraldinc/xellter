@@ -81,7 +81,7 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request, cl *config.Clien
 			}
 		}
 		var res *http.Response
-		res, err = s.sendSearch(r, cfg, key.Secret(), body)
+		res, err = s.sendSearch(r, s.conn(cfg, key.Provider()), key.Secret(), body)
 		if err != nil {
 			// The client went away: not the search's failure, and not ours to retry.
 			if r.Context().Err() != nil {
@@ -128,12 +128,12 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request, cl *config.Clien
 }
 
 // sendSearch makes one attempt against the upstream search endpoint.
-func (s *Server) sendSearch(r *http.Request, cfg *config.Config, secret string, body []byte) (*http.Response, error) {
+func (s *Server) sendSearch(r *http.Request, conn config.ProviderConn, secret string, body []byte) (*http.Response, error) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, cfg.Kenari.BaseURL+"/v1/x/search", bytes.NewReader(body))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, conn.BaseURL+"/v1/x/search", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+secret)
-	req.Header.Set("User-Agent", cfg.Kenari.UserAgent)
+	req.Header.Set("User-Agent", conn.UserAgent)
 	res, err := s.hc.Do(req)
 	if err != nil {
 		cancel()

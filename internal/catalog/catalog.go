@@ -72,6 +72,29 @@ type Model struct {
 	// key. UpstreamModel is the name that server knows the model by.
 	BaseURL       string `json:"base_url,omitempty"`
 	UpstreamModel string `json:"upstream_model,omitempty"`
+	// Provider is the upstream the model belongs to. Empty means the built-in one (config.DefaultProvider), which
+	// is also what a snapshot saved before providers existed says (ADR 0040).
+	Provider string `json:"provider,omitempty"`
+}
+
+// DefaultProvider is the provider of a model that names none.
+const DefaultProvider = "kenari"
+
+// ProviderID is the provider the model belongs to.
+func (m *Model) ProviderID() string {
+	if m == nil || m.Provider == "" {
+		return DefaultProvider
+	}
+	return m.Provider
+}
+
+// WireID is the model name the upstream knows. A model of an extra provider is listed as "<provider>/<id>" here
+// and sent as "<id>"; a local model is sent under the name its server knows.
+func (m *Model) WireID() string {
+	if m.UpstreamModel != "" {
+		return m.UpstreamModel
+	}
+	return m.ID
 }
 
 // IsLocal reports whether the model runs on this machine instead of at kenari.

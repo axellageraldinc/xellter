@@ -116,6 +116,7 @@ type keyRow struct {
 	Tier         string    `json:"tier"`
 	State        string    `json:"state"`      // ready | paused | no secret | unchecked
 	Capability   string    `json:"capability"` // "" (a model key) | search
+	Provider     string    `json:"provider"`   // the upstream the key belongs to
 }
 
 // presetRow is the summary of one preset a client holds.
@@ -171,7 +172,7 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 	if snap != nil {
 		out["catalog"] = map[string]any{"models": len(snap.Models), "age_s": int(now.Sub(snap.Fetched).Seconds()), "degraded": snap.Degraded, "plans": len(snap.Plans), "tier": snap.Tier, "usd_idr": snap.USDIDR}
 		for _, k := range h.a.Pool.Keys() {
-			if k.Owner() == "" { // the read-only account key
+			if k.Owner() == "" && k.Provider() == config.DefaultProvider { // the read-only account key of kenari
 				row := h.keyRow(k, now)
 				accountKey = &row
 			}
@@ -186,6 +187,7 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 		out["plan_names"] = plans
 	}
 	out["accounts"] = accts
+	out["providers"] = h.providerOptions(cfg)
 	out["account_key"] = map[string]any{"configured": accountKey != nil, "status": accountKey, "env": cfg.Kenari.AccountKeyEnv}
 	rows := h.clientRows(cfg, now, 24*time.Hour)
 	out["clients"] = rows
@@ -223,7 +225,7 @@ func (h *Handler) keyRow(k *upstream.Key, now time.Time) keyRow {
 	row := keyRow{
 		Name: st.Label, Hint: keyHint(k), HasSecret: st.HasSecret, Probed: k.Probed(), Unrestricted: st.Unrestricted,
 		Allowed: len(st.Learned), Blocked: len(st.Blocked), CooldownEnd: st.CooldownEnd, BreakerEnd: st.BreakerEnd,
-		LastError: st.LastError, LastOK: st.LastOK, Tier: st.Tier, Capability: k.Capability(),
+		LastError: st.LastError, LastOK: st.LastOK, Tier: st.Tier, Capability: k.Capability(), Provider: k.Provider(),
 	}
 	switch {
 	case !row.HasSecret:
@@ -266,7 +268,7 @@ func (h *Handler) keyRows(cl *config.Client, now time.Time) []keyRow {
 			out = append(out, h.keyRow(k, now))
 			continue
 		}
-		out = append(out, keyRow{Name: u.Name, State: "no secret"})
+		out = append(out, keyRow{Name: u.Name, State: "no secret", Provider: u.ProviderID()})
 	}
 	return out
 }
@@ -446,6 +448,7 @@ func (h *Handler) clients(w http.ResponseWriter, r *http.Request) {
 			"clients":       h.clientRows(cfg, now, 24*time.Hour),
 			"purposes":      purposeOptions(),
 			"optimizations": optimizationOptions(),
+			"providers":     h.providerOptions(cfg),
 		})
 		return
 	}
@@ -485,7 +488,7 @@ func (h *Handler) clients(w http.ResponseWriter, r *http.Request) {
 				name = "main"
 			}
 			name = strings.Join(strings.Fields(name), "-")
-			secretEnv, secretVal = envName(in.Name, name), k
+			secretEnv, secretVal = envName("", in.Name, name), k
 			cl.Keys = append(cl.Keys, config.Upstream{Name: name, KeyEnv: secretEnv})
 		}
 		next.Clients = append(next.Clients, cl)
@@ -555,8 +558,49 @@ func (h *Handler) clients(w http.ResponseWriter, r *http.Request) {
 
 var nonEnv = regexp.MustCompile(`[^A-Z0-9]+`)
 
-func envName(client, key string) string {
-	return "KENARI_KEY_" + strings.Trim(nonEnv.ReplaceAllString(strings.ToUpper(client+"_"+key), "_"), "_")
+// envName is the secret name of a key. The built-in provider keeps its historic KENARI_KEY_ prefix; another one
+// uses its own id, so two providers cannot collide on a name.
+func envName(provider, client, key string) string {
+	prefix := "KENARI"
+	if provider != "" && provider != config.DefaultProvider {
+		prefix = strings.Trim(nonEnv.ReplaceAllString(strings.ToUpper(provider), "_"), "_")
+	}
+	return prefix + "_KEY_" + strings.Trim(nonEnv.ReplaceAllString(strings.ToUpper(client+"_"+key), "_"), "_")
+}
+
+// providerOption is one upstream as the panel lists it.
+type providerOption struct {
+	ID      string `json:"id"`
+	Type    string `json:"type"`
+	BaseURL string `json:"base_url"`
+	Models  int    `json:"models"`
+	Keys    int    `json:"keys"`
+}
+
+// providerOptions lists the providers, the built-in one first, with how many models they list and keys use them.
+// The panel shows a provider choice only when there is more than one.
+func (h *Handler) providerOptions(cfg *config.Config) []providerOption {
+	var out []providerOption
+	idx := map[string]int{}
+	for _, pc := range cfg.ProviderList() {
+		idx[pc.ID] = len(out)
+		out = append(out, providerOption{ID: pc.ID, Type: pc.Type, BaseURL: pc.BaseURL})
+	}
+	if snap := h.a.Cat.Snapshot(); snap != nil {
+		for _, m := range snap.Models {
+			if i, ok := idx[m.ProviderID()]; ok && !m.IsLocal() {
+				out[i].Models++
+			}
+		}
+	}
+	for _, cl := range cfg.Clients {
+		for _, u := range cl.Keys {
+			if i, ok := idx[u.ProviderID()]; ok {
+				out[i].Keys++
+			}
+		}
+	}
+	return out
 }
 
 func (h *Handler) keys(w http.ResponseWriter, r *http.Request) {
@@ -566,6 +610,8 @@ func (h *Handler) keys(w http.ResponseWriter, r *http.Request) {
 		Name   string `json:"name"`
 		New    string `json:"new_name"`
 		Key    string `json:"key"`
+		// Provider is the upstream a new key belongs to; empty is the built-in one.
+		Provider string `json:"provider"`
 	}
 	if r.Method != http.MethodPost || readJSON(r, &in) != nil {
 		jerr(w, 400, "POST {client, action, name, key}")
@@ -585,8 +631,12 @@ func (h *Handler) keys(w http.ResponseWriter, r *http.Request) {
 			jerr(w, 422, "a name and the key are required")
 			return
 		}
-		env := envName(in.Client, in.Name)
-		cl.Keys = append(cl.Keys, config.Upstream{Name: in.Name, KeyEnv: env})
+		prov := ""
+		if in.Provider != "" && in.Provider != config.DefaultProvider {
+			prov = in.Provider // the default stays implicit, so an old reader of the file still understands it
+		}
+		env := envName(prov, in.Client, in.Name)
+		cl.Keys = append(cl.Keys, config.Upstream{Name: in.Name, KeyEnv: env, Provider: prov})
 		if err := config.Normalize(&next); err != nil {
 			jerr(w, 422, err.Error())
 			return
@@ -614,7 +664,7 @@ func (h *Handler) keys(w http.ResponseWriter, r *http.Request) {
 			}
 			found = true
 			old := cl.Keys[i].KeyEnv
-			env := envName(in.Client, in.New)
+			env := envName(cl.Keys[i].Provider, in.Client, in.New)
 			if secret, ok := h.a.Secrets()[old]; ok {
 				if err := config.SetSecret(next.Server.SecretsFile, env, secret); err != nil {
 					jerr(w, 422, err.Error())
@@ -792,6 +842,7 @@ func (h *Handler) clientDetail(w http.ResponseWriter, r *http.Request) {
 		"purposes":      purposeOptions(),
 		"optimizations": optimizationOptions(),
 		"categories":    categoryOptions(),
+		"providers":     h.providerOptions(cfg),
 		"computed_at":   h.a.Rt.Computed(),
 		"routing":       cfg.Routing,
 	})
@@ -955,6 +1006,7 @@ type catalogRow struct {
 	PromoEnds     *time.Time     `json:"promo_ends,omitempty"`
 	SunsetAt      *time.Time     `json:"sunset_at,omitempty"`
 	Subscriber    bool           `json:"subscriber_only"`
+	Provider      string         `json:"provider"`
 	// Reasoning says the model thinks before it answers. EffortLevels are the efforts the catalog publishes for
 	// it, EffortToggle that its reasoning can be switched off, and EffortRefused the efforts this gateway has
 	// seen it answer HTTP 400 to (ADR 0026). The catalog does not predict behaviour, so all three are hints.
@@ -976,7 +1028,7 @@ func (h *Handler) catalogModels(w http.ResponseWriter, r *http.Request) {
 	if name := q.Get("client"); name != "" {
 		cl = findClient(h.a.Cfg(), name)
 	}
-	out := map[string]any{"category": category, "client": q.Get("client"), "models": []catalogRow{}}
+	out := map[string]any{"category": category, "client": q.Get("client"), "models": []catalogRow{}, "providers": h.providerOptions(h.a.Cfg())}
 	if snap == nil {
 		jok(w, out)
 		return
@@ -997,7 +1049,7 @@ func (h *Handler) catalogModels(w http.ResponseWriter, r *http.Request) {
 			InIDR: m.InIDR, OutIDR: m.OutIDR, CacheReadIDR: m.CachedIDR, CacheWriteIDR: m.CacheWrite,
 			HasCacheWrite: m.CacheWrite > 0, Lines: m.Lines, SunsetAt: m.SunsetAt, Subscriber: m.Subscriber,
 			Reasoning: m.Reasoning, EffortLevels: m.EffortLevels, EffortToggle: m.EffortToggle,
-			EffortRefused: sortedLevels(refused[id]),
+			EffortRefused: sortedLevels(refused[id]), Provider: providerOf(m),
 		}
 		if cl != nil {
 			row.Billing, row.Callable = h.billingOf(cl, m, snap, now)
@@ -1036,7 +1088,7 @@ func (h *Handler) billingOf(cl *config.Client, m *catalog.Model, snap *catalog.S
 	}
 	usable, plan := false, false
 	for _, k := range h.a.Pool.ClientKeys(cl.Name) {
-		if k.Secret() == "" || !k.AllowedModel(m.ID) {
+		if !k.Offers(m) {
 			continue
 		}
 		usable = true
@@ -1080,4 +1132,12 @@ func sortedLevels(in []string) []string {
 		}
 	}
 	return out
+}
+
+// providerOf names the provider of a model for the panel; a model on this machine belongs to none.
+func providerOf(m *catalog.Model) string {
+	if m.IsLocal() {
+		return "local"
+	}
+	return m.ProviderID()
 }

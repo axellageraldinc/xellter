@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/axellageraldinc/xellter/internal/rank"
+	"github.com/axellageraldinc/xellter/internal/upstream"
 )
 
 // The Usage page drills down one level at a time: every client, then the
@@ -263,12 +264,17 @@ func billingLabel(b string) string {
 // what xellter's log says. Requirement 19.
 func (h *Handler) kenariStrip(now time.Time) map[string]any {
 	snap := h.a.Cat.Snapshot()
-	accts := h.a.Pool.Accounts()
-	out := map[string]any{"configured": len(accts) > 0}
-	if len(accts) == 0 {
+	var acct *upstream.Account
+	for _, a := range h.a.Pool.Accounts() {
+		if a.Name == upstream.DefaultAccount { // the plan strip is kenari's: other providers have no plan windows
+			acct = a
+		}
+	}
+	out := map[string]any{"configured": acct != nil}
+	if acct == nil {
 		return out
 	}
-	st := accts[0].Status(snap, now)
+	st := acct.Status(snap, now)
 	out["account"] = st
 	windows := make([]map[string]any, 0, len(st.Windows))
 	for name, w := range st.Windows {

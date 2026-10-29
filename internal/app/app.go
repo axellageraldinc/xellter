@@ -66,14 +66,38 @@ type App struct {
 	healthVersion atomic.Uint64
 	// seenDropped and seenLost are the log-loss counters last reported, so the warning is not repeated.
 	seenDropped, seenLost atomic.Uint64
+	// mergeSrc is the catalog source over every provider (see merge).
+	mergeMu  sync.Mutex
+	mergeSrc catalog.Source
+	mergeKey string
 }
 
 type dynSource struct{ a *App }
 
+// Fetch builds one source per provider of the active configuration and merges them (ADR 0040). The providers are
+// read on every fetch, so a provider added in the panel is listed at the next refresh.
 func (d dynSource) Fetch(ctx context.Context) (*catalog.Snapshot, error) {
-	c := d.a.Cfg()
-	k := &catalog.Kenari{BaseURL: c.Kenari.BaseURL, UA: c.Kenari.UserAgent, HTTP: &http.Client{Timeout: 30 * time.Second}}
-	return k.Fetch(ctx)
+	hc := &http.Client{Timeout: 30 * time.Second}
+	var named []catalog.Named
+	for _, pc := range d.a.Cfg().ProviderList() {
+		named = append(named, catalog.Named{ID: pc.ID, Src: &catalog.Kenari{BaseURL: pc.BaseURL, UA: pc.UserAgent, HTTP: hc}})
+	}
+	return d.a.merge(named).Fetch(ctx)
+}
+
+// merge returns the merging source for the given providers, kept between fetches so that a provider which is
+// down keeps the models of its last good fetch.
+func (a *App) merge(named []catalog.Named) catalog.Source {
+	a.mergeMu.Lock()
+	defer a.mergeMu.Unlock()
+	key := ""
+	for _, n := range named {
+		key += n.ID + ","
+	}
+	if a.mergeSrc == nil || a.mergeKey != key {
+		a.mergeSrc, a.mergeKey = catalog.Merge(named[0], named[1:]...), key
+	}
+	return a.mergeSrc
 }
 
 // locals are the local models of the active configuration, in the catalog's terms (ADR 0033).
@@ -120,7 +144,9 @@ func New(path string, src catalog.Source) (*App, error) {
 	a.loadHealth()
 	a.Cat.OnUpdate(func(s *catalog.Snapshot) {
 		for _, ac := range a.Pool.Accounts() {
-			ac.SetTopupThreshold(s.Tier.Thresh)
+			if ac.Name == upstream.DefaultAccount { // the snapshot's free tier is the built-in provider's
+				ac.SetTopupThreshold(s.Tier.Thresh)
+			}
 		}
 		a.rematchBench(s)
 		a.Rt.Recompute(time.Now())
@@ -306,7 +332,7 @@ func (a *App) SetSecret(name, value string) error {
 	return nil
 }
 
-// ProbeKeys asks kenari which models each key may use. A request for a model
+// ProbeKeys asks each key's provider which models the key may use. A request for a model
 // that does not exist is rejected with the key's allow list in the error and is
 // never billed, so this costs nothing. Unrestricted keys clear their list.
 func (a *App) ProbeKeys(ctx context.Context) {
@@ -326,11 +352,15 @@ func (a *App) ProbeKeys(ctx context.Context) {
 			// curiosity. It is used for its service only.
 			continue
 		}
+		conn, ok := cfg.Provider(k.Provider())
+		if !ok {
+			continue
+		}
 		body := []byte(`{"model":"xellter-probe","max_tokens":1,"messages":[{"role":"user","content":"."}]}`)
-		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, cfg.Kenari.BaseURL+"/v1/chat/completions", bytes.NewReader(body))
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, conn.BaseURL+"/v1/chat/completions", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+k.Secret())
-		req.Header.Set("User-Agent", cfg.Kenari.UserAgent)
+		req.Header.Set("User-Agent", conn.UserAgent)
 		resp, err := hc.Do(req)
 		if err != nil {
 			a.Logf("probe %s: %v", k.Name, err)
@@ -398,12 +428,15 @@ type quotaResp struct {
 // readAccount asks kenari for the account's plan quota and balance. Only an
 // unrestricted key may; restricted keys get 403 and are simply not used for this.
 func (a *App) readAccount(ctx context.Context, k *upstream.Key) bool {
-	cfg := a.Cfg()
+	conn, ok := a.Cfg().Provider(k.Provider())
+	if !ok {
+		return false
+	}
 	hc := &http.Client{Timeout: 20 * time.Second}
 	get := func(path string) (int, []byte) {
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, cfg.Kenari.BaseURL+path, nil)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, conn.BaseURL+path, nil)
 		req.Header.Set("Authorization", "Bearer "+k.Secret())
-		req.Header.Set("User-Agent", cfg.Kenari.UserAgent)
+		req.Header.Set("User-Agent", conn.UserAgent)
 		resp, err := hc.Do(req)
 		if err != nil {
 			return 0, nil
@@ -442,6 +475,17 @@ func (a *App) readAccount(ctx context.Context, k *upstream.Key) bool {
 		}
 	}
 	return true
+}
+
+// syncEvery is how long to wait before the next catalog refresh: the shortest interval any provider asks for.
+func (a *App) syncEvery() time.Duration {
+	min := 0
+	for _, pc := range a.Cfg().ProviderList() {
+		if min == 0 || pc.SyncMinutes < min {
+			min = pc.SyncMinutes
+		}
+	}
+	return time.Duration(min) * time.Minute
 }
 
 // RefreshAccounts re-reads quota and balance from every account that has an unrestricted key.
@@ -554,7 +598,7 @@ func (a *App) Start(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(time.Duration(a.Cfg().Kenari.SyncMinutes) * time.Minute):
+			case <-time.After(a.syncEvery()):
 			}
 			if err := a.Cat.Refresh(ctx); err != nil {
 				a.Logf("catalog refresh failed: %v", err)
@@ -632,5 +676,5 @@ func (a *App) Describe() string {
 		keys += len(cl.Keys)
 		presets += len(cl.Presets)
 	}
-	return fmt.Sprintf("xellter %s: %d clients, %d kenari keys, %d presets, %d catalog models, listening on %s", Version, len(c.Clients), keys, presets, n, c.Server.Listen)
+	return fmt.Sprintf("xellter %s: %d clients, %d upstream keys, %d presets, %d catalog models, listening on %s", Version, len(c.Clients), keys, presets, n, c.Server.Listen)
 }

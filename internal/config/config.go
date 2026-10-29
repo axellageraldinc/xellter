@@ -29,10 +29,15 @@ import (
 // Config is the whole runtime configuration. JSON tags mirror YAML tags so the
 // admin panel can round-trip it.
 type Config struct {
-	Server  Server   `yaml:"server" json:"server"`
-	Kenari  Kenari   `yaml:"kenari" json:"kenari"`
-	Routing Routing  `yaml:"routing" json:"routing"`
-	Clients []Client `yaml:"clients,omitempty" json:"clients"` // kept in SQLite when a store exists (ADR 0037)
+	Server Server `yaml:"server" json:"server"`
+	// Kenari holds the connection settings of the built-in provider "kenari" (ADR 0040). Its section keeps its
+	// old name so an existing file loads unchanged.
+	Kenari Kenari `yaml:"kenari" json:"kenari"`
+	// Providers are further upstreams, each with its own id. A key says which provider it belongs to; a model of
+	// one of these is listed as "<id>/<model>" in a pool.
+	Providers []Provider `yaml:"providers,omitempty" json:"providers,omitempty"`
+	Routing   Routing    `yaml:"routing" json:"routing"`
+	Clients   []Client   `yaml:"clients,omitempty" json:"clients"` // kept in SQLite when a store exists (ADR 0037)
 	// LocalModels are models served from this machine instead of kenari (ADR 0033).
 	LocalModels []LocalModel `yaml:"local_models,omitempty" json:"local_models,omitempty"`
 }
@@ -75,6 +80,54 @@ type Kenari struct {
 	AccountKeyEnv string `yaml:"account_key_env" json:"account_key_env"`
 }
 
+// DefaultProvider is the id of the provider every key and model belongs to unless it says otherwise. It is the one
+// configured by the `kenari:` section, so a file written before providers existed keeps its meaning (ADR 0040).
+const DefaultProvider = "kenari"
+
+// ProviderTypes are the wire protocols xellter can speak to an upstream. A provider of the "kenari" type speaks
+// kenari's API (OpenAI-compatible calls plus its catalog, plan and account endpoints); it may point anywhere.
+var ProviderTypes = []string{"kenari"}
+
+// Provider is an upstream besides the built-in one. The connection settings are the same as `kenari:`.
+type Provider struct {
+	ID     string `yaml:"id" json:"id"`
+	Type   string `yaml:"type,omitempty" json:"type,omitempty"` // "" = kenari
+	Kenari `yaml:",inline"`
+}
+
+// ProviderConn is what the data plane needs to reach one provider.
+type ProviderConn struct {
+	ID, Type string
+	Kenari
+}
+
+// Provider returns the connection settings of a provider id ("" is the default one).
+func (c *Config) Provider(id string) (ProviderConn, bool) {
+	if id == "" || id == DefaultProvider {
+		return ProviderConn{ID: DefaultProvider, Type: "kenari", Kenari: c.Kenari}, true
+	}
+	for _, p := range c.Providers {
+		if p.ID == id {
+			t := p.Type
+			if t == "" {
+				t = "kenari"
+			}
+			return ProviderConn{ID: p.ID, Type: t, Kenari: p.Kenari}, true
+		}
+	}
+	return ProviderConn{}, false
+}
+
+// ProviderList returns every provider, the default one first.
+func (c *Config) ProviderList() []ProviderConn {
+	out := []ProviderConn{{ID: DefaultProvider, Type: "kenari", Kenari: c.Kenari}}
+	for _, p := range c.Providers {
+		pc, _ := c.Provider(p.ID)
+		out = append(out, pc)
+	}
+	return out
+}
+
 // Routing is the small set of knobs that survived the rewrite. Everything a
 // preset or a model decides is not here.
 type Routing struct {
@@ -107,6 +160,17 @@ type Upstream struct {
 	Name       string `yaml:"name" json:"name"`
 	KeyEnv     string `yaml:"key_env" json:"key_env"`
 	Capability string `yaml:"capability" json:"capability,omitempty"` // "" (a model key) | search
+	// Provider is the upstream the key belongs to. Empty means the built-in one ("kenari"), so a key written
+	// before providers existed keeps working (ADR 0040).
+	Provider string `yaml:"provider,omitempty" json:"provider,omitempty"`
+}
+
+// ProviderID is the provider the key belongs to.
+func (u Upstream) ProviderID() string {
+	if u.Provider == "" {
+		return DefaultProvider
+	}
+	return u.Provider
 }
 
 // Client is an app that calls xellter (a chat app, an editor, ...). It has one
@@ -316,6 +380,25 @@ func (c *Config) fillDefaults() {
 	if c.Kenari.AccountKeyEnv == "" {
 		c.Kenari.AccountKeyEnv = d.Kenari.AccountKeyEnv
 	}
+	for i := range c.Providers {
+		p := &c.Providers[i]
+		if p.Type == "" {
+			p.Type = "kenari"
+		}
+		p.BaseURL = strings.TrimRight(p.BaseURL, "/")
+		if p.SyncMinutes <= 0 {
+			p.SyncMinutes = d.Kenari.SyncMinutes
+		}
+		if p.UserAgent == "" {
+			p.UserAgent = d.Kenari.UserAgent
+		}
+		if p.FirstByteSecs <= 0 {
+			p.FirstByteSecs = d.Kenari.FirstByteSecs
+		}
+		if p.MusicTimeoutSec <= 0 {
+			p.MusicTimeoutSec = d.Kenari.MusicTimeoutSec
+		}
+	}
 	r := &c.Routing
 	if r.TopModels <= 0 {
 		r.TopModels = d.Routing.TopModels
@@ -371,9 +454,10 @@ func (c *Config) fillDefaults() {
 }
 
 var (
-	nameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$`)
-	hashRe = regexp.MustCompile(`^[a-f0-9]{64}$`)
-	envRe  = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,63}$`)
+	nameRe     = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$`)
+	hashRe     = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	envRe      = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,63}$`)
+	providerRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,30}$`)
 )
 
 // Validate checks structural consistency and returns every problem found.
@@ -425,7 +509,7 @@ func (c *Config) Validate() error {
 			}
 			kseen[u.Name] = true
 			if !envRe.MatchString(u.KeyEnv) {
-				bad("client %q key %q: secret name must look like KENARI_KEY_X", cl.Name, u.Name)
+				bad("client %q key %q: secret name must look like KENARI_KEY_X (upper case letters, digits, underscore)", cl.Name, u.Name)
 			}
 			if other, dup := envSeen[u.KeyEnv]; dup {
 				bad("secret name %s is used by both %s and %s/%s", u.KeyEnv, other, cl.Name, u.Name)
@@ -483,6 +567,32 @@ func (c *Config) Validate() error {
 				if strings.TrimSpace(m) == "" {
 					bad("%s: empty excluded model id", where)
 				}
+			}
+		}
+	}
+	pseen := map[string]bool{DefaultProvider: true}
+	for i, p := range c.Providers {
+		switch {
+		case !providerRe.MatchString(p.ID):
+			bad("providers[%d].id %q is invalid (lowercase letters, digits, dash)", i, p.ID)
+		case pseen[p.ID]:
+			bad("provider id %q is used twice (%q is the built-in one, set by the kenari: section)", p.ID, DefaultProvider)
+		}
+		pseen[p.ID] = true
+		if !contains(ProviderTypes, p.Type) {
+			bad("provider %q: type must be one of %v", p.ID, ProviderTypes)
+		}
+		if !strings.HasPrefix(p.BaseURL, "http://") && !strings.HasPrefix(p.BaseURL, "https://") {
+			bad("provider %q: base_url must start with http:// or https://", p.ID)
+		}
+		if p.AccountKeyEnv != "" && !envRe.MatchString(p.AccountKeyEnv) {
+			bad("provider %q: account_key_env must look like %s_ACCOUNT_KEY", p.ID, strings.ToUpper(strings.ReplaceAll(p.ID, "-", "_")))
+		}
+	}
+	for _, cl := range c.Clients {
+		for _, u := range cl.Keys {
+			if !pseen[u.ProviderID()] {
+				bad("client %q key %q: unknown provider %q", cl.Name, u.Name, u.ProviderID())
 			}
 		}
 	}

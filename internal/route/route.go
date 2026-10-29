@@ -445,7 +445,7 @@ func (r *Router) keysFor(cl *config.Client, m *catalog.Model, snap *catalog.Snap
 		return []*upstream.Key{r.pool.LocalKey()}
 	}
 	var ks []kc
-	for _, k := range r.pool.ClientKeys(cl.Name) {
+	for _, k := range r.pool.KeysFor(cl.Name, m) {
 		if why := k.Check(m, snap, now); why != upstream.OK {
 			if reasons != nil {
 				reasons[why]++
@@ -671,7 +671,7 @@ func servesCategory(pathCategory, presetCategory string) bool {
 func noCapacity(r *Router, cl *config.Client, snap *catalog.Snapshot, now time.Time, reasons map[string]int) *Error {
 	keys := r.pool.ClientKeys(cl.Name)
 	if len(keys) == 0 {
-		return &Error{503, "no_upstream", "no kenari key is configured for this client", 30 * time.Second}
+		return &Error{503, "no_upstream", "no upstream key is configured for this client", 30 * time.Second}
 	}
 	if len(reasons) == 0 {
 		reasons = map[string]int{}
@@ -692,7 +692,7 @@ func noCapacity(r *Router, cl *config.Client, snap *catalog.Snapshot, now time.T
 		}
 	}
 	sort.Strings(parts)
-	return &Error{status, "no_capacity", "no kenari key can take the request now: " + strings.Join(parts, ", "), retry}
+	return &Error{status, "no_capacity", "no upstream key can take the request now: " + strings.Join(parts, ", "), retry}
 }
 
 // modalityOfPath maps an API path to the preset category it serves ("" = unknown).

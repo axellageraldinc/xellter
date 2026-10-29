@@ -65,9 +65,17 @@ func NewPool() *Pool {
 		acct: &Account{Name: "local"}, blocked: map[string]time.Time{}, blockN: map[string]int{}}}
 }
 
-// DefaultAccount is the name of the one kenari account: there is a single
-// account, and the limits kenari applies are per account.
+// DefaultAccount is the name of the built-in provider's account: the limits kenari applies are per account, and
+// there is a single one. A provider added later has an account named after it (ADR 0040).
 const DefaultAccount = "main"
+
+// AccountName is the name of the account that holds the limits of a provider.
+func AccountName(provider string) string {
+	if provider == "" || provider == config.DefaultProvider {
+		return DefaultAccount
+	}
+	return provider
+}
 
 // Reload applies a new config; state of keys and accounts with unchanged names
 // is kept. st may be nil (tests); it seeds counters of brand-new keys.
@@ -85,9 +93,15 @@ func (p *Pool) Reload(cfg *config.Config, secrets map[string]string, st *store.S
 			entries = append(entries, entry{cl.Name + "/" + u.Name, cl.Name, u, false})
 		}
 	}
-	if env := cfg.Kenari.AccountKeyEnv; env != "" && secrets[env] != "" {
-		// the account key only reads plan quota and balance; it never serves requests
-		entries = append(entries, entry{"account", "", config.Upstream{Name: "account", KeyEnv: env}, true})
+	for _, pc := range cfg.ProviderList() {
+		if env := pc.AccountKeyEnv; env != "" && secrets[env] != "" {
+			// the account key only reads plan quota and balance; it never serves requests
+			id := "account"
+			if pc.ID != config.DefaultProvider {
+				id = "account/" + pc.ID
+			}
+			entries = append(entries, entry{id, "", config.Upstream{Name: id, KeyEnv: env, Provider: pc.ID}, true})
+		}
 	}
 	next := make([]*Key, 0, len(entries))
 	by := map[string]*Key{}
@@ -100,15 +114,16 @@ func (p *Pool) Reload(cfg *config.Config, secrets map[string]string, st *store.S
 		if isNew {
 			k = &Key{Name: e.id, blocked: map[string]time.Time{}, blockN: map[string]int{}}
 		}
-		// every key belongs to the same kenari account: the limits kenari applies
-		// are per account, and there is only one account.
-		a := accts[DefaultAccount]
+		// every key of a provider belongs to that provider's one account: the limits an upstream applies are
+		// per account, and xellter models one account per provider (ADR 0040).
+		an := AccountName(u.ProviderID())
+		a := accts[an]
 		if a == nil {
-			a = p.accts[DefaultAccount]
+			a = p.accts[an]
 			if a == nil {
-				a = &Account{Name: DefaultAccount}
+				a = &Account{Name: an}
 			}
-			accts[DefaultAccount] = a
+			accts[an] = a
 		}
 		if isNew && st != nil {
 			// the account's counters are read by request handlers while this runs, so they are seeded under
@@ -168,6 +183,17 @@ func (p *Pool) ClientCapabilityKeys(client, capability string) []*Key {
 	return out
 }
 
+// KeysFor returns the keys of a client that belong to the model's provider.
+func (p *Pool) KeysFor(client string, m *catalog.Model) []*Key {
+	var out []*Key
+	for _, k := range p.ClientKeys(client) {
+		if k.Provider() == m.ProviderID() {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
 // Keys returns the current keys.
 func (p *Pool) Keys() []*Key {
 	p.mu.RLock()
@@ -196,6 +222,21 @@ func (p *Pool) Accounts() []*Account {
 
 // Next returns a monotonically increasing counter for round-robin rotation.
 func (p *Pool) Next() uint64 { return p.rr.Add(1) }
+
+// Provider returns the upstream the key belongs to.
+func (k *Key) Provider() string {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.cfg.ProviderID()
+}
+
+// Offers reports whether the key can be used for the model at all: it belongs to the model's provider, has a
+// secret, and the list of models the upstream said it may call (which names models as the upstream does) permits it.
+func (k *Key) Offers(m *catalog.Model) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.secret != "" && k.cfg.ProviderID() == m.ProviderID() && k.allowed(m.WireID())
+}
 
 // Secret returns the kenari key value ("" when the secret is not configured).
 func (k *Key) Secret() string {
@@ -300,11 +341,13 @@ const (
 	Cooldown    = "cooldown"
 	BreakerOpen = "breaker open"
 	NotAllowed  = "model not allowed on key"
-	Blocked     = "model blocked (recent errors)"
-	PlanLimit   = "plan limit reached"
-	NoBalance   = "no balance"
-	RPMLimit    = "rpm limit"
-	DailyLimit  = "daily free quota used"
+	// WrongProvider means the key belongs to another upstream than the model.
+	WrongProvider = "key belongs to another provider"
+	Blocked       = "model blocked (recent errors)"
+	PlanLimit     = "plan limit reached"
+	NoBalance     = "no balance"
+	RPMLimit      = "rpm limit"
+	DailyLimit    = "daily free quota used"
 )
 
 // Check reports why the key cannot take a request for the model right now.
@@ -359,7 +402,10 @@ func (k *Key) check(m *catalog.Model, now time.Time) string {
 	if m == nil { // a state query, not a per-model check
 		return OK
 	}
-	if !k.allowed(m.ID) {
+	if k.cfg.ProviderID() != m.ProviderID() {
+		return WrongProvider
+	}
+	if !k.allowed(m.WireID()) {
 		return NotAllowed
 	}
 	if until, ok := k.blocked[m.ID]; ok && now.Before(until) {

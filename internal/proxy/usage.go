@@ -270,7 +270,7 @@ func billingClass(s *Server, cl *config.Client, m *catalog.Model, snap *catalog.
 		return "free"
 	}
 	for _, k := range s.pool.ClientKeys(cl.Name) {
-		if k.Secret() != "" && k.AllowedModel(m.ID) && k.Covered(m, snap, now) {
+		if k.Offers(m) && k.Covered(m, snap, now) {
 			return "plan"
 		}
 	}

@@ -840,3 +840,14 @@ func TestUsageDrillDownListsLocalModel(t *testing.T) {
 		t.Fatalf("the local model must be listed as free and counted: %s", rec.Body)
 	}
 }
+
+// The secret of a key is named after its provider, so two providers cannot collide, and the built-in one keeps the
+// name it always had.
+func TestKeySecretNamesFollowTheProvider(t *testing.T) {
+	if got := envName("", "babu", "main"); got != "KENARI_KEY_BABU_MAIN" {
+		t.Fatalf("built-in: %s", got)
+	}
+	if got := envName("alt-one", "babu", "main"); got != "ALT_ONE_KEY_BABU_MAIN" {
+		t.Fatalf("alt: %s", got)
+	}
+}

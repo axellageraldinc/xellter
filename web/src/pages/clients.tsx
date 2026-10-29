@@ -215,7 +215,7 @@ function AddClientDialog({
               </SelectContent>
             </Select>
           </Field>
-          <Field label="kenari key" hint="Optional. Stored on this server only, never in the config file.">
+          <Field label="API key" hint="Optional. Stored on this server only, never in the config file.">
             <Input
               type="password"
               value={kenariKey}
