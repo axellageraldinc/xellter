@@ -73,7 +73,8 @@ func savingModels(snap *catalog.Snapshot, ids []string) []savingModel {
 	for _, id := range ids {
 		sm := savingModel{ID: id, Kinds: []string{}}
 		if snap != nil {
-			if m := snap.Models[id]; m != nil {
+			// System One is a service, not a text model: nothing is compared with it, and it is compared with nothing
+			if m := snap.Models[id]; m != nil && m.Endpoint != "systemone" {
 				if m.InIDR > 0 || m.OutIDR > 0 {
 					sm.InIDR, sm.OutIDR, sm.Cached = m.InIDR, m.OutIDR, m.CachedIDR
 					if sm.Cached <= 0 || sm.Cached > sm.InIDR {
@@ -108,14 +109,19 @@ func savingModels(snap *catalog.Snapshot, ids []string) []savingModel {
 
 // spendOf compares one spend with each model. media is the row's non-chat work; cost is everything it was charged.
 func spendOf(models []savingModel, inTok, outTok, cachedTok, rtkChars int64, cost float64, media []store.UnitSpend) []saving {
+	chatCost := cost
+	for _, u := range media {
+		chatCost -= u.Cost
+		if u.Unit == "systemone" {
+			// System One is a service with its own price, not a text model: its tokens are nobody's baseline
+			inTok, outTok, cachedTok, rtkChars = inTok-u.InTok, outTok-u.OutTok, cachedTok-u.CachedTok, rtkChars-u.RTKSaved
+		}
+	}
+	inTok, outTok, cachedTok, rtkChars = max(inTok, 0), max(outTok, 0), max(cachedTok, 0), max(rtkChars, 0)
 	if cachedTok > inTok {
 		cachedTok = inTok
 	}
 	rtkTok := float64(rtkChars) / charsPerToken
-	chatCost := cost
-	for _, u := range media {
-		chatCost -= u.Cost
-	}
 	if chatCost < 0 {
 		chatCost = 0
 	}

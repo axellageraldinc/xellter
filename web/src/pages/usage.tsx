@@ -362,7 +362,7 @@ function SavingsCard({
   const [options, setOptions] = React.useState<PickerModel[]>([])
   React.useEffect(() => {
     api<{ models: PickerModel[] }>('catalog/models')
-      .then((r) => setOptions(r.models ?? []))
+      .then((r) => setOptions((r.models ?? []).filter((m) => m.endpoint !== 'systemone')))
       .catch(() => setOptions([]))
   }, [])
   const sv = data?.totals.savings ?? []
@@ -401,7 +401,7 @@ function SavingsCard({
                     <span className="flex items-center gap-2">
                       <span className="mono">{id}</span>
                       {id === col && <Badge tone="neutral">shown in the column below</Badge>}
-                      {!known && <Badge tone="warning">not in the catalog</Badge>}
+                      {!known && <Badge tone="warning">cannot be compared</Badge>}
                       {known && <span className="text-xs text-text-muted">{kindsLabel(data.compare?.find((m) => m.id === id)?.kinds)}</span>}
                     </span>
                   </TD>

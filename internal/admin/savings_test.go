@@ -52,3 +52,13 @@ func TestMediaIsComparedOnItsOwnKind(t *testing.T) {
 		t.Fatalf("text model: %+v", got[1])
 	}
 }
+
+func TestSystemOneIsNotPricedAsText(t *testing.T) {
+	txt := savingModel{ID: "txt", Found: true, InIDR: 1000, OutIDR: 1000, Cached: 1000}
+	// 3000 tokens in all, 2000 of them System One's; the row cost 10, of which System One 8
+	media := []store.UnitSpend{{Unit: "systemone", Cost: 8, InTok: 2000}}
+	got := spendOf([]savingModel{txt}, 3000, 0, 0, 0, 10, media)
+	if math.Abs(got[0].Baseline-1) > 1e-9 || math.Abs(got[0].covered-2) > 1e-9 {
+		t.Fatalf("only the 1000 text tokens and their Rp 2 count: %+v", got[0])
+	}
+}

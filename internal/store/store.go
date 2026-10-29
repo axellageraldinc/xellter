@@ -398,6 +398,9 @@ type UnitSpend struct {
 	Unit  string  `json:"unit"`
 	Units float64 `json:"units"`
 	Cost  float64 `json:"cost_idr"`
+	// The tokens and RTK characters of these calls, which matter for "systemone": it is chat-shaped, but it is a
+	// service with its own price, so its tokens must leave the text side of a comparison.
+	InTok, OutTok, CachedTok, RTKSaved int64
 }
 
 // MediaSpend sums the non-chat work of each group (the same groups and keys as Usage): units and rupiah per
@@ -407,14 +410,15 @@ func (s *Store) MediaSpend(group string, since time.Time, client, preset string)
 	if col == "" {
 		return nil, errors.New("bad group")
 	}
-	// Rows logged before the unit columns existed are told apart by what they were. X search is a "service". An
+	// Rows logged before the unit columns existed are told apart by what they were. System One is "systemone" (always, it never had units). X search is a "service". An
 	// image, a song or a transcription is counted the way the gateway bills a request that names no amount: one
 	// image, one song, a nominal 60 seconds (an estimate: a request for several images is counted as one). Speech
 	// and video have no such default, so those rows are "legacy": no model prices them, but they leave the text
 	// side, so their rupiah are not mistaken for chat spend.
-	rows, err := s.db.Query(fmt.Sprintf(`SELECT k, u, COALESCE(SUM(n),0), COALESCE(SUM(cost),0) FROM (
-		SELECT %s k, cost,
+	rows, err := s.db.Query(fmt.Sprintf(`SELECT k, u, COALESCE(SUM(n),0), COALESCE(SUM(cost),0), COALESCE(SUM(in_tok),0), COALESCE(SUM(out_tok),0), COALESCE(SUM(cached_tok),0), COALESCE(SUM(rtk_saved),0) FROM (
+		SELECT %s k, cost, in_tok, out_tok, cached_tok, rtk_saved,
 		CASE WHEN unit IS NOT NULL AND unit!='' THEN unit
+			WHEN path LIKE '/v1/systemone%%' THEN 'systemone'
 			WHEN model='x/search' THEN 'service'
 			WHEN path LIKE '/v1/images%%' THEN 'image'
 			WHEN path LIKE '/v1/music%%' THEN 'song'
@@ -436,7 +440,7 @@ func (s *Store) MediaSpend(group string, since time.Time, client, preset string)
 	for rows.Next() {
 		var k sql.NullString
 		var u UnitSpend
-		if err := rows.Scan(&k, &u.Unit, &u.Units, &u.Cost); err != nil {
+		if err := rows.Scan(&k, &u.Unit, &u.Units, &u.Cost, &u.InTok, &u.OutTok, &u.CachedTok, &u.RTKSaved); err != nil {
 			return nil, err
 		}
 		out[k.String] = append(out[k.String], u)
