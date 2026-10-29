@@ -272,7 +272,7 @@ function CallsCard({ calls, level }: { calls: UsageCall[]; level: 'client' | 'pr
  */
 function SearchCard({ s }: { s: NonNullable<Usage['search']> }) {
   return (
-    <Card className="mb-4">
+    <Card className="mt-4">
       <CardHeader>
         <CardTitle>X search</CardTitle>
         <span className="text-xs text-text-muted">a service of kenari, billed per answer</span>
