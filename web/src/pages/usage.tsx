@@ -320,6 +320,7 @@ function Fact({ label, value, tone }: { label: string; value: string; tone?: 'da
 
 const KIND_NAMES: Record<string, string> = {
   tokens: 'text',
+  systemone: 'System One',
   image: 'images',
   second: 'seconds',
   '1k_chars': 'speech',
@@ -362,7 +363,7 @@ function SavingsCard({
   const [options, setOptions] = React.useState<PickerModel[]>([])
   React.useEffect(() => {
     api<{ models: PickerModel[] }>('catalog/models')
-      .then((r) => setOptions((r.models ?? []).filter((m) => m.endpoint !== 'systemone')))
+      .then((r) => setOptions(r.models ?? []))
       .catch(() => setOptions([]))
   }, [])
   const sv = data?.totals.savings ?? []

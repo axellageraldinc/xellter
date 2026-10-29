@@ -61,4 +61,10 @@ func TestSystemOneIsNotPricedAsText(t *testing.T) {
 	if math.Abs(got[0].Baseline-1) > 1e-9 || math.Abs(got[0].covered-2) > 1e-9 {
 		t.Fatalf("only the 1000 text tokens and their Rp 2 count: %+v", got[0])
 	}
+	// a System One model prices the System One tokens only, against System One's own cost
+	sys := savingModel{ID: "sys", Found: true, service: true, InIDR: 500, OutIDR: 500, Cached: 500}
+	got = spendOf([]savingModel{sys}, 3000, 0, 0, 0, 10, media)
+	if math.Abs(got[0].Baseline-1) > 1e-9 || math.Abs(got[0].covered-8) > 1e-9 {
+		t.Fatalf("2000 tokens x Rp 500 per 1M = Rp 1 against the Rp 8 charged: %+v", got[0])
+	}
 }

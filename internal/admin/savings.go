@@ -38,6 +38,9 @@ type savingModel struct {
 	Kinds []string `json:"kinds"`
 	// unit is the cheapest price per catalog unit, for a media model.
 	unit map[string]float64
+	// service marks a System One model: its token prices answer only for System One traffic, and a text model's
+	// only for text, because System One is a service with its own price, not a text model.
+	service bool
 }
 
 // saving is the comparison of one spend (a row, or the totals) with one model.
@@ -73,14 +76,14 @@ func savingModels(snap *catalog.Snapshot, ids []string) []savingModel {
 	for _, id := range ids {
 		sm := savingModel{ID: id, Kinds: []string{}}
 		if snap != nil {
-			// System One is a service, not a text model: nothing is compared with it, and it is compared with nothing
-			if m := snap.Models[id]; m != nil && m.Endpoint != "systemone" {
+			if m := snap.Models[id]; m != nil {
 				if m.InIDR > 0 || m.OutIDR > 0 {
 					sm.InIDR, sm.OutIDR, sm.Cached = m.InIDR, m.OutIDR, m.CachedIDR
 					if sm.Cached <= 0 || sm.Cached > sm.InIDR {
 						sm.Cached = sm.InIDR // no cache price published: cached tokens cost as much as any input
 					}
-					sm.Kinds = append(sm.Kinds, "tokens")
+					sm.service = m.Endpoint == "systemone"
+					sm.Kinds = append(sm.Kinds, map[bool]string{true: "systemone", false: "tokens"}[sm.service])
 				}
 				for _, l := range m.Lines {
 					if l.IDR <= 0 {
@@ -108,31 +111,33 @@ func savingModels(snap *catalog.Snapshot, ids []string) []savingModel {
 }
 
 // spendOf compares one spend with each model. media is the row's non-chat work; cost is everything it was charged.
+// System One is chat-shaped but is a service: its tokens and cost are split off, and only a System One model prices
+// them, while a text model prices the rest.
 func spendOf(models []savingModel, inTok, outTok, cachedTok, rtkChars int64, cost float64, media []store.UnitSpend) []saving {
 	chatCost := cost
+	var sys store.UnitSpend
 	for _, u := range media {
 		chatCost -= u.Cost
 		if u.Unit == "systemone" {
-			// System One is a service with its own price, not a text model: its tokens are nobody's baseline
+			sys = u
 			inTok, outTok, cachedTok, rtkChars = inTok-u.InTok, outTok-u.OutTok, cachedTok-u.CachedTok, rtkChars-u.RTKSaved
 		}
 	}
 	inTok, outTok, cachedTok, rtkChars = max(inTok, 0), max(outTok, 0), max(cachedTok, 0), max(rtkChars, 0)
-	if cachedTok > inTok {
-		cachedTok = inTok
-	}
-	rtkTok := float64(rtkChars) / charsPerToken
-	if chatCost < 0 {
-		chatCost = 0
-	}
 	out := make([]saving, 0, len(models))
 	for _, m := range models {
 		s := saving{Model: m.ID}
 		if m.Found {
 			if m.InIDR > 0 || m.OutIDR > 0 {
+				in, o, c, rtk, spent := inTok, outTok, cachedTok, rtkChars, max(chatCost, 0)
+				if m.service {
+					in, o, c, rtk, spent = sys.InTok, sys.OutTok, sys.CachedTok, sys.RTKSaved, sys.Cost
+				}
+				c = min(c, in)
+				rtkTok := float64(rtk) / charsPerToken
 				s.RTK = rtkTok * m.InIDR / 1e6
-				s.Baseline += (float64(inTok-cachedTok)*m.InIDR+float64(cachedTok)*m.Cached+float64(outTok)*m.OutIDR)/1e6 + s.RTK
-				s.covered += chatCost
+				s.Baseline += (float64(in-c)*m.InIDR+float64(c)*m.Cached+float64(o)*m.OutIDR)/1e6 + s.RTK
+				s.covered += spent
 			}
 			for _, u := range media {
 				if p, ok := m.unit[u.Unit]; ok {

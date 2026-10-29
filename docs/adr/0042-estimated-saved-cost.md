@@ -24,7 +24,7 @@ usually pick, and how much of that did xellter not spend.
    video or audio, thousands of characters spoken, songs), because rupiah alone cannot be turned into units for a
    free model. A compared model answers only for the kinds of work it can do (its token price, and each catalog
    unit line), and the charged side counts only that same work. A video is priced on the model's cheapest line of the
-   unit. X search and System One are services, not models, and are never compared (System One's tokens and cost leave the text side). Rows logged before this change have no units:
+   unit. X search is a service, not a model, and is never compared. System One is chat-shaped but is a service with its own price: its tokens and cost leave the text side, and only a System One model is compared with them. Rows logged before this change have no units:
    an image, a song or a transcription is counted the way the gateway bills a request that names no amount (1 image,
    1 song, 60 s), speech and video are not priced.
 4. **Honest limits.** It is an estimate: it assumes the compared model would have used the same number of tokens
