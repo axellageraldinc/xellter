@@ -22,6 +22,8 @@ import (
 //	  "totals": usageTotals,
 //	  "rows": [{ "key", "label", "client", "preset", "model", "billing", "billing_label",
 //	             "requests", "errors", "in_tok", "out_tok", "cached_tok", "rtk_saved", "cost_idr" }],
+//	  "calls": [{ "ts", "client", "preset", "model", "ok", "status", "in_tok", "out_tok",
+//	             "cached_tok", "rtk_saved", "cost_idr" }],   // newest 100 of this level
 //	  "series": [UsageRow...],   // hourly buckets, for the chart
 //	  "kenari": { ... }          // kenari's own plan windows and balance
 //	}
@@ -214,6 +216,13 @@ func (h *Handler) usageDrill(w http.ResponseWriter, r *http.Request) {
 		t.Cost += x.Cost
 	}
 	out["rows"], out["totals"] = rows, t
+	// The trace under the table: the newest 100 calls of this level, which the panel pages ten at a time.
+	calls, err := h.a.St.Calls(since, client, preset, 100)
+	if err != nil {
+		jerr(w, 500, "cannot read the request log")
+		return
+	}
+	out["calls"] = calls
 	jok(w, out)
 }
 

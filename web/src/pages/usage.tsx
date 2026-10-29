@@ -2,8 +2,8 @@ import * as React from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { AlertTriangle, ArrowLeft, Coins, Wallet, Zap } from 'lucide-react'
 import { api } from '@/lib/api'
-import type { Usage } from '@/lib/types'
-import { idr, num } from '@/lib/format'
+import type { Usage, UsageCall } from '@/lib/types'
+import { idr, num, wib } from '@/lib/format'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardHeader, CardTitle } from '@/components/ui/card'
@@ -181,6 +181,84 @@ export function UsagePage() {
           </Table>
         )}
       </Card>
+
+      <CallsCard calls={data?.calls ?? []} level={level} />
     </Page>
+  )
+}
+
+const PAGE_SIZE = 10
+
+/** CallsCard is the trace of the newest 100 model calls of this level, ten to a page. */
+function CallsCard({ calls, level }: { calls: UsageCall[]; level: 'client' | 'preset' | 'model' }) {
+  const [page, setPage] = React.useState(0)
+  const pages = Math.max(1, Math.ceil(calls.length / PAGE_SIZE))
+  // a new window or level brings a new list: start again from the newest
+  React.useEffect(() => setPage(0), [calls])
+  const shown = calls.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
+  return (
+    <Card className="mt-4">
+      <CardHeader>
+        <CardTitle>Recent calls</CardTitle>
+        <span className="text-xs text-text-muted">GMT+7 · newest {calls.length} of at most 100</span>
+      </CardHeader>
+      {calls.length === 0 ? (
+        <Empty>No calls in this period.</Empty>
+      ) : (
+        <>
+          <Table>
+            <THead>
+              <TR>
+                {level === 'client' && <TH>Client</TH>}
+                {level === 'preset' && <TH>Preset</TH>}
+                <TH>Model</TH>
+                <TH>Time</TH>
+                <TH>Result</TH>
+                <TH className="text-right">Tokens in / out</TH>
+                <TH className="text-right">Cache hit</TH>
+                <TH className="text-right">RTK saved</TH>
+                <TH className="text-right">Rp at list price</TH>
+              </TR>
+            </THead>
+            <TBody>
+              {shown.map((c, i) => (
+                <TR key={i}>
+                  {level === 'client' && <TD className="mono">{c.client || '—'}</TD>}
+                  {level === 'preset' && <TD className="mono">{c.preset || '—'}</TD>}
+                  <TD className="mono">{c.model || '—'}</TD>
+                  <TD className="tabular whitespace-nowrap text-text-muted">{wib(c.ts)}</TD>
+                  <TD>
+                    <Badge tone={c.ok ? 'success' : 'danger'}>{c.ok ? 'success' : `error${c.status ? ' ' + c.status : ''}`}</Badge>
+                  </TD>
+                  <TD className="tabular whitespace-nowrap text-right">
+                    {num(c.in_tok)} / {num(c.out_tok)}
+                  </TD>
+                  <TD className="tabular text-right text-text-muted">
+                    {c.in_tok > 0 ? ((c.cached_tok / c.in_tok) * 100).toFixed(0) + '%' : '—'}
+                  </TD>
+                  <TD className="tabular text-right text-text-muted">{num(c.rtk_saved)}</TD>
+                  <TD className="tabular whitespace-nowrap text-right">Rp {idr(c.cost_idr)}</TD>
+                </TR>
+              ))}
+            </TBody>
+          </Table>
+          {pages > 1 && (
+            <div className="flex items-center justify-between border-t border-border-subtle px-4 py-2 text-xs text-text-muted">
+              <span>
+                Page {page + 1} of {pages}
+              </span>
+              <span className="flex gap-2">
+                <Button variant="outline" size="sm" disabled={page === 0} onClick={() => setPage(page - 1)}>
+                  Previous
+                </Button>
+                <Button variant="outline" size="sm" disabled={page >= pages - 1} onClick={() => setPage(page + 1)}>
+                  Next
+                </Button>
+              </span>
+            </div>
+          )}
+        </>
+      )}
+    </Card>
   )
 }

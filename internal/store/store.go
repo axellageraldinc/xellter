@@ -495,6 +495,49 @@ func (s *Store) Recent(limit int, client string) ([]RecentRow, error) {
 	return out, rows.Err()
 }
 
+// CallRow is one model call for the usage page's trace.
+type CallRow struct {
+	TS       int64   `json:"ts"`
+	Client   string  `json:"client"`
+	Preset   string  `json:"preset"`
+	Model    string  `json:"model"`
+	OK       bool    `json:"ok"`
+	Status   int     `json:"status"`
+	InTok    int64   `json:"in_tok"`
+	OutTok   int64   `json:"out_tok"`
+	Cached   int64   `json:"cached_tok"`
+	RTKSaved int64   `json:"rtk_saved"`
+	Cost     float64 `json:"cost_idr"`
+}
+
+// Calls returns the newest limit calls since the given time, newest first. client and preset filter the rows
+// ("" = no filter).
+func (s *Store) Calls(since time.Time, client, preset string, limit int) ([]CallRow, error) {
+	rows, err := s.db.Query(`SELECT ts,client,preset,model,ok,status,in_tok,out_tok,cached_tok,rtk_saved,cost FROM requests
+		WHERE ts>=? AND (?='' OR client=?) AND (?='' OR preset=?) ORDER BY ts DESC, id DESC LIMIT ?`,
+		since.UnixMilli(), client, client, preset, preset, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []CallRow{}
+	for rows.Next() {
+		var r CallRow
+		var ok int
+		var cl, sh, mo sql.NullString
+		var in, outT, ca, rtk sql.NullInt64
+		var st sql.NullInt64
+		var cost sql.NullFloat64
+		if err := rows.Scan(&r.TS, &cl, &sh, &mo, &ok, &st, &in, &outT, &ca, &rtk, &cost); err != nil {
+			return nil, err
+		}
+		r.Client, r.Preset, r.Model, r.OK = cl.String, sh.String, mo.String, ok == 1
+		r.Status, r.InTok, r.OutTok, r.Cached, r.RTKSaved, r.Cost = int(st.Int64), in.Int64, outT.Int64, ca.Int64, rtk.Int64, cost.Float64
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // Purge deletes request rows older than the retention and expired sessions/jobs.
 func (s *Store) Purge(retentionDays int) {
 	cut := time.Now().AddDate(0, 0, -retentionDays).UnixMilli()

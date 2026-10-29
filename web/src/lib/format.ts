@@ -63,6 +63,24 @@ export function secs(ms: number): string {
   return (s < 10 ? s.toFixed(1) : Math.round(s).toString()) + ' s'
 }
 
+/** wib formats a moment (unix milliseconds) in GMT+7. */
+export function wib(ms: number): string {
+  const p = Object.fromEntries(
+    new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Jakarta',
+      day: '2-digit',
+      month: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+    })
+      .formatToParts(new Date(ms))
+      .map((x) => [x.type, x.value]),
+  )
+  return `${p.day} ${p.month} ${p.hour}:${p.minute}:${p.second}`
+}
+
 /** when says when a moment (unix milliseconds) was, relative to now. */
 export function when(ms: number): string {
   const s = Math.max(0, (Date.now() - ms) / 1000)

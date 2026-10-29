@@ -262,9 +262,24 @@ export type UsageSeriesPoint = {
   rtk_saved: number
 }
 
+export type UsageCall = {
+  ts: number
+  client: string
+  preset: string
+  model: string
+  ok: boolean
+  status: number
+  in_tok: number
+  out_tok: number
+  cached_tok: number
+  rtk_saved: number
+  cost_idr: number
+}
+
 export type Usage = {
   level: 'client' | 'preset' | 'model'
   rows: UsageRow[]
+  calls: UsageCall[]
   totals: {
     requests?: number
     errors?: number

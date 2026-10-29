@@ -832,9 +832,16 @@ func TestUsageDrillDownListsLocalModel(t *testing.T) {
 			Requests       int
 		}
 		Totals struct{ Requests int }
+		Calls  []struct {
+			Model string
+			OK    bool
+		}
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatal(err)
+	}
+	if len(out.Calls) != 1 || out.Calls[0].Model != "maleo-small-id" || !out.Calls[0].OK {
+		t.Fatalf("the call trace must list the request: %s", rec.Body)
 	}
 	if len(out.Rows) != 1 || out.Rows[0].Model != "maleo-small-id" || out.Rows[0].Billing != "free" || out.Totals.Requests != 1 {
 		t.Fatalf("the local model must be listed as free and counted: %s", rec.Body)
