@@ -36,6 +36,10 @@ upstream would have meant touching every one of those places at once.
    has something of the same shape.
 6. **The panel offers a provider choice only when there is more than one.** With a single provider nothing changes on
    screen except the wording, which no longer says "kenari" where it means "the upstream".
+7. **Providers are managed on the Overview** (a "Providers" card): add one with a name and a base URL, edit its address,
+   set or remove its account key (`<ID>_ACCOUNT_KEY`, read-only use), remove it. A provider with a key or a ticked model
+   cannot be removed, and the built-in one cannot be removed at all. The plan card of the Overview is one per provider;
+   a provider with nothing to chart gets one quiet line instead of a card of zeros.
 
 ## What a client has to change
 
@@ -59,5 +63,5 @@ for presets, and `/v1/usage/keys` still splits by the upstream key's name.
   that holds a key there (ADR 0022 already required a key that may call it).
 - Eviction, health, speed measurement and the effort refusals are keyed by the model id, so they follow the qualified id
   and stay separate per provider.
-- Not done: a provider type other than `kenari`, per-provider plan windows on the Overview, and any change to the
-  `/v1/usage/*` shapes.
+- Not done: a provider type other than `kenari`, and any change to the `/v1/usage/*` shapes. The Usage page's plan strip
+  is still the built-in provider's.

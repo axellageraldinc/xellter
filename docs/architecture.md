@@ -338,7 +338,7 @@ remaining knobs live in `xellter.yaml` and the Config tab edits that file (ADR 0
 
 | Screen | Shows and changes |
 |---|---|
-| Overview | status banner with alerts, 24 h requests / failures / cost at list price / characters saved by RTK, kenari plan windows and balance, hourly chart, per-client table, Refresh catalog |
+| Overview | status banner with alerts, 24 h requests / failures / cost at list price / characters saved by RTK, one plan-and-balance card per provider, hourly chart, per-client table, Providers (add, edit address, account key, remove), Refresh catalog |
 | Clients | one row per client: purpose, key names, presets, 24 h requests and cost; New client (name, purpose, optional kenari key) and the xellter key shown once |
 | Client detail | purpose and enabled; kenari keys with probe state and the models they may call (add, rename, remove); one card per preset: its name (renameable), optimization, the sticky-session toggle, pool picker grouped by vendor with a family checkbox and a price line, the free and discounted models xellter added on its own, "Serving now" (rank, model, billing, score, why), "Out for now" (the models taken out of the preset, the reason with its numbers, when each returns), "Taken out before" (the history), and a "Last 24 h" column on every model (median first token, failure share, requests), and "Left out" grouped by reason; Look up a session; New xellter key; Recalculate; Delete client |
 | Usage | 24 h or 30 d; all clients -> one client -> its presets -> the models in a preset; totals, chart, and kenari's own plan windows and balance next to xellter's numbers |

@@ -198,6 +198,20 @@ export function OverviewPage() {
 /** PlanCard is one provider's plan windows and balance. A provider with no key yet says so instead. */
 function PlanCard({ provider, account, multi }: { provider: ProviderOption; account?: Account; multi: boolean }) {
   const live = account?.plan_source === 'api'
+  const empty = !account || (!account.plan && !(account.balance_idr && account.balance_idr > 0) && Object.keys(account.windows ?? {}).length === 0)
+  if (empty) {
+    // nothing to chart: one quiet line instead of a card of zeros
+    return (
+      <Card>
+        <CardContent className="py-3 text-xs text-text-muted">
+          <span className="font-medium text-text-secondary">{provider.id}</span>
+          {provider.keys === 0
+            ? ': no key yet. Add one to a client to read its plan and balance.'
+            : ': no plan reported. Add its account key (Providers, below) to read plan and balance.'}
+        </CardContent>
+      </Card>
+    )
+  }
   return (
     <Card>
       <CardHeader>
@@ -239,7 +253,7 @@ function PlanCard({ provider, account, multi }: { provider: ProviderOption; acco
                 {provider.id} has not reported the plan windows yet. Add its account key (Providers, below) to read them.
               </p>
             )}
-            {account.balance_idr !== undefined && (
+            {account.balance_idr !== undefined && account.balance_idr > 0 && (
               <div className="flex justify-between border-t border-border pt-3 text-xs">
                 <span className="text-text-secondary">Balance</span>
                 <span className="tabular font-medium">Rp {idr(account.balance_idr)}</span>

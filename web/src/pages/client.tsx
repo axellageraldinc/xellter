@@ -531,7 +531,7 @@ function AddKeyDialog({
               id="key-value"
               type="password"
               value={key}
-              placeholder="kn-…"
+              placeholder="Paste the key"
               autoComplete="off"
               onChange={(e) => setKey(e.target.value)}
             />

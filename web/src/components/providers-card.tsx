@@ -2,7 +2,7 @@ import * as React from 'react'
 import { KeyRound, Pencil, Plus, Trash2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import type { Overview } from '@/lib/types'
-import { num } from '@/lib/format'
+import { pl } from '@/lib/format'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardHeader, CardTitle } from '@/components/ui/card'
@@ -55,8 +55,6 @@ export function ProvidersCard({ data, reload }: { data: Overview; reload: () => 
         <THead>
           <TR>
             <TH>Provider</TH>
-            <TH className="text-right">Models</TH>
-            <TH className="text-right">Keys</TH>
             <TH />
           </TR>
         </THead>
@@ -70,10 +68,11 @@ export function ProvidersCard({ data, reload }: { data: Overview; reload: () => 
                     {p.id}
                     {ak?.configured && <Badge tone="success">account key</Badge>}
                   </div>
-                  <div className="mono mt-0.5 max-w-[16rem] truncate text-xs text-text-muted sm:max-w-none">{p.base_url}</div>
+                  <div className="mono mt-0.5 max-w-[11rem] truncate text-xs text-text-muted sm:max-w-none">{p.base_url}</div>
+                  <div className="mt-0.5 text-xs text-text-muted">
+                    {pl(p.models, 'model')} · {pl(p.keys, 'key')}
+                  </div>
                 </TD>
-                <TD className="tabular text-right">{num(p.models)}</TD>
-                <TD className="tabular text-right">{num(p.keys)}</TD>
                 <TD className="text-right">
                   <div className="flex justify-end gap-1">
                     <Button variant="ghost" size="icon-sm" title="Edit address" onClick={() => setDlg({ kind: 'url', id: p.id, url: p.base_url })}>

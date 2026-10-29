@@ -513,7 +513,7 @@ function ModelPicker({
                                     {priceLine(m)}
                                     {m.mix_cost_known && (
                                       <span className="ml-2 text-text-secondary" title="One average request of this client at today's prices">
-                                        ≈ {rp(m.mix_cost_idr)}/req
+                                        ≈ {perReq(m.mix_cost_idr)}/req
                                       </span>
                                     )}
                                   </span>
@@ -604,6 +604,9 @@ function RenamePresetDialog({
     </Dialog>
   )
 }
+
+/** perReq is a small rupiah amount: Rp0.37, Rp4.7, Rp35. */
+const perReq = (v: number) => (v === 0 ? 'Rp0' : v < 1 ? `Rp${v.toFixed(2)}` : v < 10 ? `Rp${v.toFixed(1)}` : `Rp${Math.round(v)}`)
 
 /** tok is a token count read at a glance: 540, 3.2k. */
 const tok = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k` : `${Math.round(n)}`)
