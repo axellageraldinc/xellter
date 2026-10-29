@@ -201,6 +201,9 @@ export type ClientDetail = {
   }
 }
 
+/** CatalogMix is the client's own average chat request, from its last 7 days. */
+export type CatalogMix = { known: boolean; requests: number; avg_in_tok?: number; avg_out_tok?: number; cached_share?: number }
+
 export type CatalogRow = {
   id: string
   owner: string
@@ -224,6 +227,8 @@ export type CatalogRow = {
   sunset_at?: string
   subscriber_only: boolean
   provider: string
+  mix_cost_idr: number
+  mix_cost_known: boolean
   reasoning: boolean
   effort_levels?: string[]
   effort_toggle?: boolean

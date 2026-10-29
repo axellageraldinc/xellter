@@ -951,3 +951,23 @@ func indexOf(list []string, s string) int {
 	}
 	return -1
 }
+
+// An average request is priced with the client's own token averages, with cache reads at the cache price, and a
+// client with too little traffic gets no price rather than a guess.
+func TestMixCostUsesTheClientsOwnTraffic(t *testing.T) {
+	m := &catalog.Model{ID: "m", InIDR: 1000, OutIDR: 4000, CachedIDR: 100}
+	now := time.Now()
+	// 100 requests, each 2,000 in (1,500 of them cache reads) and 500 out.
+	mix := Mix{Requests: 100, InTok: 200000, CachedTok: 150000, OutTok: 50000}
+	got, ok := MixCost(m, mix, now)
+	want := (500*1000.0 + 1500*100.0 + 500*4000.0) / 1e6
+	if !ok || got < want-1e-9 || got > want+1e-9 {
+		t.Fatalf("got %v %v, want %v", got, ok, want)
+	}
+	if _, ok := MixCost(m, Mix{Requests: 5, InTok: 1000, OutTok: 100}, now); ok {
+		t.Fatal("five requests are not a mix")
+	}
+	if c, ok := MixCost(&catalog.Model{ID: "f", Free: true}, mix, now); !ok || c != 0 {
+		t.Fatalf("free: %v %v", c, ok)
+	}
+}

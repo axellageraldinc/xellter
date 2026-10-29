@@ -250,6 +250,44 @@ const (
 	refChars   = 1000.0
 )
 
+// Mix is what a client's chat requests really look like: totals over some days of the request log, of the
+// requests that succeeded.
+type Mix struct {
+	Requests  int
+	InTok     int64
+	CachedTok int64 // part of InTok
+	OutTok    int64
+}
+
+// MixMinRequests is how many answered requests a client needs before its own mix is believed.
+const MixMinRequests = 20
+
+// Known reports whether the sample is large enough to price a model with.
+func (x Mix) Known() bool { return x.Requests >= MixMinRequests && x.InTok+x.OutTok > 0 }
+
+// MixCost is the price in IDR of one average request of this client on the model, at the prices in effect now.
+// It is RefCost with the client's own token averages instead of the reference request, so two models can be
+// compared on what this client would actually pay. The bool is false when the mix is too small or the catalog
+// publishes no price.
+func MixCost(m *catalog.Model, x Mix, now time.Time) (float64, bool) {
+	if !x.Known() {
+		return 0, false
+	}
+	if m.Free {
+		return 0, true
+	}
+	in, out, cached := m.Effective(now, 0)
+	if in == 0 && out == 0 {
+		return 0, false
+	}
+	n := float64(x.Requests)
+	inTok, cachedTok, outTok := float64(x.InTok)/n, float64(x.CachedTok)/n, float64(x.OutTok)/n
+	if cachedTok > inTok {
+		cachedTok = inTok
+	}
+	return ((inTok-cachedTok)*in + cachedTok*cached + outTok*out) / 1e6, true
+}
+
 // RefCost is the price in IDR of one reference request of a category at the prices in effect now, with a
 // running promo applied. The bool is false when the catalog publishes no usable price.
 func RefCost(m *catalog.Model, category string, now time.Time) (float64, bool) {

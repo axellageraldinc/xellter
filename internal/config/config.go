@@ -37,6 +37,7 @@ type Config struct {
 	// one of these is listed as "<id>/<model>" in a pool.
 	Providers []Provider `yaml:"providers,omitempty" json:"providers,omitempty"`
 	Routing   Routing    `yaml:"routing" json:"routing"`
+	Alerts    Alerts     `yaml:"alerts" json:"alerts"`
 	Clients   []Client   `yaml:"clients,omitempty" json:"clients"` // kept in SQLite when a store exists (ADR 0037)
 	// LocalModels are models served from this machine instead of kenari (ADR 0033).
 	LocalModels []LocalModel `yaml:"local_models,omitempty" json:"local_models,omitempty"`
@@ -126,6 +127,16 @@ func (c *Config) ProviderList() []ProviderConn {
 		out = append(out, pc)
 	}
 	return out
+}
+
+// Alerts tell the owner about a client whose spending jumped (ADR 0041). Nothing is blocked.
+type Alerts struct {
+	// SpikeFactor: a client alerts when its last hour cost this many times its usual hour. 0 switches it off.
+	SpikeFactor float64 `yaml:"spend_spike_factor" json:"spend_spike_factor"`
+	// SpikeMinIDR is the least an hour must cost, in rupiah at list price, to alert at all.
+	SpikeMinIDR float64 `yaml:"spend_spike_min_idr" json:"spend_spike_min_idr"`
+	// WebhookURL receives a JSON POST for each new alert. Empty: the panel shows it and nothing is sent.
+	WebhookURL string `yaml:"webhook_url,omitempty" json:"webhook_url,omitempty"`
 }
 
 // Routing is the small set of knobs that survived the rewrite. Everything a
@@ -266,6 +277,7 @@ func Default() *Config {
 			BaseURL: "https://kenari.id", SyncMinutes: 10, UserAgent: "xellter/1.0",
 			FirstByteSecs: 60, MusicTimeoutSec: 900, AccountKeyEnv: "KENARI_ACCOUNT_KEY",
 		},
+		Alerts: Alerts{SpikeFactor: 4, SpikeMinIDR: 50000},
 		Routing: Routing{
 			RankRefreshMinutes: 5, TopModels: 10, EvictErrors: 3, EvictWindowMin: 60,
 			EvictCooldownMin: 720, AvoidSunsetDays: 3,
@@ -379,6 +391,9 @@ func (c *Config) fillDefaults() {
 	}
 	if c.Kenari.AccountKeyEnv == "" {
 		c.Kenari.AccountKeyEnv = d.Kenari.AccountKeyEnv
+	}
+	if c.Alerts == (Alerts{}) { // a file without the section gets the defaults; to switch it off set the factor to a negative number
+		c.Alerts = d.Alerts
 	}
 	for i := range c.Providers {
 		p := &c.Providers[i]
@@ -569,6 +584,9 @@ func (c *Config) Validate() error {
 				}
 			}
 		}
+	}
+	if c.Alerts.WebhookURL != "" && !strings.HasPrefix(c.Alerts.WebhookURL, "http://") && !strings.HasPrefix(c.Alerts.WebhookURL, "https://") {
+		bad("alerts.webhook_url must start with http:// or https://")
 	}
 	pseen := map[string]bool{DefaultProvider: true}
 	for i, p := range c.Providers {

@@ -15,6 +15,13 @@ kenari:
   # and balance; it is never used to serve requests.
   account_key_env: KENARI_ACCOUNT_KEY
 
+# Spending notices (ADR 0041). A client alerts when its last hour costs this many times its usual hour and at least
+# this many rupiah. Nothing is blocked. A factor of 0 or less switches it off; the webhook is optional.
+# alerts:
+#   spend_spike_factor: 4
+#   spend_spike_min_idr: 50000
+#   webhook_url: ""
+
 # More upstreams (ADR 0040). `kenari:` above is the built-in provider (id kenari). A key names its provider in the panel;
 # a model of one of these is listed in a pool as <id>/<model>. Same settings as `kenari:`.
 # providers:

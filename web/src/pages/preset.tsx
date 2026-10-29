@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { Brain, Check, ChevronDown, Pencil, Search, Sparkles, Trash2 } from 'lucide-react'
 import { api } from '@/lib/api'
-import type { CatalogRow, PresetView } from '@/lib/types'
+import type { CatalogMix, CatalogRow, PresetView } from '@/lib/types'
 import { ctx, rp, secs } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
@@ -361,6 +361,7 @@ function ModelPicker({
 }) {
   const [rows, setRows] = React.useState<CatalogRow[] | null>(null)
   const [multi, setMulti] = React.useState(false)
+  const [mix, setMix] = React.useState<CatalogMix | null>(null)
   const [draft, setDraft] = React.useState<string[]>(selected)
   const [out, setOut] = React.useState<string[]>(excluded)
   // A model xellter adds on its own is ticked until the owner unticks it (ADR 0035).
@@ -381,12 +382,13 @@ function ModelPicker({
   const toast = useToast()
 
   React.useEffect(() => {
-    api<{ models: CatalogRow[]; providers: { id: string }[] }>(
+    api<{ models: CatalogRow[]; providers: { id: string }[]; mix?: CatalogMix }>(
       `catalog/models?client=${encodeURIComponent(client)}&category=${encodeURIComponent(preset.category)}`,
     )
       .then((r) => {
         setRows(r.models)
         setMulti((r.providers?.length ?? 0) > 1)
+        setMix(r.mix?.known ? r.mix : null)
       })
       .catch((e) => toast.push(e.message, 'bad'))
   }, [client, preset.category, toast])
@@ -424,6 +426,13 @@ function ModelPicker({
               className="pl-9"
             />
           </div>
+
+          {mix && (
+            <p className="text-xs text-text-muted">
+              Prices marked ≈ are for one average request of this client over the last 7 days: {tok(mix.avg_in_tok ?? 0)} in
+              {mix.cached_share ? ` (${Math.round(mix.cached_share * 100)}% cached)` : ''}, {tok(mix.avg_out_tok ?? 0)} out.
+            </p>
+          )}
 
           {!rows ? (
             <p className="py-8 text-center text-sm text-text-muted">Loading the catalog…</p>
@@ -500,7 +509,14 @@ function ModelPicker({
                                   {!m.callable && <Badge tone="danger">no key may call it</Badge>}
                                   {multi && m.provider !== 'local' && <Badge tone="outline">{m.provider}</Badge>}
                                   <EffortBadge m={m} />
-                                  <span className="tabular ml-auto text-text-muted">{priceLine(m)}</span>
+                                  <span className="tabular ml-auto text-text-muted">
+                                    {priceLine(m)}
+                                    {m.mix_cost_known && (
+                                      <span className="ml-2 text-text-secondary" title="One average request of this client at today's prices">
+                                        ≈ {rp(m.mix_cost_idr)}/req
+                                      </span>
+                                    )}
+                                  </span>
                                 </div>
                               </div>
                             </label>
@@ -588,6 +604,9 @@ function RenamePresetDialog({
     </Dialog>
   )
 }
+
+/** tok is a token count read at a glance: 540, 3.2k. */
+const tok = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k` : `${Math.round(n)}`)
 
 const effortShort: Record<string, string> = { none: 'none', minimal: 'min', low: 'low', medium: 'med', high: 'high', xhigh: 'xhigh', max: 'max' }
 

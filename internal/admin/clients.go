@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"github.com/axellageraldinc/xellter/internal/effort"
 	"net/http"
 	"regexp"
 	"slices"
@@ -12,8 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/axellageraldinc/xellter/internal/app"
 	"github.com/axellageraldinc/xellter/internal/catalog"
 	"github.com/axellageraldinc/xellter/internal/config"
+	"github.com/axellageraldinc/xellter/internal/effort"
 	"github.com/axellageraldinc/xellter/internal/proxy"
 	"github.com/axellageraldinc/xellter/internal/rank"
 	"github.com/axellageraldinc/xellter/internal/route"
@@ -366,6 +367,9 @@ func (h *Handler) alerts(snap *catalog.Snapshot, clients []clientRow, accts []up
 		if a.PlanBlocked.After(now) {
 			add("warn", "kenari reported the plan limit; plan models are paused for a few minutes.", "")
 		}
+	}
+	for _, sp := range h.a.SpendSpikes(now) {
+		add("warn", app.SpikeText(sp), sp.Client)
 	}
 	status := "ok"
 	for _, a := range out {
@@ -1007,6 +1011,10 @@ type catalogRow struct {
 	SunsetAt      *time.Time     `json:"sunset_at,omitempty"`
 	Subscriber    bool           `json:"subscriber_only"`
 	Provider      string         `json:"provider"`
+	// MixCostIDR is what one average request of this client would cost on the model, at the client's own token
+	// averages over the last 7 days (chat presets only, and only once the client has enough traffic).
+	MixCostIDR   float64 `json:"mix_cost_idr"`
+	MixCostKnown bool    `json:"mix_cost_known"`
 	// Reasoning says the model thinks before it answers. EffortLevels are the efforts the catalog publishes for
 	// it, EffortToggle that its reasoning can be switched off, and EffortRefused the efforts this gateway has
 	// seen it answer HTTP 400 to (ADR 0026). The catalog does not predict behaviour, so all three are hints.
@@ -1032,6 +1040,11 @@ func (h *Handler) catalogModels(w http.ResponseWriter, r *http.Request) {
 	if snap == nil {
 		jok(w, out)
 		return
+	}
+	var mix rank.Mix
+	if cl != nil && (category == "chat" || category == "systemone") {
+		mix = h.clientMix(cl.Name, now)
+		out["mix"] = mixView(mix)
 	}
 	refused := map[string][]string{}
 	for _, f := range h.a.Rt.Efforts().All() {
@@ -1060,6 +1073,7 @@ func (h *Handler) catalogModels(w http.ResponseWriter, r *http.Request) {
 			row.PromoOff, row.PromoEnds = m.Promo.PercentOff, &m.Promo.EndsAt
 		}
 		row.RefCostIDR, row.RefCostKnown = rank.RefCost(m, categoryOrEndpoint(category, m), now)
+		row.MixCostIDR, row.MixCostKnown = rank.MixCost(m, mix, now)
 		rows = append(rows, row)
 	}
 	out["models"] = rows
@@ -1140,4 +1154,26 @@ func providerOf(m *catalog.Model) string {
 		return "local"
 	}
 	return m.ProviderID()
+}
+
+// clientMix is the client's answered chat requests over the last 7 days, summed.
+func (h *Handler) clientMix(client string, now time.Time) rank.Mix {
+	n, in, cached, out, err := h.a.St.TokenMix(client, now.Add(-7*24*time.Hour))
+	if err != nil {
+		return rank.Mix{}
+	}
+	return rank.Mix{Requests: n, InTok: in, CachedTok: cached, OutTok: out}
+}
+
+// mixView is the mix as the picker shows it: averages per request and the cached share of the input.
+func mixView(x rank.Mix) map[string]any {
+	out := map[string]any{"known": x.Known(), "requests": x.Requests}
+	if x.Requests > 0 {
+		out["avg_in_tok"] = float64(x.InTok) / float64(x.Requests)
+		out["avg_out_tok"] = float64(x.OutTok) / float64(x.Requests)
+	}
+	if x.InTok > 0 {
+		out["cached_share"] = float64(x.CachedTok) / float64(x.InTok)
+	}
+	return out
 }

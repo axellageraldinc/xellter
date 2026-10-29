@@ -851,3 +851,42 @@ func TestKeySecretNamesFollowTheProvider(t *testing.T) {
 		t.Fatalf("alt: %s", got)
 	}
 }
+
+// Once a client has enough traffic, the picker prices an average request of its own on every model.
+func TestCatalogModelsPriceTheClientsOwnMix(t *testing.T) {
+	a := newTestApp(t)
+	h := New(a)
+	c := sessionCookie(t, a)
+	read := func() (known bool, cost float64, mixKnown bool) {
+		rec := do(t, h, c, http.MethodGet, "/api/catalog/models?client=babu&category=chat", nil)
+		var out struct {
+			Mix    struct{ Known bool }
+			Models []struct {
+				ID    string  `json:"id"`
+				Cost  float64 `json:"mix_cost_idr"`
+				Known bool    `json:"mix_cost_known"`
+			}
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range out.Models {
+			if m.ID == "cheap-b" {
+				return m.Known, m.Cost, out.Mix.Known
+			}
+		}
+		t.Fatal("cheap-b missing")
+		return
+	}
+	if known, _, mixKnown := read(); known || mixKnown {
+		t.Fatal("a client with no traffic must get no price")
+	}
+	for i := 0; i < 30; i++ {
+		a.St.Log(store.Request{TS: time.Now().UnixMilli(), Client: "babu", Preset: "text", Model: "cheap-b", Status: 200, OK: true, InTok: 2000, CachedTok: 1000, OutTok: 500})
+	}
+	a.St.Flush()
+	known, cost, mixKnown := read()
+	if !known || !mixKnown || cost <= 0 {
+		t.Fatalf("known=%v cost=%v mix=%v", known, cost, mixKnown)
+	}
+}

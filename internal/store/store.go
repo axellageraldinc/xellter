@@ -342,6 +342,14 @@ func (s *Store) ClientSpend(client string, since time.Time) (float64, error) {
 	return v.Float64, err
 }
 
+// TokenMix sums the answered requests of one client that carried tokens since a time: the chat-shaped traffic,
+// because an image or a transcription logs no tokens. It is what the model picker prices an average request with.
+func (s *Store) TokenMix(client string, since time.Time) (requests int, in, cached, out int64, err error) {
+	err = s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(in_tok),0), COALESCE(SUM(cached_tok),0), COALESCE(SUM(out_tok),0)
+		FROM requests WHERE client=? AND ts>=? AND ok=1 AND (in_tok>0 OR out_tok>0)`, client, since.UnixMilli()).Scan(&requests, &in, &cached, &out)
+	return
+}
+
 // UsageRow is one aggregate row: the dashboard's chart buckets and the usage drill-down (client, preset,
 // model, key) all use this shape. Only the fields of the requested grouping are filled.
 type UsageRow struct {

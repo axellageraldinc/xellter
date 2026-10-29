@@ -70,6 +70,9 @@ type App struct {
 	mergeMu  sync.Mutex
 	mergeSrc catalog.Source
 	mergeKey string
+	// alerted is when a client's spend alert was last sent to the webhook (in memory: a restart may send one again).
+	alertMu sync.Mutex
+	alerted map[string]time.Time
 }
 
 type dynSource struct{ a *App }
@@ -123,7 +126,7 @@ func New(path string, src catalog.Source) (*App, error) {
 		_ = st.Close()
 		return nil, err
 	}
-	a := &App{Path: path, St: st, Started: time.Now(), Logf: log.Printf}
+	a := &App{Path: path, St: st, Started: time.Now(), Logf: log.Printf, alerted: map[string]time.Time{}}
 	a.cfg.Store(cfg)
 	if src == nil {
 		src = dynSource{a}
@@ -590,6 +593,7 @@ func (a *App) Start(ctx context.Context) {
 				a.ProbeKeys(ctx)
 			case <-quota.C:
 				a.RefreshAccounts(ctx)
+				a.NotifySpikes(ctx, time.Now())
 			}
 		}
 	}()
