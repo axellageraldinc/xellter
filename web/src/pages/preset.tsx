@@ -378,6 +378,9 @@ function ModelPicker({
     })
   }
   const [query, setQuery] = React.useState('')
+  const [sort, setSort] = React.useState('default')
+  const [billingF, setBillingF] = React.useState('all')
+  const [thinkF, setThinkF] = React.useState('all')
   const [open, setOpen] = React.useState<Record<string, boolean>>({})
   const toast = useToast()
 
@@ -397,12 +400,18 @@ function ModelPicker({
     const map = new Map<string, CatalogRow[]>()
     for (const m of rows ?? []) {
       if (query && !m.id.toLowerCase().includes(query.toLowerCase())) continue
+      if (!matchBilling(m, billingF) || !matchThinking(m, thinkF)) continue
       const list = map.get(m.owner || 'other') ?? []
       list.push(m)
       map.set(m.owner || 'other', list)
     }
-    return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]))
-  }, [rows, query])
+    const cmp = sortCmp(sort)
+    if (cmp) for (const list of map.values()) list.sort(cmp)
+    const out = [...map.entries()]
+    // With a sort on, the family holding the best-placed model comes first.
+    return cmp ? out.sort((a, b) => cmp(a[1][0], b[1][0]) || a[0].localeCompare(b[0])) : out.sort((a, b) => a[0].localeCompare(b[0]))
+  }, [rows, query, sort, billingF, thinkF])
+  const filtering = billingF !== 'all' || thinkF !== 'all' || query !== ''
 
   const toggle = (id: string, on: boolean) => setMany([id], on)
 
@@ -425,6 +434,12 @@ function ModelPicker({
               placeholder="Search the models"
               className="pl-9"
             />
+          </div>
+
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+            <PickSelect label="Sort" value={sort} onChange={setSort} options={SORTS} />
+            <PickSelect label="Billing" value={billingF} onChange={setBillingF} options={BILLING_FILTERS} />
+            <PickSelect label="Thinking" value={thinkF} onChange={setThinkF} options={THINK_FILTERS} />
           </div>
 
           {mix && (
@@ -480,7 +495,7 @@ function ModelPicker({
                       </span>
                     </button>
 
-                    {open[owner] && (
+                    {(open[owner] || filtering) && (
                       <div className="border-t border-border">
                         {list.map((m) => {
                           const on = isOn(m.id)
@@ -603,6 +618,87 @@ function RenamePresetDialog({
       </DialogContent>
     </Dialog>
   )
+}
+
+const SORTS = [
+  { value: 'default', label: 'By family' },
+  { value: 'price_asc', label: 'Price, free first' },
+  { value: 'price_desc', label: 'Price, dearest first' },
+  { value: 'ctx_asc', label: 'Context, smallest first' },
+  { value: 'ctx_desc', label: 'Context, largest first' },
+]
+const BILLING_FILTERS = [
+  { value: 'all', label: 'Any billing' },
+  { value: 'free', label: 'Free' },
+  { value: 'plan', label: 'Plan' },
+  { value: 'payg', label: 'Pay as you go' },
+]
+const THINK_FILTERS = [
+  { value: 'all', label: 'Any thinking' },
+  { value: 'off', label: 'No thinking' },
+  { value: 'on', label: 'Thinks (any effort)' },
+  ...['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map((l) => ({ value: `e:${l}`, label: `Effort: ${l}` })),
+]
+
+function PickSelect({
+  label,
+  value,
+  onChange,
+  options,
+}: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  options: { value: string; label: string }[]
+}) {
+  return (
+    <Select value={value} onValueChange={onChange}>
+      <SelectTrigger aria-label={label}>
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {options.map((o) => (
+          <SelectItem key={o.value} value={o.value}>
+            {o.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  )
+}
+
+/** priceKey ranks a model by price: free is 0, then one average request, else the reference cost, else in + out. */
+const priceKey = (m: CatalogRow) =>
+  m.free ? 0 : m.mix_cost_known ? m.mix_cost_idr : m.ref_cost_known ? m.ref_cost_idr : m.in_idr + m.out_idr
+
+function sortCmp(sort: string): ((a: CatalogRow, b: CatalogRow) => number) | null {
+  switch (sort) {
+    case 'price_asc':
+      return (a, b) => priceKey(a) - priceKey(b) || a.id.localeCompare(b.id)
+    case 'price_desc':
+      return (a, b) => priceKey(b) - priceKey(a) || a.id.localeCompare(b.id)
+    case 'ctx_asc':
+      return (a, b) => a.context - b.context || a.id.localeCompare(b.id)
+    case 'ctx_desc':
+      return (a, b) => b.context - a.context || a.id.localeCompare(b.id)
+  }
+  return null
+}
+
+function matchBilling(m: CatalogRow, f: string): boolean {
+  if (f === 'all') return true
+  const b = m.free ? 'free' : (m.billing || '').toLowerCase() === 'balance' ? 'payg' : (m.billing || '').toLowerCase()
+  return b === f
+}
+
+function matchThinking(m: CatalogRow, f: string): boolean {
+  if (f === 'all') return true
+  const levels = m.effort_levels ?? []
+  const thinks = m.reasoning || levels.length > 0 || !!m.effort_toggle
+  if (f === 'off') return !thinks
+  if (f === 'on') return thinks
+  const l = f.slice(2)
+  return levels.includes(l) || (l === 'none' && !!m.effort_toggle)
 }
 
 /** perReq is a small rupiah amount: Rp0.37, Rp4.7, Rp35. */
