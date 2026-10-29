@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { AlertTriangle, ArrowLeft, Coins, PiggyBank, Wallet, X, Zap } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, Coins, PiggyBank, Search, Wallet, X, Zap } from 'lucide-react'
 import { api } from '@/lib/api'
 import type { Saving, Usage, UsageCall } from '@/lib/types'
 import { idr, num, secs, wib } from '@/lib/format'
@@ -359,9 +359,9 @@ function SavingsCard({
   col: string
   setCol: (id: string) => void
 }) {
-  const [options, setOptions] = React.useState<{ id: string; endpoint: string }[]>([])
+  const [options, setOptions] = React.useState<PickerModel[]>([])
   React.useEffect(() => {
-    api<{ models: { id: string; endpoint: string }[] }>('catalog/models')
+    api<{ models: PickerModel[] }>('catalog/models')
       .then((r) => setOptions(r.models ?? []))
       .catch(() => setOptions([]))
   }, [])
@@ -400,7 +400,7 @@ function SavingsCard({
                   <TD>
                     <span className="flex items-center gap-2">
                       <span className="mono">{id}</span>
-                      {id === col && <Badge tone="neutral">in table</Badge>}
+                      {id === col && <Badge tone="neutral">shown in the column below</Badge>}
                       {!known && <Badge tone="warning">not in the catalog</Badge>}
                       {known && <span className="text-xs text-text-muted">{kindsLabel(data.compare?.find((m) => m.id === id)?.kinds)}</span>}
                     </span>
@@ -429,22 +429,146 @@ function SavingsCard({
           </TBody>
         </Table>
       )}
-      <div className="flex flex-wrap items-center gap-2 border-t border-border-subtle px-4 py-2 text-xs text-text-muted">
-        <span>Compare with another model:</span>
-        <select
-          className="h-8 max-w-64 rounded-md border border-border bg-surface px-2 text-xs text-text"
-          value=""
-          onChange={(e) => e.target.value && setCompare([...ids, e.target.value])}
-        >
-          <option value="">choose a model…</option>
-          {missing.map((o) => (
-            <option key={o.id} value={o.id}>
-              {o.id} ({o.endpoint})
-            </option>
-          ))}
-        </select>
-        <span>Defaults are set in the Config file under usage.compare_models. RTK tokens are counted at 4 characters each. Images, speech, video and music are priced on the units made since this was added; a model only answers for the kinds it can do.</span>
+      <div className="flex flex-col gap-2 border-t border-border-subtle px-4 py-3 sm:flex-row sm:items-center">
+        <ModelPicker options={missing} onPick={(id) => setCompare([...ids, id])} />
+        <span className="text-xs text-text-muted">
+          Defaults come from usage.compare_models in the Config file. RTK tokens count at 4 characters each. Images,
+          speech, video and music are priced on what was made since this shipped; a model is judged only on the kinds
+          of work it can do.
+        </span>
       </div>
     </Card>
+  )
+}
+
+type PickerModel = {
+  id: string
+  endpoint: string
+  free?: boolean
+  in_idr?: number
+  out_idr?: number
+  lines?: { unit: string; idr: number }[]
+}
+
+const ENDPOINT_NAMES: Record<string, string> = {
+  chat: 'Text',
+  systemone: 'Text (System One)',
+  images: 'Images',
+  videos: 'Video',
+  audio_speech: 'Speech',
+  audio_transcription: 'Transcription',
+  music: 'Music',
+}
+const UNIT_NAMES: Record<string, string> = { image: 'image', second: 's', '1k_chars': '1k chars', song: 'song' }
+
+/** priceHint is a model's price in one short phrase. */
+function priceHint(m: PickerModel): string {
+  if (m.free) return 'free'
+  if (m.in_idr || m.out_idr) return `Rp ${idr(m.in_idr)} / ${idr(m.out_idr)} per 1M`
+  const l = [...(m.lines ?? [])].sort((a, b) => a.idr - b.idr)[0]
+  return l ? `from Rp ${idr(l.idr)} / ${UNIT_NAMES[l.unit] ?? l.unit}` : ''
+}
+
+/** ModelPicker is a search box with a list under it: type part of a name to filter, arrows and Enter or a tap to pick. */
+function ModelPicker({ options, onPick }: { options: PickerModel[]; onPick: (id: string) => void }) {
+  const [q, setQ] = React.useState('')
+  const [open, setOpen] = React.useState(false)
+  const [hot, setHot] = React.useState(0)
+  const box = React.useRef<HTMLDivElement>(null)
+
+  const shown = React.useMemo(() => {
+    const words = q.toLowerCase().split(/\s+/).filter(Boolean)
+    return options.filter((m) => {
+      const hay = (m.id + ' ' + (ENDPOINT_NAMES[m.endpoint] ?? m.endpoint)).toLowerCase()
+      return words.every((w) => hay.includes(w))
+    })
+  }, [options, q])
+
+  React.useEffect(() => setHot(0), [q])
+  React.useEffect(() => {
+    const away = (e: MouseEvent) => {
+      if (box.current && !box.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', away)
+    return () => document.removeEventListener('mousedown', away)
+  }, [])
+
+  const pick = (id: string) => {
+    onPick(id)
+    setQ('')
+    setOpen(false)
+  }
+  // group by kind of model, text first, keeping the filtered order inside a group
+  const order = Object.keys(ENDPOINT_NAMES)
+  const groups = order
+    .map((ep) => ({ ep, items: shown.filter((m) => m.endpoint === ep) }))
+    .concat([{ ep: 'other', items: shown.filter((m) => !order.includes(m.endpoint)) }])
+    .filter((g) => g.items.length > 0)
+  const flat = groups.flatMap((g) => g.items)
+
+  return (
+    <div ref={box} className="relative w-full sm:w-80">
+      <Search className="pointer-events-none absolute left-2.5 top-2.5 size-4 text-text-muted" />
+      <input
+        value={q}
+        placeholder="Compare with another model…"
+        aria-label="Compare with another model"
+        role="combobox"
+        aria-expanded={open}
+        onChange={(e) => {
+          setQ(e.target.value)
+          setOpen(true)
+        }}
+        onFocus={() => setOpen(true)}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') setOpen(false)
+          else if (e.key === 'ArrowDown') {
+            e.preventDefault()
+            setOpen(true)
+            setHot((h) => Math.min(h + 1, flat.length - 1))
+          } else if (e.key === 'ArrowUp') {
+            e.preventDefault()
+            setHot((h) => Math.max(h - 1, 0))
+          } else if (e.key === 'Enter' && open && flat[hot]) {
+            e.preventDefault()
+            pick(flat[hot].id)
+          }
+        }}
+        className="h-9 w-full rounded-md border border-border bg-surface pl-8 pr-3 text-sm text-text placeholder:text-text-muted transition-colors hover:border-border-strong focus:border-primary focus:outline-none focus:ring-3 focus:ring-primary/20"
+      />
+      {open && (
+        <div
+          role="listbox"
+          className="absolute left-0 right-0 z-20 mt-1 max-h-72 overflow-y-auto rounded-md border border-border bg-surface py-1 shadow-lg"
+        >
+          {flat.length === 0 && <div className="px-3 py-2 text-sm text-text-muted">No model matches “{q}”.</div>}
+          {groups.map((g) => (
+            <div key={g.ep}>
+              <div className="px-3 pb-1 pt-2 text-[11px] font-medium uppercase tracking-wide text-text-muted">
+                {ENDPOINT_NAMES[g.ep] ?? 'Other'}
+              </div>
+              {g.items.map((m) => {
+                const i = flat.indexOf(m)
+                return (
+                  <button
+                    key={m.id}
+                    role="option"
+                    aria-selected={i === hot}
+                    onMouseEnter={() => setHot(i)}
+                    onClick={() => pick(m.id)}
+                    className={`flex w-full items-baseline justify-between gap-3 px-3 py-1.5 text-left text-sm ${
+                      i === hot ? 'bg-surface-hover' : ''
+                    }`}
+                  >
+                    <span className="mono truncate">{m.id}</span>
+                    <span className="shrink-0 text-xs text-text-muted">{priceHint(m)}</span>
+                  </button>
+                )
+              })}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
