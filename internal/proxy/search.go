@@ -102,7 +102,7 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request, cl *config.Clien
 	}
 
 	row := store.Request{TS: start.UnixMilli(), Client: cl.Name, Requested: "x/search", Model: "x/search",
-		Upstream: cl.Name + "/" + key.Label(), Path: r.URL.Path, Billing: "payg", Attempt: attempts, Key: cl.KeyHint}
+		Upstream: cl.Name + "/" + key.Label(), Path: r.URL.Path, Billing: "payg", Attempt: attempts, Key: cl.KeyHint, Unit: "service", Units: 1}
 	row.Status = status
 	row.UpstreamModel = searchModel(res0Header, raw)
 	row.OK = status >= 200 && status < 300

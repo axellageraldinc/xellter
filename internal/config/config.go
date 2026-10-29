@@ -38,6 +38,7 @@ type Config struct {
 	Providers []Provider `yaml:"providers,omitempty" json:"providers,omitempty"`
 	Routing   Routing    `yaml:"routing" json:"routing"`
 	Alerts    Alerts     `yaml:"alerts" json:"alerts"`
+	Usage     Usage      `yaml:"usage" json:"usage"`
 	Clients   []Client   `yaml:"clients,omitempty" json:"clients"` // kept in SQLite when a store exists (ADR 0037)
 	// LocalModels are models served from this machine instead of kenari (ADR 0033).
 	LocalModels []LocalModel `yaml:"local_models,omitempty" json:"local_models,omitempty"`
@@ -138,6 +139,16 @@ type Alerts struct {
 	// WebhookURL receives a JSON POST for each new alert. Empty: the panel shows it and nothing is sent.
 	WebhookURL string `yaml:"webhook_url,omitempty" json:"webhook_url,omitempty"`
 }
+
+// Usage holds what the Usage page compares real spending with.
+type Usage struct {
+	// CompareModels are the catalog models the "estimated saved cost" card shows first. Each one answers: what
+	// would this traffic have cost on that model, without RTK? The owner can compare any other model on the page.
+	CompareModels []string `yaml:"compare_models" json:"compare_models"`
+}
+
+// DefaultCompareModels are the popular models the Usage page compares against until the config says otherwise.
+var DefaultCompareModels = []string{"claude-sonnet-5-5", "deepseek-v4-1-flash", "minimax-m3-1-flash"}
 
 // Routing is the small set of knobs that survived the rewrite. Everything a
 // preset or a model decides is not here.
@@ -278,6 +289,7 @@ func Default() *Config {
 			FirstByteSecs: 60, MusicTimeoutSec: 900, AccountKeyEnv: "KENARI_ACCOUNT_KEY",
 		},
 		Alerts: Alerts{SpikeFactor: 4, SpikeMinIDR: 50000},
+		Usage:  Usage{CompareModels: append([]string(nil), DefaultCompareModels...)},
 		Routing: Routing{
 			RankRefreshMinutes: 5, TopModels: 10, EvictErrors: 3, EvictWindowMin: 60,
 			EvictCooldownMin: 720, AvoidSunsetDays: 3,
@@ -394,6 +406,9 @@ func (c *Config) fillDefaults() {
 	}
 	if c.Alerts == (Alerts{}) { // a file without the section gets the defaults; to switch it off set the factor to a negative number
 		c.Alerts = d.Alerts
+	}
+	if len(c.Usage.CompareModels) == 0 {
+		c.Usage.CompareModels = append([]string(nil), d.Usage.CompareModels...)
 	}
 	for i := range c.Providers {
 		p := &c.Providers[i]
@@ -587,6 +602,16 @@ func (c *Config) Validate() error {
 	}
 	if c.Alerts.WebhookURL != "" && !strings.HasPrefix(c.Alerts.WebhookURL, "http://") && !strings.HasPrefix(c.Alerts.WebhookURL, "https://") {
 		bad("alerts.webhook_url must start with http:// or https://")
+	}
+	cmpSeen := map[string]bool{}
+	for _, m := range c.Usage.CompareModels {
+		switch {
+		case strings.TrimSpace(m) == "":
+			bad("usage.compare_models: empty model id")
+		case cmpSeen[m]:
+			bad("usage.compare_models: model %q listed twice", m)
+		}
+		cmpSeen[m] = true
 	}
 	pseen := map[string]bool{DefaultProvider: true}
 	for i, p := range c.Providers {

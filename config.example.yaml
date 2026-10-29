@@ -22,6 +22,11 @@ kenari:
 #   spend_spike_min_idr: 50000
 #   webhook_url: ""
 
+# Estimated saved cost (ADR 0042). The Usage page shows what the same traffic would have cost on these catalog models
+# without RTK, and how much of that was not spent. Any other model can be compared on the page itself.
+# usage:
+#   compare_models: [claude-sonnet-5-5, deepseek-v4-1-flash, minimax-m3-1-flash]
+
 # More upstreams (ADR 0040). `kenari:` above is the built-in provider (id kenari). A key names its provider in the panel;
 # a model of one of these is listed in a pool as <id>/<model>. Same settings as `kenari:`.
 # providers:

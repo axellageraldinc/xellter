@@ -852,6 +852,13 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, cl *config.Client
 		row.Billing = "payg"
 	}
 	row.CatalogCost = s.cost(cl, at, plan, body, u, covered, now, snap)
+	if ep := at.Model.Endpoint; ep != "chat" && ep != "systemone" {
+		_, _, row.Units = mediaUnits(at.Model, body)
+		row.Unit = unitOf(ep)
+		if ep == "audio_speech" {
+			row.Units /= 1000 // the unit is 1k characters
+		}
+	}
 	s.st.Log(row)
 	if row.OK {
 		at.Key.Success(at.Model.ID, now)
@@ -880,33 +887,40 @@ func (s *Server) cost(cl *config.Client, at route.Attempt, plan *route.Plan, b *
 	if m.Endpoint == "chat" || m.Endpoint == "systemone" {
 		return usageCost(m, u.in, u.out, u.cached, at.Key.FreeCache(m, snap, now), now)
 	}
-	// Media is priced per unit, and the request says how many units it asked for.
-	var n float64
+	unit, variant, n := mediaUnits(m, b)
+	return mediaCost(m, unit, variant, n)
+}
+
+// mediaUnits is what a media request asked for: the catalog price unit, the price variant when the request names
+// one, and how many units. The request says how many; transcription is billed for a nominal minute.
+func mediaUnits(m *catalog.Model, b *reqBody) (unit, variant string, n float64) {
+	unit = unitOf(m.Endpoint)
+	if b == nil || b.json == nil {
+		return unit, "", 0
+	}
 	var str string
-	if b.json != nil {
-		switch m.Endpoint {
-		case "images":
-			if json.Unmarshal(b.json["n"], &n) != nil || n <= 0 {
-				n = 1
-			}
-		case "audio_speech":
-			if json.Unmarshal(b.json["input"], &str) == nil {
-				n = float64(len([]rune(str)))
-			}
-		case "videos":
-			if json.Unmarshal(b.json["duration"], &n) != nil || n <= 0 {
-				n = 5
-			}
-			if json.Unmarshal(b.json["resolution"], &str) == nil {
-				return mediaCost(m, "second", str, n)
-			}
-		case "audio_transcription":
-			n = 60
-		case "music":
+	switch m.Endpoint {
+	case "images":
+		if json.Unmarshal(b.json["n"], &n) != nil || n <= 0 {
 			n = 1
 		}
+	case "audio_speech":
+		if json.Unmarshal(b.json["input"], &str) == nil {
+			n = float64(len([]rune(str)))
+		}
+	case "videos":
+		if json.Unmarshal(b.json["duration"], &n) != nil || n <= 0 {
+			n = 5
+		}
+		if json.Unmarshal(b.json["resolution"], &str) == nil {
+			return "second", str, n
+		}
+	case "audio_transcription":
+		n = 60
+	case "music":
+		n = 1
 	}
-	return mediaCost(m, unitOf(m.Endpoint), "", n)
+	return unit, "", n
 }
 
 // usageCost is the catalog price of a finished chat request.

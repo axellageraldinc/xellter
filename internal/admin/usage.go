@@ -24,6 +24,7 @@ import (
 //	             "requests", "errors", "in_tok", "out_tok", "cached_tok", "rtk_saved", "cost_idr" }],
 //	  "calls": [{ "ts", "client", "preset", "model", "ok", "status", "in_tok", "out_tok",
 //	             "cached_tok", "rtk_saved", "cost_idr" }],   // newest 100 of this level
+//	  "compare": [{ "id", "found", "in_idr", "out_idr", "cached_idr" }],  // ?compare=a,b overrides usage.compare_models
 //	  "series": [UsageRow...],   // hourly buckets, for the chart
 //	  "search": { calls, ok, failed, retries, cost_idr, avg_ms, model, last_ts },  // X search, when there was any
 //	  "kenari": { ... }          // kenari's own plan windows and balance
@@ -31,31 +32,33 @@ import (
 
 // usageTotals is the sum of the rows on one level.
 type usageTotals struct {
-	Requests int     `json:"requests"`
-	Errors   int     `json:"errors"`
-	InTok    int64   `json:"in_tok"`
-	OutTok   int64   `json:"out_tok"`
-	Cached   int64   `json:"cached_tok"`
-	RTKSaved int64   `json:"rtk_saved"`
-	Cost     float64 `json:"cost_idr"`
+	Requests int      `json:"requests"`
+	Errors   int      `json:"errors"`
+	InTok    int64    `json:"in_tok"`
+	OutTok   int64    `json:"out_tok"`
+	Cached   int64    `json:"cached_tok"`
+	RTKSaved int64    `json:"rtk_saved"`
+	Cost     float64  `json:"cost_idr"`
+	Savings  []saving `json:"savings,omitempty"`
 }
 
 // usageRow is one line of the drill-down.
 type usageRow struct {
-	Key          string  `json:"key"`
-	Label        string  `json:"label"`
-	Client       string  `json:"client,omitempty"`
-	Preset       string  `json:"preset,omitempty"`
-	Model        string  `json:"model,omitempty"`
-	Billing      string  `json:"billing,omitempty"`
-	BillingLabel string  `json:"billing_label,omitempty"`
-	Requests     int     `json:"requests"`
-	Errors       int     `json:"errors"`
-	InTok        int64   `json:"in_tok"`
-	OutTok       int64   `json:"out_tok"`
-	Cached       int64   `json:"cached_tok"`
-	RTKSaved     int64   `json:"rtk_saved"`
-	Cost         float64 `json:"cost_idr"`
+	Key          string   `json:"key"`
+	Label        string   `json:"label"`
+	Client       string   `json:"client,omitempty"`
+	Preset       string   `json:"preset,omitempty"`
+	Model        string   `json:"model,omitempty"`
+	Billing      string   `json:"billing,omitempty"`
+	BillingLabel string   `json:"billing_label,omitempty"`
+	Requests     int      `json:"requests"`
+	Errors       int      `json:"errors"`
+	InTok        int64    `json:"in_tok"`
+	OutTok       int64    `json:"out_tok"`
+	Cached       int64    `json:"cached_tok"`
+	RTKSaved     int64    `json:"rtk_saved"`
+	Cost         float64  `json:"cost_idr"`
+	Savings      []saving `json:"savings,omitempty"`
 	// Removed marks a client that is no longer in the configuration: its old
 	// traffic is still in the log, but it is not a client any more.
 	Removed bool `json:"removed,omitempty"`
@@ -210,6 +213,25 @@ func (h *Handler) usageDrill(w http.ResponseWriter, r *http.Request) {
 		}
 		return rows[i].Key < rows[j].Key
 	})
+	// Estimated saved cost: each row, and the totals, against the models being compared (savings.go).
+	cmp := savingModels(h.a.Cat.Snapshot(), compareList(q.Get("compare"), h.a.Cfg().Usage.CompareModels))
+	group := map[string]string{"model": "preset_model", "preset": "preset", "client": "client"}[out["level"].(string)]
+	media, err := h.a.St.MediaSpend(group, since, client, preset)
+	if err != nil {
+		jerr(w, 500, "cannot read the request log")
+		return
+	}
+	var perRow [][]saving
+	for i := range rows {
+		x := &rows[i]
+		key := x.Key
+		switch group {
+		case "preset_model":
+			key = x.Preset + "|" + x.Model
+		}
+		x.Savings = spendOf(cmp, x.InTok, x.OutTok, x.Cached, x.RTKSaved, x.Cost, media[key])
+		perRow = append(perRow, x.Savings)
+	}
 	var t usageTotals
 	for _, x := range rows {
 		t.Requests += x.Requests
@@ -220,7 +242,8 @@ func (h *Handler) usageDrill(w http.ResponseWriter, r *http.Request) {
 		t.RTKSaved += x.RTKSaved
 		t.Cost += x.Cost
 	}
-	out["rows"], out["totals"] = rows, t
+	t.Savings = sumSavings(cmp, perRow)
+	out["rows"], out["totals"], out["compare"] = rows, t, cmp
 	// The trace under the table: the newest 100 calls of this level, which the panel pages ten at a time.
 	calls, err := h.a.St.Calls(since, client, preset, 100)
 	if err != nil {

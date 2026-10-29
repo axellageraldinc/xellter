@@ -42,6 +42,8 @@ var configDocs = map[string]string{
 	"alerts.spend_spike_factor":      "A client alerts when its last hour cost this many times its usual hour (the rest of the week). 0 or less switches the alert off.",
 	"alerts.spend_spike_min_idr":     "An hour must cost at least this many rupiah at list price to alert, so a quiet client does not alert on pennies.",
 	"alerts.webhook_url":             "Optional. Each new alert is POSTed here as JSON (client, rupiah figures, never a prompt), at most once per client per 6 hours. Empty: the panel shows it and nothing is sent.",
+	"usage":                          "What the Usage page compares real spending with.",
+	"usage.compare_models":           "Catalog model ids the Usage page's \"estimated saved cost\" card shows first: what the same traffic would have cost there, without RTK. Any other model can be picked on the page.",
 	"routing":                        "Routing is the same for every client and preset. These are the only knobs.",
 	"routing.rank_refresh_minutes":   "Rankings are rebuilt on this interval (also after a catalog sync and on Recalculate). 0 = never on a timer.",
 	"routing.top_models":             "How many of the best-ordered models of a preset requests are spread over (round-robin).",

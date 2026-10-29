@@ -44,6 +44,11 @@ type Request struct {
 	Key         string // hint of the xellter API key the caller used (never the key itself)
 	// UpstreamModel is the model the upstream says it used, for a service call that names one (X search); "" otherwise.
 	UpstreamModel string
+	// Unit and Units say what a non-chat call produced, in the unit the catalog bills it in (image, second,
+	// 1k_chars, song), so the Usage page can price the same work on another model. "service" is a call that is not
+	// a model at all (X search). Chat rows leave both empty.
+	Unit  string
+	Units float64
 }
 
 // ModelStat is aggregated health of one model.
@@ -144,6 +149,14 @@ func Open(dir string) (*Store, error) {
 			}
 		}
 	}
+	// the media unit columns arrived with the estimated saved cost: older rows have none and are not priced elsewhere
+	for _, c := range [][2]string{{"unit", "TEXT"}, {"units", "REAL"}} {
+		if db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('requests') WHERE name=?`, c[0]).Scan(&n) == nil && n == 0 {
+			if _, err := db.Exec(`ALTER TABLE requests ADD COLUMN ` + c[0] + ` ` + c[1]); err != nil {
+				return nil, err
+			}
+		}
+	}
 	// the session index needs the column above, so it is created after the migration, not in the schema
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS req_session ON requests(session, ts)`); err != nil {
 		return nil, err
@@ -208,10 +221,10 @@ func (s *Store) writer() {
 			batch = batch[:0]
 			return
 		}
-		st, err := tx.Prepare(`INSERT INTO requests(ts,client,preset,requested,model,upstream,path,status,ok,latency_ms,ttft_ms,in_tok,out_tok,cached_tok,cost,billing,stream,attempt,rtk_saved,err,session,api_key,upstream_model) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		st, err := tx.Prepare(`INSERT INTO requests(ts,client,preset,requested,model,upstream,path,status,ok,latency_ms,ttft_ms,in_tok,out_tok,cached_tok,cost,billing,stream,attempt,rtk_saved,err,session,api_key,upstream_model,unit,units) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 		if err == nil {
 			for _, r := range batch {
-				_, err = st.Exec(r.TS, r.Client, r.Preset, r.Requested, r.Model, r.Upstream, r.Path, r.Status, b2i(r.OK), r.LatencyMS, r.TTFTMS, r.InTok, r.OutTok, r.CachedTok, r.CatalogCost, r.Billing, b2i(r.Stream), r.Attempt, r.RTKSaved, r.Err, r.Session, r.Key, r.UpstreamModel)
+				_, err = st.Exec(r.TS, r.Client, r.Preset, r.Requested, r.Model, r.Upstream, r.Path, r.Status, b2i(r.OK), r.LatencyMS, r.TTFTMS, r.InTok, r.OutTok, r.CachedTok, r.CatalogCost, r.Billing, b2i(r.Stream), r.Attempt, r.RTKSaved, r.Err, r.Session, r.Key, r.UpstreamModel, r.Unit, r.Units)
 				if err != nil {
 					s.lost.Add(1)
 				}
@@ -371,17 +384,53 @@ type UsageRow struct {
 	RTKSaved int64   `json:"rtk_saved"`
 }
 
+// usageCols maps a Usage group name to the SQL expression it groups by.
+var usageCols = map[string]string{
+	"client": "client", "model": "model", "upstream": "upstream", "preset": "preset", "key": "api_key",
+	"preset_model": "preset||'|'||model",
+	"hour":         "strftime('%Y-%m-%d %H:00', ts/1000, 'unixepoch')",
+	"minute":       "strftime('%Y-%m-%d %H:%M', ts/1000, 'unixepoch')",
+	"day":          "strftime('%Y-%m-%d', ts/1000, 'unixepoch')",
+}
+
+// UnitSpend is what one group spent on one kind of non-chat work.
+type UnitSpend struct {
+	Unit  string  `json:"unit"`
+	Units float64 `json:"units"`
+	Cost  float64 `json:"cost_idr"`
+}
+
+// MediaSpend sums the non-chat work of each group (the same groups and keys as Usage): units and rupiah per
+// unit. Only answered requests count, so a call that gave up is not priced as work done.
+func (s *Store) MediaSpend(group string, since time.Time, client, preset string) (map[string][]UnitSpend, error) {
+	col := usageCols[group]
+	if col == "" {
+		return nil, errors.New("bad group")
+	}
+	rows, err := s.db.Query(fmt.Sprintf(`SELECT %s k, unit, COALESCE(SUM(units),0), COALESCE(SUM(cost),0)
+		FROM requests WHERE ts>=? AND ok=1 AND unit IS NOT NULL AND unit!='' AND (?='' OR client=?) AND (?='' OR preset=?)
+		GROUP BY k, unit`, col), since.UnixMilli(), client, client, preset, preset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string][]UnitSpend{}
+	for rows.Next() {
+		var k sql.NullString
+		var u UnitSpend
+		if err := rows.Scan(&k, &u.Unit, &u.Units, &u.Cost); err != nil {
+			return nil, err
+		}
+		out[k.String] = append(out[k.String], u)
+	}
+	return out, rows.Err()
+}
+
 // Usage groups requests. group is one of client, model, upstream, preset, key, hour, minute, day, or
 // preset_model (one row per preset and model, which is the usage drill-down's last level). client and preset
 // filter the rows ("" = no filter).
 func (s *Store) Usage(group string, since time.Time, client, preset string) ([]UsageRow, error) {
-	col := map[string]string{
-		"client": "client", "model": "model", "upstream": "upstream", "preset": "preset", "key": "api_key",
-		"preset_model": "preset||'|'||model",
-		"hour":         "strftime('%Y-%m-%d %H:00', ts/1000, 'unixepoch')",
-		"minute":       "strftime('%Y-%m-%d %H:%M', ts/1000, 'unixepoch')",
-		"day":          "strftime('%Y-%m-%d', ts/1000, 'unixepoch')",
-	}[group]
+	col := usageCols[group]
 	if col == "" {
 		return nil, errors.New("bad group")
 	}

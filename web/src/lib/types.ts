@@ -237,7 +237,19 @@ export type CatalogRow = {
   effort_refused?: string[]
 }
 
+/** What a spend would have cost on one popular model without RTK, and how much of it was not spent. */
+export type Saving = {
+  model: string
+  baseline_idr: number
+  saved_idr: number
+  saved_pct: number
+  rtk_idr: number
+}
+
+export type CompareModel = { id: string; found: boolean; in_idr: number; out_idr: number; cached_idr: number; kinds: string[] }
+
 export type UsageRow = {
+  savings?: Saving[]
   label: string
   key: string
   client: string
@@ -287,7 +299,9 @@ export type Usage = {
     out_tok?: number
     rtk_saved?: number
     cost_idr?: number
+    savings?: Saving[]
   }
+  compare?: CompareModel[]
   series: UsageSeriesPoint[]
   search?: {
     calls: number
