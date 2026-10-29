@@ -485,8 +485,7 @@ func TestSearchSummary(t *testing.T) {
 	}
 }
 
-// MediaSpend sums units per kind of work; a media row logged before units existed and an X search are told
-// apart by what they were, and a chat row or a failed call is not counted at all.
+// MediaSpend sums units per kind of work; an old media row and an X search are told apart by what they were, and a chat row or a failed call is not counted at all.
 func TestMediaSpendSeparatesUnitsLegacyAndServices(t *testing.T) {
 	st, err := Open(t.TempDir())
 	if err != nil {
@@ -496,7 +495,8 @@ func TestMediaSpendSeparatesUnitsLegacyAndServices(t *testing.T) {
 	now := time.Now().UnixMilli()
 	st.Log(Request{TS: now, Client: "c", Preset: "pic", Model: "img", Path: "/v1/images/generations", OK: true, CatalogCost: 3, Unit: "image", Units: 2})
 	st.Log(Request{TS: now, Client: "c", Preset: "pic", Model: "img", Path: "/v1/images/generations", OK: true, CatalogCost: 1, Unit: "image", Units: 1})
-	st.Log(Request{TS: now, Client: "c", Preset: "pic", Model: "img", Path: "/v1/images/generations", OK: true, CatalogCost: 7}) // before units
+	st.Log(Request{TS: now, Client: "c", Preset: "pic", Model: "img", Path: "/v1/images/generations", OK: true, CatalogCost: 7}) // before units: one image
+	st.Log(Request{TS: now, Client: "c", Preset: "tts", Model: "voice", Path: "/v1/audio/speech", OK: true, CatalogCost: 2})     // before units: unknown amount
 	st.Log(Request{TS: now, Client: "c", Preset: "", Model: "x/search", Path: "/v1/x/search", OK: true, CatalogCost: 5})
 	st.Log(Request{TS: now, Client: "c", Preset: "pic", Model: "img", Path: "/v1/images/generations", OK: false, Unit: "image", Units: 9})
 	st.Log(Request{TS: now, Client: "c", Preset: "text", Model: "m", Path: "/v1/chat/completions", OK: true, CatalogCost: 11})
@@ -509,7 +509,7 @@ func TestMediaSpendSeparatesUnitsLegacyAndServices(t *testing.T) {
 	for _, u := range got["c"] {
 		by[u.Unit] = u
 	}
-	if len(by) != 3 || by["image"].Units != 3 || by["image"].Cost != 4 || by["legacy"].Cost != 7 || by["service"].Cost != 5 {
+	if len(by) != 3 || by["image"].Units != 4 || by["image"].Cost != 11 || by["legacy"].Cost != 2 || by["service"].Cost != 5 {
 		t.Fatalf("got %+v", got)
 	}
 }

@@ -407,15 +407,25 @@ func (s *Store) MediaSpend(group string, since time.Time, client, preset string)
 	if col == "" {
 		return nil, errors.New("bad group")
 	}
-	// Rows logged before the unit columns existed are told apart by what they were: X search is a "service",
-	// and a media call with no recorded units is "legacy". Neither is priced by any model, but both leave the
-	// text side, so their rupiah are not mistaken for chat spend.
-	rows, err := s.db.Query(fmt.Sprintf(`SELECT k, u, COALESCE(SUM(units),0), COALESCE(SUM(cost),0) FROM (
-		SELECT %s k, units, cost, CASE
-			WHEN unit IS NOT NULL AND unit!='' THEN unit
+	// Rows logged before the unit columns existed are told apart by what they were. X search is a "service". An
+	// image, a song or a transcription is counted the way the gateway bills a request that names no amount: one
+	// image, one song, a nominal 60 seconds (an estimate: a request for several images is counted as one). Speech
+	// and video have no such default, so those rows are "legacy": no model prices them, but they leave the text
+	// side, so their rupiah are not mistaken for chat spend.
+	rows, err := s.db.Query(fmt.Sprintf(`SELECT k, u, COALESCE(SUM(n),0), COALESCE(SUM(cost),0) FROM (
+		SELECT %s k, cost,
+		CASE WHEN unit IS NOT NULL AND unit!='' THEN unit
 			WHEN model='x/search' THEN 'service'
-			WHEN path LIKE '/v1/images%%' OR path LIKE '/v1/audio/%%' OR path LIKE '/v1/videos%%' OR path LIKE '/v1/music%%' THEN 'legacy'
-			ELSE '' END u
+			WHEN path LIKE '/v1/images%%' THEN 'image'
+			WHEN path LIKE '/v1/music%%' THEN 'song'
+			WHEN path LIKE '/v1/audio/transcriptions%%' THEN 'second'
+			WHEN path LIKE '/v1/audio/%%' OR path LIKE '/v1/videos%%' THEN 'legacy'
+			ELSE '' END u,
+		CASE WHEN unit IS NOT NULL AND unit!='' THEN COALESCE(units,0)
+			WHEN model='x/search' THEN 1
+			WHEN path LIKE '/v1/images%%' OR path LIKE '/v1/music%%' THEN 1
+			WHEN path LIKE '/v1/audio/transcriptions%%' THEN 60
+			ELSE 0 END n
 		FROM requests WHERE ts>=? AND ok=1 AND (?='' OR client=?) AND (?='' OR preset=?)) WHERE u!='' GROUP BY k, u`,
 		col), since.UnixMilli(), client, client, preset, preset)
 	if err != nil {

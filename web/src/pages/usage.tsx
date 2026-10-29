@@ -432,9 +432,9 @@ function SavingsCard({
       <div className="flex flex-col gap-2 border-t border-border-subtle px-4 py-3 sm:flex-row sm:items-center">
         <ModelPicker options={missing} onPick={(id) => setCompare([...ids, id])} />
         <span className="text-xs text-text-muted">
-          Defaults come from usage.compare_models in the Config file. RTK tokens count at 4 characters each. Images,
-          speech, video and music are priced on what was made since this shipped; a model is judged only on the kinds
-          of work it can do.
+          Defaults come from usage.compare_models in the Config file. RTK tokens count at 4 characters each.
+          Media is priced on the units made; older image, music and transcription calls count as 1 image, 1 song and
+          60 s, and older speech and video are not priced. A model is judged only on the kinds of work it can do.
         </span>
       </div>
     </Card>
