@@ -207,7 +207,7 @@ export function renderStory(d: StoryData): Promise<Blob> {
   ctx.textAlign = 'center'
   ctx.fillStyle = '#6b7484'
   ctx.font = `400 30px ${FONT}`
-  ctx.fillText('smart model routing + RTK compression', W / 2, 1650)
+  ctx.fillText('smart model routing', W / 2, 1650)
 
   return new Promise((resolve, reject) =>
     c.toBlob((b) => (b ? resolve(b) : reject(new Error('could not render the image'))), 'image/png'),
