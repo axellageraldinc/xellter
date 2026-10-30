@@ -372,14 +372,15 @@ function SavingsCard({
   }, [])
   const sv = data?.totals.savings ?? []
   const missing = options.filter((o) => !ids.includes(o.id))
-  // the story features the model shown in the column, else the first one that can be compared
-  const isKnown = (id: string) => !!data?.compare?.find((m) => m.id === id)?.found && sv.some((x) => x.model === id)
-  const storyModel = isKnown(col) ? col : ids.find(isKnown)
+  // the story shows the first three models of the table that can be compared
+  const storyRows = ids
+    .filter((id) => data?.compare?.find((m) => m.id === id)?.found)
+    .map((id) => sv.find((x) => x.model === id))
+    .filter((x): x is Saving => !!x)
+    .slice(0, 3)
   const share = async () => {
-    const s = sv.find((x) => x.model === storyModel)
-    if (!s) return
     try {
-      const r = await shareStory({ ...s, windowLabel })
+      const r = await shareStory({ rows: storyRows, windowLabel })
       if (r === 'downloaded') toast.push('Story image saved. Post it from your gallery.', 'ok')
     } catch (e) {
       toast.push(e instanceof Error ? e.message : 'could not share', 'bad')
@@ -395,7 +396,7 @@ function SavingsCard({
         </CardTitle>
         <span className="flex items-center gap-3">
           <span className="hidden text-xs text-text-muted sm:inline">vs the same traffic on a popular model, without RTK</span>
-          <Button variant="outline" size="sm" disabled={!storyModel} onClick={share}>
+          <Button variant="outline" size="sm" disabled={storyRows.length === 0} onClick={share}>
             <Share2 />
             Share to story
           </Button>
