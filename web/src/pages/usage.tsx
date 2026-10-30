@@ -1,9 +1,10 @@
 import * as React from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { AlertTriangle, ArrowLeft, Coins, PiggyBank, Search, Wallet, X, Zap } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, Coins, PiggyBank, Search, Share2, Wallet, X, Zap } from 'lucide-react'
 import { api } from '@/lib/api'
 import type { Saving, Usage, UsageCall } from '@/lib/types'
 import { idr, num, secs, wib } from '@/lib/format'
+import { shareStory } from '@/lib/share-story'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardHeader, CardTitle } from '@/components/ui/card'
@@ -135,7 +136,7 @@ export function UsagePage() {
         />
       </StatRow>
 
-      <SavingsCard data={data} ids={ids} setCompare={setCompare} col={colModel} setCol={setCol} />
+      <SavingsCard data={data} ids={ids} setCompare={setCompare} col={colModel} setCol={setCol} windowLabel={window === '30d' ? 'Last 30 days' : 'Last 24 hours'} />
 
       <Card className="mt-4">
         <CardHeader>
@@ -353,13 +354,16 @@ function SavingsCard({
   setCompare,
   col,
   setCol,
+  windowLabel,
 }: {
   data: Usage | null
   ids: string[]
   setCompare: (next: string[]) => void
   col: string
   setCol: (id: string) => void
+  windowLabel: string
 }) {
+  const toast = useToast()
   const [options, setOptions] = React.useState<PickerModel[]>([])
   React.useEffect(() => {
     api<{ models: PickerModel[] }>('catalog/models')
@@ -368,6 +372,19 @@ function SavingsCard({
   }, [])
   const sv = data?.totals.savings ?? []
   const missing = options.filter((o) => !ids.includes(o.id))
+  // the story features the model shown in the column, else the first one that can be compared
+  const isKnown = (id: string) => !!data?.compare?.find((m) => m.id === id)?.found && sv.some((x) => x.model === id)
+  const storyModel = isKnown(col) ? col : ids.find(isKnown)
+  const share = async () => {
+    const s = sv.find((x) => x.model === storyModel)
+    if (!s) return
+    try {
+      const r = await shareStory({ ...s, windowLabel })
+      if (r === 'downloaded') toast.push('Story image saved. Post it from your gallery.', 'ok')
+    } catch (e) {
+      toast.push(e instanceof Error ? e.message : 'could not share', 'bad')
+    }
+  }
   return (
     <Card className="mt-4">
       <CardHeader>
@@ -376,7 +393,13 @@ function SavingsCard({
             <PiggyBank className="size-4" /> Estimated saved cost
           </span>
         </CardTitle>
-        <span className="text-xs text-text-muted">vs the same traffic on a popular model, without RTK</span>
+        <span className="flex items-center gap-3">
+          <span className="hidden text-xs text-text-muted sm:inline">vs the same traffic on a popular model, without RTK</span>
+          <Button variant="outline" size="sm" disabled={!storyModel} onClick={share}>
+            <Share2 />
+            Share to story
+          </Button>
+        </span>
       </CardHeader>
       {ids.length === 0 || !data ? (
         <Empty>No model to compare with.</Empty>
