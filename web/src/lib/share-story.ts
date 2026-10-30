@@ -8,7 +8,7 @@ export type StoryRow = {
 }
 
 export type StoryData = {
-  /** up to three comparisons; with more than one the hero is their combined saving */
+  /** up to three comparisons; the first one is the hero */
   rows: StoryRow[]
   windowLabel: string
 }
@@ -107,7 +107,7 @@ function card(ctx: CanvasRenderingContext2D, r: StoryRow, y: number) {
   ctx.fillText(r.model, x + 40, y + 62)
   ctx.fillStyle = '#9aa3b2'
   ctx.font = `400 28px ${FONT}`
-  ctx.fillText(`would cost ${rupiah(r.baseline_idr)}  ·  you paid ${rupiah(r.baseline_idr - r.saved_idr)}`, x + 40, y + 108)
+  ctx.fillText(`would cost ${rupiah(r.baseline_idr)}`, x + 40, y + 108)
 
   ctx.textAlign = 'right'
   ctx.fillStyle = tone
@@ -116,7 +116,7 @@ function card(ctx: CanvasRenderingContext2D, r: StoryRow, y: number) {
   if (r.baseline_idr > 0) {
     ctx.fillStyle = '#c8ced9'
     ctx.font = `500 28px ${FONT}`
-    ctx.fillText(`${r.saved_pct.toFixed(0)}% ${ok ? 'saved' : 'more'}`, x + w - 40, y + 108)
+    ctx.fillText(`${Math.abs(r.saved_pct).toFixed(0)}% ${ok ? 'saved' : 'more'}`, x + w - 40, y + 108)
   }
 
   // savings bar
@@ -142,30 +142,27 @@ export function renderStory(d: StoryData): Promise<Blob> {
   const ctx = c.getContext('2d')
   const rows = d.rows.slice(0, 3)
   if (!ctx || rows.length === 0) return Promise.reject(new Error('nothing to draw'))
-  const multi = rows.length > 1
-  const hero: StoryRow = multi
-    ? {
-        model: `${rows.length} models`,
-        baseline_idr: rows.reduce((a, r) => a + r.baseline_idr, 0),
-        saved_idr: rows.reduce((a, r) => a + r.saved_idr, 0),
-        saved_pct: 0,
-      }
-    : rows[0]
+  const hero = rows[0]
 
   background(ctx)
   ctx.textBaseline = 'alphabetic'
 
   // brand: small, in the corner of attention, below the top strip Instagram covers
   ctx.textAlign = 'center'
-  pill(ctx, W / 2, 250, 260, 68, 'rgba(255,255,255,0.08)', 'rgba(255,255,255,0.16)')
-  ctx.fillStyle = GREEN
-  ctx.beginPath()
-  ctx.arc(W / 2 - 78, 284, 9, 0, Math.PI * 2)
-  ctx.fill()
-  ctx.fillStyle = '#ffffff'
   ctx.font = `700 34px ${FONT}`
   ctx.textAlign = 'left'
-  ctx.fillText('xellter', W / 2 - 52, 296)
+  const brandW = ctx.measureText('xellter').width
+  const dot = 18
+  const gap = 16
+  const inner = dot + gap + brandW
+  pill(ctx, W / 2, 250, inner + 96, 68, 'rgba(255,255,255,0.08)', 'rgba(255,255,255,0.16)')
+  const left = W / 2 - inner / 2
+  ctx.fillStyle = GREEN
+  ctx.beginPath()
+  ctx.arc(left + dot / 2, 284, dot / 2, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.fillStyle = '#ffffff'
+  ctx.fillText('xellter', left + dot + gap, 296)
 
   // the block below the brand is centred when fewer than three cards are shown
   const shift = ((3 - rows.length) * (CARD_H + CARD_GAP)) / 2
@@ -173,7 +170,7 @@ export function renderStory(d: StoryData): Promise<Blob> {
   ctx.textAlign = 'center'
   ctx.fillStyle = '#c8ced9'
   ctx.font = `500 54px ${FONT}`
-  ctx.fillText(multi ? 'Combined cost saved' : 'Estimated cost saved', W / 2, 520 + shift)
+  ctx.fillText('Estimated cost saved', W / 2, 520 + shift)
   ctx.fillStyle = '#8fb5ff'
   ctx.font = `600 34px ${FONT}`
   ctx.fillText(d.windowLabel.toUpperCase(), W / 2, 580 + shift)
@@ -191,10 +188,8 @@ export function renderStory(d: StoryData): Promise<Blob> {
   ctx.fillText(amount, W / 2, hy)
   ctx.shadowBlur = 0
 
-  if (multi || hero.baseline_idr > 0) {
-    const label = multi
-      ? `added up over ${rows.length} comparisons`
-      : `${hero.saved_pct.toFixed(0)}% ${ok ? 'cheaper' : 'more'} than ${hero.model}`
+  if (hero.baseline_idr > 0) {
+    const label = `${Math.abs(hero.saved_pct).toFixed(0)}% ${ok ? 'cheaper' : 'more'} than ${hero.model}`
     ctx.font = fit(ctx, label, 600, 38, W - 220)
     const w = Math.min(W - 120, ctx.measureText(label).width + 80)
     pill(ctx, W / 2, hy + 50, w, 74, ok ? 'rgba(18,183,106,0.18)' : 'rgba(240,68,56,0.18)', ok ? 'rgba(50,213,131,0.5)' : 'rgba(249,112,102,0.5)')
@@ -202,12 +197,17 @@ export function renderStory(d: StoryData): Promise<Blob> {
     ctx.fillText(label, W / 2, hy + 100)
   }
 
-  rows.forEach((r, i) => card(ctx, r, 1010 + shift + i * (CARD_H + CARD_GAP)))
+  // the real spend is the same in every comparison, so it is said once
+  ctx.fillStyle = '#9aa3b2'
+  ctx.font = `500 34px ${FONT}`
+  ctx.fillText(`you paid ${rupiah(hero.baseline_idr - hero.saved_idr)}`, W / 2, hy + 178)
+
+  rows.forEach((r, i) => card(ctx, r, 1050 + shift + i * (CARD_H + CARD_GAP)))
 
   ctx.textAlign = 'center'
   ctx.fillStyle = '#6b7484'
   ctx.font = `400 30px ${FONT}`
-  ctx.fillText('smart model routing', W / 2, 1650)
+  ctx.fillText('smart model routing', W / 2, 1710)
 
   return new Promise((resolve, reject) =>
     c.toBlob((b) => (b ? resolve(b) : reject(new Error('could not render the image'))), 'image/png'),
