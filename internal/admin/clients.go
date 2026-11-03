@@ -879,12 +879,16 @@ type presetView struct {
 	// also ticked by hand: unticking one of those must be recorded in Excluded, or it comes straight back.
 	FreeModels []string `json:"free_models"`
 	// ExcludedModels are free or promo models xellter would add but the owner unticked (ADR 0035).
-	ExcludedModels []string             `json:"excluded_models"`
-	Excluded       []string             `json:"excluded"` // the whole saved list, what the panel sends back
-	Sticky         bool                 `json:"sticky"`   // a session keeps one model for its whole life
-	Ranking        *rank.Ranking        `json:"ranking"`
-	Evictions      map[string]time.Time `json:"evictions"`
-	OutOfService   []route.Out          `json:"out_of_service"` // the same models, with the reason each is out
+	ExcludedModels []string `json:"excluded_models"`
+	Excluded       []string `json:"excluded"` // the whole saved list, what the panel sends back
+	Sticky         bool     `json:"sticky"`   // a session keeps one model for its whole life
+	// DailyCapIDR is the most the preset may spend in a day, in rupiah; 0 is no limit (ADR 0043). SpentTodayIDR is
+	// what it has spent since midnight.
+	DailyCapIDR   float64              `json:"daily_cap_idr"`
+	SpentTodayIDR float64              `json:"spent_today_idr"`
+	Ranking       *rank.Ranking        `json:"ranking"`
+	Evictions     map[string]time.Time `json:"evictions"`
+	OutOfService  []route.Out          `json:"out_of_service"` // the same models, with the reason each is out
 	// Stats is how each model did in this preset over the last 24 hours; History is who was taken out and why.
 	Stats   map[string]*store.PresetModelStat `json:"stats"`
 	History []store.ModelEvent                `json:"history"`
@@ -940,6 +944,7 @@ func (h *Handler) clientDetail(w http.ResponseWriter, r *http.Request) {
 			Name: n, Category: p.Category, Label: presetLabel(n, p.Category),
 			Optimization: p.Optimization, OptimizationLabel: optimizationLabel[p.Optimization],
 			Models: append([]string{}, p.Models...), AutoModels: auto, FreeModels: free, ExcludedModels: excluded, Excluded: append([]string{}, p.Excluded...), Sticky: p.IsSticky(),
+			DailyCapIDR: p.DailyCapIDR, SpentTodayIDR: h.a.Px.PresetSpentToday(cl.Name, n),
 			Ranking:      rk[rank.Key(cl.Name, n)],
 			Evictions:    h.a.Rt.Evictions(cl.Name, n, now),
 			OutOfService: h.a.Rt.OutOfService(cl.Name, n, now),
@@ -972,8 +977,9 @@ func (h *Handler) presets(w http.ResponseWriter, r *http.Request) {
 		Category     string    `json:"category"`
 		Optimization string    `json:"optimization"`
 		Models       []string  `json:"models"`
-		Sticky       *bool     `json:"sticky"`   // absent keeps what the preset has
-		Excluded     *[]string `json:"excluded"` // absent keeps what the preset has
+		Sticky       *bool     `json:"sticky"`        // absent keeps what the preset has
+		Excluded     *[]string `json:"excluded"`      // absent keeps what the preset has
+		DailyCapIDR  *float64  `json:"daily_cap_idr"` // absent keeps what the preset has; 0 removes the cap
 	}
 	if r.Method != http.MethodPost || readJSON(r, &in) != nil {
 		jerr(w, 400, "POST {client, action, preset, category, optimization, models, sticky}")
@@ -1034,7 +1040,11 @@ func (h *Handler) presets(w http.ResponseWriter, r *http.Request) {
 		if len(kept) == 0 {
 			kept = nil
 		}
-		cl.Presets[name] = config.Preset{Category: category, Optimization: opt, Models: models, Excluded: kept, Sticky: sticky}
+		dailyCap := cl.Presets[name].DailyCapIDR
+		if in.DailyCapIDR != nil {
+			dailyCap = *in.DailyCapIDR
+		}
+		cl.Presets[name] = config.Preset{Category: category, Optimization: opt, Models: models, Excluded: kept, Sticky: sticky, DailyCapIDR: dailyCap}
 	case "rename":
 		newName := strings.TrimSpace(in.NewName)
 		if newName == "" {

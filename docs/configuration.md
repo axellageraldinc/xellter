@@ -23,7 +23,7 @@ routing:  { rank_refresh_minutes, top_models, evict_errors, evict_window_minutes
 clients[]:
   - { name, enabled, purpose, key_hash, key_hint, note,
       keys[]:    { name, key_env },
-      presets{}: { <preset name>: { category, optimization, models[], sticky } } }
+      presets{}: { <preset name>: { category, optimization, models[], sticky, daily_cap_idr } } }
 ```
 
 ## server
@@ -49,6 +49,8 @@ clients[]:
 | `user_agent` | `xellter/1.0` | sent upstream; kenari blocks the default Go UA |
 | `first_byte_timeout_s` | `60` | how long an attempt may wait for the upstream's response headers; non-streaming requests get 3x. A timeout moves to the next model at once. See also `routing.first_token_timeout_s`, which is about the first token of a stream |
 | `music_timeout_s` | `900` | music generation timeout |
+| `currency` | `IDR` | currency the provider prices in. Costs are converted to rupiah (ADR 0043) |
+| `idr_per_unit` | — | estimated rupiah per 1 unit of `currency`; needed for anything but IDR/USD (USD falls back to the catalog's rate) |
 | `account_key_env` | `KENARI_ACCOUNT_KEY` | secret name of an optional full-access key. It only reads plan, usage and balance, never serves a request. Must look like `UPPER_SNAKE` |
 
 ## local_models[]

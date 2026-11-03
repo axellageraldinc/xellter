@@ -58,6 +58,7 @@ export function PresetCard({
   const [models, setModels] = React.useState<string[]>(preset.models)
   const [excluded, setExcluded] = React.useState<string[]>(preset.excluded ?? [])
   const [sticky, setSticky] = React.useState(preset.sticky)
+  const [cap, setCap] = React.useState(preset.daily_cap_idr ? String(preset.daily_cap_idr) : '')
   const [picking, setPicking] = React.useState(false)
   const [renaming, setRenaming] = React.useState(false)
   const toast = useToast()
@@ -65,6 +66,7 @@ export function PresetCard({
   const dirty =
     optimization !== preset.optimization ||
     sticky !== preset.sticky ||
+    (Number(cap) || 0) !== (preset.daily_cap_idr || 0) ||
     [...excluded].sort().join('\n') !== [...(preset.excluded ?? [])].sort().join('\n') ||
     models.length !== preset.models.length ||
     [...models].sort().join('\n') !== [...preset.models].sort().join('\n')
@@ -85,8 +87,9 @@ export function PresetCard({
     setOptimization(preset.optimization)
     setModels(preset.models)
     setSticky(preset.sticky)
+    setCap(preset.daily_cap_idr ? String(preset.daily_cap_idr) : '')
     setExcluded(preset.excluded ?? [])
-  }, [preset.optimization, preset.models, preset.sticky, preset.excluded])
+  }, [preset.optimization, preset.models, preset.sticky, preset.excluded, preset.daily_cap_idr])
 
   async function save() {
     try {
@@ -101,6 +104,7 @@ export function PresetCard({
           models,
           excluded,
           sticky,
+          daily_cap_idr: Math.max(0, Number(cap) || 0),
         },
       })
       toast.push('Preset saved')
@@ -202,6 +206,32 @@ export function PresetCard({
             aria-label="Sticky session"
             title={sticky ? 'Sticky session is on' : 'Sticky session is off'}
           />
+        </div>
+
+        {/* A daily spend ceiling in rupiah. Empty is no limit; at the cap the preset answers 429 until midnight. */}
+        <div className="flex items-start justify-between gap-4 rounded-md border border-border bg-surface-muted/40 px-3 py-2.5">
+          <div className="min-w-0">
+            <div className="text-xs font-medium text-text-secondary">Daily cap</div>
+            <div className="mt-0.5 text-xs text-text-muted">
+              {preset.daily_cap_idr > 0
+                ? `Rp ${Math.round(preset.spent_today_idr).toLocaleString('id-ID')} of Rp ${preset.daily_cap_idr.toLocaleString('id-ID')} spent today. At the cap this preset refuses requests until midnight.`
+                : 'No limit. Set a rupiah amount to stop this preset for the rest of the day once it is spent.'}
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <span className="text-xs text-text-muted">Rp</span>
+            <input
+              type="number"
+              min={0}
+              step={1000}
+              inputMode="numeric"
+              value={cap}
+              placeholder="No limit"
+              onChange={(e) => setCap(e.target.value)}
+              aria-label="Daily cap in rupiah"
+              className="h-8 w-28 rounded-md border border-border bg-surface px-2 text-right text-sm"
+            />
+          </div>
         </div>
 
         {/* The models that are free or discounted and that xellter put in the

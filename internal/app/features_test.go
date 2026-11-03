@@ -490,3 +490,39 @@ func containsStr(l []string, v string) bool {
 	}
 	return false
 }
+
+// A preset that has spent its daily cap refuses further requests; one without a cap, and another preset's cap,
+// are not affected (ADR 0043).
+func TestADailyCapStopsThePresetThatSpentIt(t *testing.T) {
+	capped := func(c *config.Config) {
+		c.Clients[0].Presets["text"] = config.Preset{Category: "chat", Optimization: "cheapest", Models: []string{"cheap-b", "pro-c"}, Excluded: []string{"free-a:free", "promo-d"}, DailyCapIDR: 1e-9}
+	}
+	e := setup(t, capped)
+	r, _ := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "text"))
+	if r.StatusCode != 200 {
+		t.Fatalf("the first request is under the cap, got %d", r.StatusCode)
+	}
+	var last int
+	var body string
+	for i := 0; i < 50; i++ { // the cost is booked when the request finishes
+		r, body = e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "text"))
+		if last = r.StatusCode; last == 429 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if last != 429 || !strings.Contains(string(body), "daily_cap_reached") {
+		t.Fatalf("a preset past its cap must answer 429 daily_cap_reached, got %d %s", last, body)
+	}
+	if r.Header.Get("Retry-After") == "" {
+		t.Fatal("the refusal must say when to come back")
+	}
+
+	// no cap = no limit, however much it has spent
+	e2 := setup(t, twoEqualModels)
+	for i := 0; i < 5; i++ {
+		if r, _ := e2.post(t, e2.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "text")); r.StatusCode != 200 {
+			t.Fatalf("a preset without a cap must keep serving, got %d", r.StatusCode)
+		}
+	}
+}

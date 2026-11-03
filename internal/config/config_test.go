@@ -372,3 +372,26 @@ func TestClientsMoveToTheStoreAndOutOfTheFile(t *testing.T) {
 		t.Fatal("history entry lacks the previous clients")
 	}
 }
+
+func TestProviderCurrencyToRupiah(t *testing.T) {
+	cases := []struct {
+		k      Kenari
+		usd    float64
+		want   float64
+		wantOK bool
+	}{
+		{Kenari{}, 17500, 1, true},
+		{Kenari{Currency: "idr"}, 0, 1, true},
+		{Kenari{Currency: "USD"}, 17500, 17500, true},
+		{Kenari{Currency: "USD", IDRPerUnit: 16000}, 17500, 16000, true},
+		{Kenari{Currency: "USD"}, 0, 0, false},
+		{Kenari{Currency: "EUR"}, 17500, 0, false},
+		{Kenari{Currency: "EUR", IDRPerUnit: 19000}, 0, 19000, true},
+	}
+	for i, c := range cases {
+		got, ok := c.k.IDRRate(c.usd)
+		if got != c.want || ok != c.wantOK {
+			t.Errorf("case %d: got %v,%v want %v,%v", i, got, ok, c.want, c.wantOK)
+		}
+	}
+}

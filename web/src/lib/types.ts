@@ -78,6 +78,10 @@ export type PresetView = {
   excluded: string[]
   /** A session keeps one model for its whole life. */
   sticky: boolean
+  /** The most this preset may spend in a day, in rupiah. 0 is no limit. */
+  daily_cap_idr: number
+  /** What it has spent since midnight, in rupiah. */
+  spent_today_idr: number
   ranking: Ranking | null
   evictions: Record<string, string>
   /** The models that are out of this preset, and why. */

@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"path"
@@ -80,6 +81,27 @@ type Kenari struct {
 	// AccountKeyEnv names the secret holding an optional full-access key of the
 	// kenari account. It is only used to read plan quota and balance, never to serve requests.
 	AccountKeyEnv string `yaml:"account_key_env" json:"account_key_env"`
+	// Currency is what this provider prices its models in: "" or "IDR" (the default), "USD", or any code with an
+	// idr_per_unit. xellter converts every cost to rupiah with it, so a preset's daily cap (ADR 0043) is in one unit.
+	Currency string `yaml:"currency,omitempty" json:"currency,omitempty"`
+	// IDRPerUnit is the estimated exchange rate: rupiah for one unit of Currency. Optional for USD, where the
+	// catalog's own rate is used when this is empty. Required for any other non-IDR currency.
+	IDRPerUnit float64 `yaml:"idr_per_unit,omitempty" json:"idr_per_unit,omitempty"`
+}
+
+// IDRRate is how many rupiah one unit of the provider's currency is worth, or ok=false when it cannot be known.
+// usdIDR is the catalog's own USD rate (0 when unknown); it is the fallback for USD only.
+func (k Kenari) IDRRate(usdIDR float64) (rate float64, ok bool) {
+	cur := strings.ToUpper(strings.TrimSpace(k.Currency))
+	switch {
+	case cur == "" || cur == "IDR":
+		return 1, true
+	case k.IDRPerUnit > 0:
+		return k.IDRPerUnit, true
+	case cur == "USD" && usdIDR > 0:
+		return usdIDR, true
+	}
+	return 0, false
 }
 
 // DefaultProvider is the id of the provider every key and model belongs to unless it says otherwise. It is the one
@@ -224,6 +246,9 @@ type Preset struct {
 	// Sticky says whether a session keeps one model for its whole life. A preset
 	// that never said anything sticks, as it always did (ADR 0025).
 	Sticky *bool `yaml:"sticky,omitempty" json:"sticky,omitempty"`
+	// DailyCapIDR is the most this preset may spend in one day, in rupiah (ADR 0043). 0 is no limit, which is what
+	// every preset that never said anything has. Once the day's cost reaches it the preset answers 429 until midnight.
+	DailyCapIDR float64 `yaml:"daily_cap_idr,omitempty" json:"daily_cap_idr,omitempty"`
 }
 
 // IsSticky reports whether the preset keeps one model for the whole session.
@@ -555,6 +580,9 @@ func (c *Config) Validate() error {
 			if !nameRe.MatchString(name) {
 				bad("%s: invalid name", where)
 			}
+			if p.DailyCapIDR < 0 || math.IsNaN(p.DailyCapIDR) || math.IsInf(p.DailyCapIDR, 0) {
+				bad("%s: daily_cap_idr must be 0 (no limit) or a positive number of rupiah", where)
+			}
 			category := p.Category
 			if category == "" {
 				// A preset written before presets could be renamed still carries the fixed name; that
@@ -613,6 +641,16 @@ func (c *Config) Validate() error {
 		}
 		cmpSeen[m] = true
 	}
+	curCheck := func(id string, k Kenari) {
+		cur := strings.ToUpper(strings.TrimSpace(k.Currency))
+		if k.IDRPerUnit < 0 || math.IsNaN(k.IDRPerUnit) || math.IsInf(k.IDRPerUnit, 0) {
+			bad("provider %q: idr_per_unit must be a positive number", id)
+		}
+		if cur != "" && cur != "IDR" && cur != "USD" && k.IDRPerUnit <= 0 {
+			bad("provider %q: currency %s needs idr_per_unit (the estimated rupiah per 1 %s)", id, cur, cur)
+		}
+	}
+	curCheck(DefaultProvider, c.Kenari)
 	pseen := map[string]bool{DefaultProvider: true}
 	for i, p := range c.Providers {
 		switch {
@@ -622,6 +660,7 @@ func (c *Config) Validate() error {
 			bad("provider id %q is used twice (%q is the built-in one, set by the kenari: section)", p.ID, DefaultProvider)
 		}
 		pseen[p.ID] = true
+		curCheck(p.ID, p.Kenari)
 		if !contains(ProviderTypes, p.Type) {
 			bad("provider %q: type must be one of %v", p.ID, ProviderTypes)
 		}

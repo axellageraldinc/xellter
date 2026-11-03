@@ -357,6 +357,13 @@ func (s *Store) ClientSpend(client string, since time.Time) (float64, error) {
 	return v.Float64, err
 }
 
+// PresetSpend sums the cost of one client's preset since t, in rupiah (the log holds rupiah, ADR 0043).
+func (s *Store) PresetSpend(client, preset string, since time.Time) (float64, error) {
+	var v sql.NullFloat64
+	err := s.db.QueryRow(`SELECT SUM(cost) FROM requests WHERE client=? AND preset=? AND ts>=?`, client, preset, since.UnixMilli()).Scan(&v)
+	return v.Float64, err
+}
+
 // TokenMix sums the answered requests of one client that carried tokens since a time: the chat-shaped traffic,
 // because an image or a transcription logs no tokens. It is what the model picker prices an average request with.
 func (s *Store) TokenMix(client string, since time.Time) (requests int, in, cached, out int64, err error) {

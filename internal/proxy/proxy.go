@@ -50,6 +50,8 @@ type Server struct {
 
 	smu   sync.Mutex
 	spend map[string]*daySpend
+	// presetSpend is what each preset has cost today, in rupiah, for the daily cap (ADR 0043). Keyed client + NUL + preset.
+	presetSpend map[string]*daySpend
 
 	Inflight  atomic.Int64
 	Total     atomic.Int64
@@ -75,7 +77,7 @@ func New(cfg *config.Config, cat *catalog.Catalog, pool *upstream.Pool, rt *rout
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 0, // enforced per request
 	}
-	s := &Server{cat: cat, pool: pool, rt: rt, st: st, hc: &http.Client{Transport: tr}, Logf: func(string, ...any) {}, Now: time.Now, spend: map[string]*daySpend{}, startedAt: time.Now()}
+	s := &Server{cat: cat, pool: pool, rt: rt, st: st, hc: &http.Client{Transport: tr}, Logf: func(string, ...any) {}, Now: time.Now, spend: map[string]*daySpend{}, presetSpend: map[string]*daySpend{}, startedAt: time.Now()}
 	s.efforts = rt.Efforts()
 	s.SetConfig(cfg)
 	return s
@@ -479,6 +481,15 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 		return
 	}
 
+	// A preset that has spent its day's cap serves nothing more until midnight (ADR 0043).
+	if capIDR := cl.Presets[plan.Preset].DailyCapIDR; plan.Preset != "" && capIDR > 0 {
+		if spent := s.presetSpentToday(cl.Name, plan.Preset); spent >= capIDR {
+			writeErr(w, r.URL.Path, 429, "daily_cap_reached",
+				fmt.Sprintf("preset %q has reached its daily cap of Rp %.0f; it serves again at midnight", plan.Preset, capIDR), s.untilMidnight())
+			return
+		}
+	}
+
 	// RTK is always on and has no switch (ADR 0017). It only touches chat tool outputs.
 	rtkSaved := 0
 	if plan.Modality == "chat" && body.json != nil {
@@ -866,6 +877,7 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, cl *config.Client
 			at.Key.RecordSpend(now, row.CatalogCost)
 		}
 		s.addSpend(cl.Name, row.CatalogCost)
+		s.addPresetSpend(cl.Name, plan.Preset, row.CatalogCost)
 		if strings.HasPrefix(r.URL.Path, "/v1/videos") && total <= 16<<10 { // the whole job JSON is in the tail buffer
 			var j struct {
 				ID string `json:"id"`
@@ -879,16 +891,42 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, cl *config.Client
 	}
 }
 
+// cost is the price of a finished request in rupiah. The catalog prices of a provider that quotes another currency
+// are converted with an estimated rate (ADR 0043), so the log, the usage figures and the daily cap share one unit.
 func (s *Server) cost(cl *config.Client, at route.Attempt, plan *route.Plan, b *reqBody, u usage, covered bool, now time.Time, snap *catalog.Snapshot) float64 {
 	m := at.Model
 	if m.Free {
 		return 0
 	}
+	var c float64
 	if m.Endpoint == "chat" || m.Endpoint == "systemone" {
-		return usageCost(m, u.in, u.out, u.cached, at.Key.FreeCache(m, snap, now), now)
+		c = usageCost(m, u.in, u.out, u.cached, at.Key.FreeCache(m, snap, now), now)
+	} else {
+		unit, variant, n := mediaUnits(m, b)
+		c = mediaCost(m, unit, variant, n)
 	}
-	unit, variant, n := mediaUnits(m, b)
-	return mediaCost(m, unit, variant, n)
+	return c * s.idrRate(m.ProviderID(), snap)
+}
+
+// idrRate is the rupiah value of one unit of the currency a provider quotes in: 1 for the default (IDR). A rate that
+// cannot be known counts as 1 rather than hiding the cost.
+func (s *Server) idrRate(provider string, snap *catalog.Snapshot) float64 {
+	cfg := s.cfg.Load()
+	if cfg == nil {
+		return 1
+	}
+	pc, ok := cfg.Provider(provider)
+	if !ok {
+		return 1
+	}
+	var usd float64
+	if snap != nil {
+		usd = snap.USDIDR
+	}
+	if r, ok := pc.IDRRate(usd); ok {
+		return r
+	}
+	return 1
 }
 
 // mediaUnits is what a media request asked for: the catalog price unit, the price variant when the request names
@@ -1056,6 +1094,49 @@ func (s *Server) addSpend(client string, v float64) {
 	s.spend[client].v += v
 	s.smu.Unlock()
 }
+
+func presetKey(client, preset string) string { return client + "\x00" + preset }
+
+// presetSpentToday is what one preset has cost since local midnight, in rupiah. The first call of a day (or after a
+// restart) reads the request log; after that the counter follows every finished request.
+func (s *Server) presetSpentToday(client, preset string) float64 {
+	day := s.Now().Format("2006-01-02")
+	k := presetKey(client, preset)
+	s.smu.Lock()
+	defer s.smu.Unlock()
+	d := s.presetSpend[k]
+	if d == nil || d.day != day {
+		v := 0.0
+		if s.st != nil {
+			v, _ = s.st.PresetSpend(client, preset, s.midnight())
+		}
+		d = &daySpend{day: day, v: v}
+		s.presetSpend[k] = d
+	}
+	return d.v
+}
+
+func (s *Server) addPresetSpend(client, preset string, v float64) {
+	if v <= 0 || preset == "" {
+		return
+	}
+	s.presetSpentToday(client, preset) // ensure today's entry exists
+	s.smu.Lock()
+	s.presetSpend[presetKey(client, preset)].v += v
+	s.smu.Unlock()
+}
+
+// PresetSpentToday exposes the counter for the panel.
+func (s *Server) PresetSpentToday(client, preset string) float64 {
+	return s.presetSpentToday(client, preset)
+}
+
+func (s *Server) midnight() time.Time {
+	t := s.Now()
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+}
+
+func (s *Server) untilMidnight() time.Duration { return s.midnight().AddDate(0, 0, 1).Sub(s.Now()) }
 
 // SpentToday exposes the counter for the dashboard.
 func (s *Server) SpentToday(client string) float64 { return s.spentToday(client) }
