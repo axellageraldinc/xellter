@@ -57,9 +57,12 @@ xellter keeps a record of the last hour for each `(client, preset, model)`. A mo
 | **errors** | `evict_errors` (3) failures in a row | `evict_cooldown_minutes` (12 h) |
 | **slow** | median first token above `slow_first_token_s` (10 s) | `quarantine_minutes` (30 min), doubling |
 | **unreliable** | `fail_percent` (40 %) of its requests failed | `quarantine_minutes` (30 min), doubling |
+| **failing** | 5 requests in a row failed or came back empty, however far apart | `quarantine_minutes` (30 min), doubling |
 
 Slow and unreliable are only judged after `health_min_requests` (6) requests, so one bad answer
-never removes a model. A 4xx, or a caller that hung up, is not the model's fault and is not counted.
+never removes a model. A 4xx, or a caller that hung up, is not the model's fault and is not counted as a failure
+(a 4xx that another model then answered counts towards *failing*; a caller that hung up after a long wait counts as a
+slow answer; an empty 200 is a failure and moves the request on to the next model — ADR 0046).
 
 The judgement is per client and per preset. Your coding agent's large prompts can take a model out
 of the coding preset without touching a chat preset that sends short ones.

@@ -4,6 +4,7 @@
 - Date: 2026-10-28
 - Deciders: maintainer
 - Amends: ADR 0020 (eviction)
+- Amended by ADR 0046 (non-streamed waits, empty answers, failures in a row, its own window)
 
 ## Context
 

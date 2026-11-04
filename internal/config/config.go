@@ -189,6 +189,7 @@ type Routing struct {
 	SlowTTFTSecs     int `yaml:"slow_first_token_s" json:"slow_first_token_s"`       // median first token above this takes a model out
 	FailPercent      int `yaml:"fail_percent" json:"fail_percent"`                   // failed requests, in percent, that take a model out
 	HealthMinReqs    int `yaml:"health_min_requests" json:"health_min_requests"`     // requests needed before a model is judged
+	HealthWindowMin  int `yaml:"health_window_minutes" json:"health_window_minutes"` // how far back a model's slow/unreliable record looks (ADR 0046); independent of evict_window_minutes
 	QuarantineMin    int `yaml:"quarantine_minutes" json:"quarantine_minutes"`       // first time out; doubles each time it comes back and fails again
 	RepinFirstTokenS int `yaml:"repin_first_token_s" json:"repin_first_token_s"`     // a pinned model this slow twice in three requests loses the session
 }
@@ -314,7 +315,7 @@ func Default() *Config {
 		Routing: Routing{
 			RankRefreshMinutes: 5, TopModels: 10, EvictErrors: 3, EvictWindowMin: 60,
 			EvictCooldownMin: 720, AvoidSunsetDays: 3,
-			FirstTokenSecs: 15, SlowTTFTSecs: 10, FailPercent: 40, HealthMinReqs: 6, QuarantineMin: 30, RepinFirstTokenS: 15,
+			FirstTokenSecs: 15, SlowTTFTSecs: 10, FailPercent: 40, HealthMinReqs: 6, HealthWindowMin: 60, QuarantineMin: 30, RepinFirstTokenS: 15,
 		},
 	}
 }
@@ -486,6 +487,9 @@ func (c *Config) fillDefaults() {
 	}
 	if r.HealthMinReqs <= 0 {
 		r.HealthMinReqs = d.Routing.HealthMinReqs
+	}
+	if r.HealthWindowMin <= 0 {
+		r.HealthWindowMin = d.Routing.HealthWindowMin
 	}
 	if r.QuarantineMin <= 0 {
 		r.QuarantineMin = d.Routing.QuarantineMin

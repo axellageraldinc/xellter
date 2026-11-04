@@ -61,6 +61,33 @@ func (r *Router) OutOfService(client, preset string, now time.Time) []Out {
 // takes a model out. A model that comes back from a cooldown is judged on half as many, because it has
 // already been seen failing, and its next cooldown is twice as long (up to evict_cooldown_minutes).
 func (r *Router) Observe(client, preset, session, model string, ttft time.Duration, ok bool, now time.Time) (out string, moved bool) {
+	mode := streakReset
+	if !ok {
+		mode = streakAdd
+	}
+	return r.observe(client, preset, session, model, ttft, ok, mode, now)
+}
+
+// Waited records that a caller gave up on a model after waiting this long for an answer (ADR 0046). The model
+// did not answer, but it is not known to have failed either, so the wait counts towards "slow" and nowhere
+// else: a client with a 15 second timeout would otherwise hide every slow model from the record.
+func (r *Router) Waited(client, preset, model string, waited time.Duration, now time.Time) (out string) {
+	out, _ = r.observe(client, preset, "", model, waited, true, streakKeep, now)
+	return out
+}
+
+// How a sample moves the run of failures in a row.
+const (
+	streakReset = iota // the model answered
+	streakAdd          // the model failed
+	streakKeep         // neither
+)
+
+// streakLimit is how many failures in a row, with no answer in between, take a model out whatever the time
+// between them was. A model coming back from a cooldown is judged on half as many.
+const streakLimit = 5
+
+func (r *Router) observe(client, preset, session, model string, ttft time.Duration, ok bool, mode int, now time.Time) (out string, moved bool) {
 	if preset == "" || model == "" {
 		return "", false
 	}
@@ -82,7 +109,8 @@ func (r *Router) Observe(client, preset, session, model string, ttft time.Durati
 	if now.Before(e.until) {
 		return "", moved // a request that was already in flight when the model went out
 	}
-	window := time.Duration(cfg.Routing.EvictWindowMin) * time.Minute
+	// The record is kept for its own window: evict_window_minutes times the three-errors rule and may be a minute.
+	window := time.Duration(rt.HealthWindowMin) * time.Minute
 	keep := r.health[key][:0]
 	for _, x := range r.health[key] {
 		if now.Sub(x.at) <= window {
@@ -96,8 +124,25 @@ func (r *Router) Observe(client, preset, session, model string, ttft time.Durati
 	}
 	r.health[key] = keep
 	need := rt.HealthMinReqs
+	runNeed := streakLimit
 	if e.strikes > 0 {
 		need = max(2, need/2)
+		runNeed = max(2, runNeed/2)
+	}
+	switch mode {
+	case streakReset:
+		e.streak = 0
+	case streakAdd:
+		if now.Sub(e.streakAt) > 24*time.Hour {
+			e.streak = 0 // a run that old says nothing about the model today
+		}
+		e.streak++
+		e.streakAt = now
+	}
+	if e.streak >= runNeed {
+		out = fmt.Sprintf("failing: its last %d requests in a row all failed", e.streak)
+		e.kind = "failing"
+		return r.takeOutLocked(client, preset, model, e, out, now), moved
 	}
 	if len(keep) < need {
 		return "", moved
@@ -122,10 +167,17 @@ func (r *Router) Observe(client, preset, session, model string, ttft time.Durati
 		e.strikes = 0 // judged again and healthy: the next time out starts from the short cooldown
 		return "", moved
 	}
+	return r.takeOutLocked(client, preset, model, e, out, now), moved
+}
+
+// takeOutLocked puts a model out of a preset for its next cooldown and returns the reason, or "" when the
+// preset could not spare it. smu is held.
+func (r *Router) takeOutLocked(client, preset, model string, e *eviction, out string, now time.Time) string {
+	rt := r.cfg.Load().Routing
 	// A preset is never emptied: the last two models stay in service however they are doing, because a slow
 	// answer is better than a refusal.
 	if r.inServiceLocked(client, preset, model, now) < 2 {
-		return "", moved
+		return ""
 	}
 	cool := time.Duration(rt.QuarantineMin) * time.Minute << min(e.strikes, 10)
 	if limit := time.Duration(rt.EvictCooldownMin) * time.Minute; cool > limit {
@@ -133,11 +185,11 @@ func (r *Router) Observe(client, preset, session, model string, ttft time.Durati
 	}
 	e.strikes++
 	e.until, e.since, e.reason = now.Add(cool), now, out
-	e.fails, e.replaced = nil, true
-	delete(r.health, key) // measured afresh when it comes back
+	e.fails, e.replaced, e.streak = nil, true, 0
+	delete(r.health, evictKey(client, preset, model)) // measured afresh when it comes back
 	r.healthVer++
 	r.recordEvent(client, preset, model, e, now)
-	return out, moved
+	return out
 }
 
 func median(d []time.Duration) time.Duration {
@@ -290,7 +342,7 @@ func (r *Router) RestoreHealth(raw []byte, now time.Time) (out int, version uint
 	if len(raw) == 0 || json.Unmarshal(raw, &h) != nil {
 		return 0, r.healthVersion()
 	}
-	window := time.Duration(r.cfg.Load().Routing.EvictWindowMin) * time.Minute
+	window := time.Duration(r.cfg.Load().Routing.HealthWindowMin) * time.Minute
 	r.smu.Lock()
 	defer r.smu.Unlock()
 	if r.health == nil {

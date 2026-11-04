@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -510,21 +511,32 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 	// of the key (requirement 15).
 	dead := map[string]bool{}
 	ftLimit := s.firstTokenLimit(cfg, s.estimate(cl.Name, body), plan.Modality, isStream)
+	// An empty answer fails over to the next model (ADR 0046). When no model is left, the empty answer is what
+	// the caller gets, as before: something has to answer.
+	checkEmpty := !isStream && plan.Modality == "chat" && strings.HasPrefix(r.URL.Path, "/v1/chat/completions")
+	var held *heldAnswer
+	defer func() {
+		if held != nil {
+			held.res.cancel()
+			_ = held.res.resp.Body.Close()
+		}
+	}()
+	// Models that refused the request with a 4xx. It says nothing about the model until another model answers
+	// the same request: then it was the model that refused (ADR 0046).
+	var refused []string
 	for ai, at := range plan.Attempts {
 		if dead[at.Model.ID] {
 			continue
 		}
 		// The last model that can still be tried is never timed out: something has to answer.
-		timed := ftLimit > 0
-		if timed {
-			timed = false
-			for _, later := range plan.Attempts[ai+1:] {
-				if !dead[later.Model.ID] && later.Model.ID != at.Model.ID {
-					timed = true
-					break
-				}
+		more := false
+		for _, later := range plan.Attempts[ai+1:] {
+			if !dead[later.Model.ID] && later.Model.ID != at.Model.ID {
+				more = true
+				break
 			}
 		}
+		timed := ftLimit > 0 && more
 		// A model that has been measured to reject the effort does not get it again
 		// (ADR 0026). The request is served without the field, which is better than
 		// failing the call over a parameter the client cannot drop.
@@ -573,11 +585,33 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 					break
 				}
 			}
+			if checkEmpty && res.err == nil && res.resp.StatusCode < 300 {
+				var empty bool
+				if res, empty = inspect(res); empty {
+					s.Logf("attempt %d %s/%s on %s: %s", attempts, plan.Requested, at.Model.ID, at.Key.Name, errEmpty)
+					s.countEmpty(cl.Name, plan, session, at.Model.ID, true)
+					dead[at.Model.ID] = true
+					if more {
+						row.Status, row.Err = res.resp.StatusCode, errEmpty
+						row.LatencyMS = int(s.Now().Sub(start) / time.Millisecond)
+						row.Billing = "payg"
+						s.st.Log(row)
+						res.cancel()
+						_ = res.resp.Body.Close()
+					} else {
+						res.counted = true
+						row.Err = errEmpty
+						held = &heldAnswer{res: res, at: at, row: row}
+					}
+					break
+				}
+			}
 			if res.err == nil && res.resp.StatusCode < 300 {
 				s.rt.Succeeded(cl.Name, plan.Preset, at.Model.ID)
 				if plan.Preset != "" {
 					s.rt.Pin(cl.Name, plan.Preset, session, at.Model.ID, s.Now())
 				}
+				s.confirmRefused(cl.Name, plan, session, refused, at.Model.ID)
 				s.relay(w, r, cl, plan, at, res, row, body, isStream, start, snap)
 				return
 			}
@@ -608,6 +642,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 					if plan.Preset != "" {
 						s.rt.Pin(cl.Name, plan.Preset, session, at.Model.ID, s.Now())
 					}
+					s.confirmRefused(cl.Name, plan, session, refused, at.Model.ID)
 					s.relay(w, r, cl, plan, at, res, row, body, isStream, start, snap)
 					return
 				}
@@ -623,7 +658,17 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 			// went away (a closed tab, a stopped stream). Counting it would evict
 			// healthy models after three interruptions.
 			if r.Context().Err() != nil {
+				// The caller gave up. It does not count against the model, but how long it waited does count
+				// towards "slow": a client with a short timeout would otherwise hide every slow model (ADR 0046).
+				if w := s.Now().Sub(res.started); f.status == 0 && plan.Preset != "" && w >= time.Duration(cfg.Routing.SlowTTFTSecs)*time.Second {
+					if why := s.rt.Waited(cl.Name, plan.Preset, at.Model.ID, w, s.Now()); why != "" {
+						s.Logf("%s/%s out of preset %s: %s", cl.Name, at.Model.ID, plan.Preset, why)
+					}
+				}
 				return
+			}
+			if (f.status == 400 || f.status == 404 || f.status == 422) && !f.contextOverflow && !slices.Contains(refused, at.Model.ID) {
+				refused = append(refused, at.Model.ID)
 			}
 			if f.status == 0 || f.status >= 500 {
 				s.observe(cl.Name, plan, session, at.Model.ID, 0, false)
@@ -642,6 +687,12 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 				dead[at.Model.ID] = true
 			}
 		}
+	}
+	if held != nil {
+		h := held
+		held = nil
+		s.relay(w, r, cl, plan, h.at, h.res, h.row, body, isStream, start, snap)
+		return
 	}
 	s.Failed.Add(1)
 	if last != nil && last.body != nil { // relay the upstream's own error
@@ -670,6 +721,16 @@ type sendResult struct {
 	ttfb    time.Duration
 	// timedOut is set when the first-byte timer, not the caller, cancelled the request.
 	timedOut *atomic.Bool
+	// counted says the model's record already has this answer (an empty one the gateway had to relay for want of
+	// another model), so relay must not count it again.
+	counted bool
+}
+
+// heldAnswer is an empty answer kept back because no other model could be tried.
+type heldAnswer struct {
+	res sendResult
+	at  route.Attempt
+	row store.Request
 }
 
 type failure struct {
@@ -846,12 +907,32 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, cl *config.Client
 	if body != nil && !body.multipart && body.est > 0 {
 		s.scale.learn(row.Client, body.est, u.in)
 	}
-	if copyErr == nil {
+	if copyErr == nil && !res.counted {
 		var waited time.Duration
-		if stream && plan.Modality == "chat" && ttft > 0 {
+		switch {
+		case stream && plan.Modality == "chat" && ttft > 0:
 			waited = ttft - res.started.Sub(start)
+		case !stream && plan.Modality == "chat":
+			// The wait for the whole answer, less the time its tokens take to write: what is left is the
+			// model queueing, comparable with the first-token wait of a stream (ADR 0046).
+			waited = max(now.Sub(res.started)-time.Duration(u.out)*perToken, time.Millisecond)
 		}
-		s.observe(row.Client, plan, row.Session, at.Model.ID, waited, true)
+		if stream && strings.HasPrefix(r.URL.Path, "/v1/chat/completions") && total > 0 && total <= tail.n && emptyStream(tail.bytes()) {
+			// The stream is already with the caller, so it cannot fail over; the model still pays for it.
+			row.Err = errEmpty
+			s.countEmpty(row.Client, plan, row.Session, at.Model.ID, false)
+			s.rt.Forget(row.Client, plan.Preset, row.Session)
+		} else {
+			s.observe(row.Client, plan, row.Session, at.Model.ID, waited, true)
+		}
+	}
+	if copyErr != nil && total == 0 && plan.Preset != "" {
+		// The caller left before a single byte came: see the same case in call.
+		if w := now.Sub(res.started); w >= time.Duration(s.cfg.Load().Routing.SlowTTFTSecs)*time.Second {
+			if why := s.rt.Waited(row.Client, plan.Preset, at.Model.ID, w, now); why != "" {
+				s.Logf("%s/%s out of preset %s: %s", row.Client, at.Model.ID, plan.Preset, why)
+			}
+		}
 	}
 	covered := at.Key.Covered(at.Model, snap, now)
 	switch {
@@ -1154,6 +1235,35 @@ func writeErr(w http.ResponseWriter, path string, status int, code, msg string, 
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": msg, "type": "xellter_error", "code": code}})
+}
+
+// perToken is the time allowed for writing one token of a non-streamed answer when the wait is judged.
+const perToken = 20 * time.Millisecond
+
+// countEmpty records an answer with nothing in it as a failure of the model: it counts in its record, towards
+// the three errors, and in the run of failures in a row (ADR 0046).
+func (s *Server) countEmpty(client string, plan *route.Plan, session, model string, threeErrors bool) {
+	if plan.Preset == "" {
+		return
+	}
+	s.observe(client, plan, session, model, 0, false)
+	// A stream is only found empty after the call has already cleared the model's errors for answering, so the
+	// three-errors rule could never reach three for it; the run of failures in a row and the share of failed
+	// requests are what judge a model that streams nothing.
+	if threeErrors && s.rt.FailedWhy(client, plan.Preset, model, errEmpty, s.Now()) {
+		s.rt.Forget(client, plan.Preset, session)
+		s.Logf("%s/%s evicted from preset %s: %s", client, model, plan.Preset, errEmpty)
+	}
+}
+
+// confirmRefused counts the 4xx refusals of this request against the models that gave them, now that another
+// model has answered the same request: the request was fine, the model was not (ADR 0046).
+func (s *Server) confirmRefused(client string, plan *route.Plan, session string, refused []string, served string) {
+	for _, m := range refused {
+		if m != served {
+			s.observe(client, plan, session, m, 0, false)
+		}
+	}
 }
 
 // observe tells the router how one request of a model went (ADR 0029) and logs the verdict when it

@@ -108,8 +108,9 @@ first byte reaches the client** when:
   anything; this is what moves the caller on. The last model that can be tried is never timed out.
 
 A genuine client mistake (400 for a bad body) is returned as is: another model would fail the same way.
-Not covered: a stream that breaks **after** the first byte, and a model that answers 200 with a poor
-answer.
+An **empty** 200 (no text, no tool call) from a non-streamed chat answer is a failed attempt and moves on to the next
+model (ADR 0046); an empty stream is counted against the model afterwards. Not covered: a stream that breaks
+**after** the first byte, and a model that answers 200 with a poor answer.
 
 **Taking a model out of a preset.** Per client and preset (ADR 0020, 0029). All of these keep the model
 out of **that preset only**; the ring skips it and the next best model takes its place at once:
@@ -117,8 +118,9 @@ out of **that preset only**; the ring skips it and the next best model takes its
 | Why | Rule | Out for |
 |---|---|---|
 | errors | `evict_errors` (3) failures in a row inside `evict_window_minutes` (60) | `evict_cooldown_minutes` (720) |
-| unreliable | `fail_percent` (40) of its last `health_min_requests` (6) or more requests failed | `quarantine_minutes` (30), doubling |
-| slow | median first token above `slow_first_token_s` (10) over the same requests | `quarantine_minutes` (30), doubling |
+| unreliable | `fail_percent` (40) of its last `health_min_requests` (6) or more requests inside `health_window_minutes` (60) failed | `quarantine_minutes` (30), doubling |
+| slow | median first token above `slow_first_token_s` (10) over the same requests; for a non-streamed answer, the wait less 20 ms per output token; a caller that hung up after that long counts too (ADR 0046) | `quarantine_minutes` (30), doubling |
+| failing | `5` requests in a row failed (5xx, network, timeout, empty answer, or a 4xx another model then answered), however far apart (ADR 0046) | `quarantine_minutes` (30), doubling |
 
 A model that comes back is judged afresh, on half as many requests. If it is bad again it goes out for
 twice as long, up to `evict_cooldown_minutes`; a healthy judgement resets the doubling. A preset is

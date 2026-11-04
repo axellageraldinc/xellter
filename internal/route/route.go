@@ -99,11 +99,13 @@ type pin struct {
 // eviction is the failure record of one model inside one preset.
 type eviction struct {
 	fails    []time.Time
+	streak   int       // failed requests in a row, with no answer in between (ADR 0046)
+	streakAt time.Time // the last of them
 	until    time.Time
 	replaced bool
 	// Why the model is out, since when, and how many times in a row it came back and was put out again.
 	reason  string
-	kind    string // errors | slow | unreliable
+	kind    string // errors | slow | unreliable | failing
 	since   time.Time
 	strikes int
 }

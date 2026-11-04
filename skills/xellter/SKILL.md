@@ -158,7 +158,8 @@ moment it returns. **This preset of this client only.** Three rules (ADR 0020, 0
 
 - *errors*: `evict_errors` failures in a row inside `evict_window_minutes` — out for `evict_cooldown_minutes`;
 - *unreliable*: `fail_percent` of its last `health_min_requests`+ requests failed — out for `quarantine_minutes`;
-- *slow*: the median wait for the first token is above `slow_first_token_s` — out for `quarantine_minutes`.
+- *slow*: the median wait for the first token (non-streamed: the wait less 20 ms per token) is above `slow_first_token_s` — out for `quarantine_minutes`;
+- *failing*: 5 failed or empty answers in a row, however far apart (ADR 0046) — out for `quarantine_minutes`.
 
 A model that comes back is judged afresh on half as many requests; if it is bad again the time out
 doubles (up to `evict_cooldown_minutes`). A preset is never emptied: the last two models stay in. A

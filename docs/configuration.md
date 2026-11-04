@@ -19,7 +19,7 @@ kenari:   { base_url, sync_minutes, user_agent, first_byte_timeout_s, music_time
 routing:  { rank_refresh_minutes, top_models, evict_errors, evict_window_minutes,
             evict_cooldown_minutes, avoid_sunset_days,
             first_token_timeout_s, slow_first_token_s, fail_percent, health_min_requests,
-            quarantine_minutes, repin_first_token_s }
+            health_window_minutes, quarantine_minutes, repin_first_token_s }
 clients[]:
   - { name, enabled, purpose, key_hash, key_hint, note,
       keys[]:    { name, key_env },
@@ -105,6 +105,7 @@ A zero or missing value takes the default.
 | `slow_first_token_s` | `10` | a model whose **median** wait for the first token is above this is taken out of the preset |
 | `fail_percent` | `40` | a model that failed this share of its requests (5xx, network error, first-token timeout; not 4xx, not a caller that left) is taken out of the preset. 1..100 |
 | `health_min_requests` | `6` | requests inside the window before a model is judged at all. One bad answer never takes a model out. A model coming back from a cooldown is judged on half as many |
+| `health_window_minutes` | `60` | how far back the slow/unreliable record of a model looks. Separate from `evict_window_minutes`, which only times the three-errors rule: a short error window must not shrink the record that slowness is judged on (ADR 0046) |
 | `quarantine_minutes` | `30` | how long a slow or unreliable model stays out the first time. Each time it comes back and is bad again the time doubles, up to `evict_cooldown_minutes`; a healthy judgement starts it over |
 | `repin_first_token_s` | `15` | a session whose pinned model waited longer than this for two of the session's last three requests leaves that model (sticky presets only) |
 

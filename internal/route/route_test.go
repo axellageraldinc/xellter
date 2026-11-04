@@ -601,3 +601,88 @@ func TestSpeedFallsBackToWhatOtherClientsSawAndDemandsEnoughSamples(t *testing.T
 		t.Fatal("no data, no lookup")
 	}
 }
+
+// A model that fails every request is taken out whatever the time between the requests: the classifier of a
+// client that calls it every quarter of an hour never had three errors inside a one-minute window (ADR 0046).
+func TestAModelThatKeepsFailingIsTakenOutHoweverFarApart(t *testing.T) {
+	r, _ := setup("a", "b", "c", "d")
+	cfg := *r.cfg.Load()
+	cfg.Routing.EvictWindowMin = 1
+	r.SetConfig(&cfg)
+	at := t0
+	var why string
+	for i := 0; i < 4; i++ {
+		at = at.Add(15 * time.Minute)
+		if why, _ = r.Observe("c", "text", "", "a", 0, false, at); why != "" {
+			t.Fatalf("%d failures are too few: %s", i+1, why)
+		}
+	}
+	at = at.Add(15 * time.Minute)
+	why, _ = r.Observe("c", "text", "", "a", 0, false, at)
+	if !strings.HasPrefix(why, "failing: its last 5 requests in a row all failed") {
+		t.Fatalf("reason = %q", why)
+	}
+	if out := r.OutOfService("c", "text", at); len(out) != 1 || out[0].Model != "a" || out[0].Kind != "failing" {
+		t.Fatalf("out of service = %+v", out)
+	}
+}
+
+func TestAnAnswerBreaksTheRunOfFailures(t *testing.T) {
+	r, _ := setup("a", "b", "c", "d")
+	at := t0
+	for i := 0; i < 20; i++ {
+		at = at.Add(20 * time.Minute)
+		ok := i%3 == 2 // two failures, then an answer
+		if why, _ := r.Observe("c", "text", "", "a", time.Second, ok, at); why != "" && i < 6 {
+			t.Fatalf("a model that answers one request in three is not failing in a row: %s", why)
+		}
+	}
+	if r.streakOf("c", "text", "a") > 2 {
+		t.Fatal("an answer must reset the run")
+	}
+}
+
+// The slow record has its own window: a one-minute window for the three-errors rule must not leave the slow
+// judgement with a single sample at a time.
+func TestTheSlowRecordOutlivesAShortEvictionWindow(t *testing.T) {
+	r, _ := setup("a", "b", "c", "d")
+	cfg := *r.cfg.Load()
+	cfg.Routing.EvictWindowMin = 1
+	r.SetConfig(&cfg)
+	var why string
+	at := t0
+	for i := 0; i < 6; i++ {
+		at = at.Add(3 * time.Minute)
+		why, _ = r.Observe("c", "text", "", "a", 20*time.Second, true, at)
+	}
+	if !strings.HasPrefix(why, "slow: median first token 20.0s") {
+		t.Fatalf("six slow answers three minutes apart must take the model out: %q", why)
+	}
+}
+
+// A caller that hung up after a long wait did not see the model fail, but the wait is a slow answer.
+func TestACallerThatGaveUpCountsTowardsSlow(t *testing.T) {
+	r, _ := setup("a", "b", "c", "d")
+	at := t0
+	var why string
+	for i := 0; i < 6; i++ {
+		at = at.Add(time.Minute)
+		why = r.Waited("c", "text", "a", 15*time.Second, at)
+	}
+	if !strings.HasPrefix(why, "slow:") {
+		t.Fatalf("reason = %q", why)
+	}
+	// and it is not a failure: no run of failures builds up from waits
+	if r.streakOf("c", "text", "a") != 0 {
+		t.Fatal("a wait is not a failure")
+	}
+}
+
+func (r *Router) streakOf(client, preset, model string) int {
+	r.smu.Lock()
+	defer r.smu.Unlock()
+	if e := r.evict[evictKey(client, preset, model)]; e != nil {
+		return e.streak
+	}
+	return 0
+}
