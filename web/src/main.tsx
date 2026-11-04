@@ -2,7 +2,7 @@ import * as React from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import './styles/index.css'
-import { api } from '@/lib/api'
+import { SESSION_EXPIRED, api } from '@/lib/api'
 import { Shell } from '@/components/shell'
 import { ToastProvider } from '@/components/ui/toast'
 import { OverviewPage } from '@/pages/overview'
@@ -37,6 +37,14 @@ function App() {
     api('me')
       .then(() => setSignedIn(true))
       .catch(() => setSignedIn(false))
+  }, [])
+
+  // Any call that comes back 401 means the login ended while the panel was open:
+  // show the sign-in again instead of leaving every page failing.
+  React.useEffect(() => {
+    const onExpired = () => setSignedIn(false)
+    window.addEventListener(SESSION_EXPIRED, onExpired)
+    return () => window.removeEventListener(SESSION_EXPIRED, onExpired)
   }, [])
 
   if (signedIn === null) {

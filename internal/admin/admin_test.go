@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -956,5 +957,54 @@ func TestAccountKeysArePerProvider(t *testing.T) {
 	}
 	if code := do(t, h, c, http.MethodPost, "/api/account-key", map[string]any{"key": "x", "provider": "nope"}).Code; code != http.StatusNotFound {
 		t.Fatalf("unknown provider: %d", code)
+	}
+}
+
+// Using the panel after an hour re-issues the cookie with the slid expiry; a fresh one is left alone.
+func TestSessionCookieFollowsTheSlidingWindow(t *testing.T) {
+	a := newTestApp(t)
+	h := New(a)
+	cookie := sessionCookie(t, a)
+	hash := auth.HashToken(cookie.Value)
+
+	if rec := do(t, h, cookie, "GET", "/api/me", nil); rec.Code != 200 || len(rec.Result().Cookies()) != 0 {
+		t.Fatalf("a fresh session must not be re-issued: %d %v", rec.Code, rec.Result().Cookies())
+	}
+
+	now := time.Now().Unix()
+	// age the session through a second connection: the store keeps its handle private
+	raw, err := sql.Open("sqlite", "file:"+filepath.Join(a.Cfg().Server.DataDir, "xellter.db")+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec(`UPDATE sessions SET last_refresh=?, exp=? WHERE id=?`, now-7200, now+3600, hash); err != nil {
+		t.Fatal(err)
+	}
+	rec := do(t, h, cookie, "GET", "/api/me", nil)
+	var got *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == cookieName {
+			got = c
+		}
+	}
+	week := int((7 * 24 * time.Hour).Seconds())
+	if rec.Code != 200 || got == nil || got.MaxAge < week-60 || got.MaxAge > week || got.Value != cookie.Value || !got.HttpOnly || got.SameSite != http.SameSiteStrictMode {
+		t.Fatalf("expected a re-issued 7-day strict cookie, got %d %+v", rec.Code, got)
+	}
+}
+
+// Only the address the proxy appended is believed; what the client put earlier in the list is not.
+func TestClientIPTrustsOnlyTheProxyEntry(t *testing.T) {
+	h := New(newTestApp(t))
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "127.0.0.1:5555"
+	r.Header.Set("X-Forwarded-For", "6.6.6.6, 100.64.0.7")
+	if got := h.clientIP(r); got != "100.64.0.7" {
+		t.Fatalf("got %q, want the proxy's entry", got)
+	}
+	r.Header.Set("X-Forwarded-For", "not-an-ip")
+	if got := h.clientIP(r); got != "127.0.0.1" {
+		t.Fatalf("a junk header must fall back to the socket, got %q", got)
 	}
 }

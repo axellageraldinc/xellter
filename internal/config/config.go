@@ -60,15 +60,16 @@ var LocalCategories = []string{"audio_transcription", "audio_speech"}
 
 // Server holds listener and storage settings.
 type Server struct {
-	Listen       string   `yaml:"listen" json:"listen"`
-	DataDir      string   `yaml:"data_dir" json:"data_dir"`
-	SecretsFile  string   `yaml:"secrets_file" json:"secrets_file"`
-	AdminHosts   []string `yaml:"admin_hosts" json:"admin_hosts"` // Host header values allowed to reach the panel
-	MaxBodyMB    int      `yaml:"max_body_mb" json:"max_body_mb"`
-	LogRetention int      `yaml:"log_retention_days" json:"log_retention_days"`
-	TrustedProxy bool     `yaml:"trusted_proxy" json:"trusted_proxy"` // honour X-Forwarded-Proto/For (tailscale serve, cloudflared)
-	SessionHours int      `yaml:"session_hours" json:"session_hours"`
-	AuthRecord   string   `yaml:"auth_record" json:"auth_record"` // path to the admin login record
+	Listen         string   `yaml:"listen" json:"listen"`
+	DataDir        string   `yaml:"data_dir" json:"data_dir"`
+	SecretsFile    string   `yaml:"secrets_file" json:"secrets_file"`
+	AdminHosts     []string `yaml:"admin_hosts" json:"admin_hosts"` // Host header values allowed to reach the panel
+	MaxBodyMB      int      `yaml:"max_body_mb" json:"max_body_mb"`
+	LogRetention   int      `yaml:"log_retention_days" json:"log_retention_days"`
+	TrustedProxy   bool     `yaml:"trusted_proxy" json:"trusted_proxy"`       // honour X-Forwarded-Proto/For (tailscale serve, cloudflared)
+	SessionDays    int      `yaml:"session_days" json:"session_days"`         // a panel login lasts this long after its last use
+	SessionMaxDays int      `yaml:"session_max_days" json:"session_max_days"` // ...but never longer than this after sign-in
+	AuthRecord     string   `yaml:"auth_record" json:"auth_record"`           // path to the admin login record
 }
 
 // Kenari describes the upstream gateway and how often its catalog is synced.
@@ -306,7 +307,7 @@ func Default() *Config {
 	return &Config{
 		Server: Server{
 			Listen: "127.0.0.1:8480", DataDir: "data", MaxBodyMB: 64, LogRetention: 30,
-			TrustedProxy: true, SessionHours: 12,
+			TrustedProxy: true, SessionDays: 7, SessionMaxDays: 30,
 			AdminHosts: []string{"localhost", "127.0.0.1"},
 		},
 		Kenari: Kenari{
@@ -364,6 +365,9 @@ func checkRetired(data []byte) error {
 		Routing    struct {
 			StickySession *bool `yaml:"sticky_session"`
 		} `yaml:"routing"`
+		Server struct {
+			SessionHours any `yaml:"session_hours"`
+		} `yaml:"server"`
 		Clients []struct {
 			Presets map[string]map[string]any `yaml:"presets"`
 		} `yaml:"clients"`
@@ -377,6 +381,9 @@ func checkRetired(data []byte) error {
 		if val != nil {
 			return fmt.Errorf("%s: retired by the rewrite (ADR 0017); routing rules are constants and RTK is always on, see docs/rewrite-plan.md", key)
 		}
+	}
+	if probe.Server.SessionHours != nil {
+		return fmt.Errorf("server.session_hours: retired (ADR 0044); a login now slides, set server.session_days (default 7) and server.session_max_days (default 30)")
 	}
 	if probe.Routing.StickySession != nil {
 		return fmt.Errorf("routing.sticky_session: retired (ADR 0025); stickiness is a per-preset toggle now, set `sticky: false` on the preset")
@@ -407,8 +414,14 @@ func (c *Config) fillDefaults() {
 	if c.Server.LogRetention <= 0 {
 		c.Server.LogRetention = d.Server.LogRetention
 	}
-	if c.Server.SessionHours <= 0 {
-		c.Server.SessionHours = d.Server.SessionHours
+	if c.Server.SessionDays <= 0 {
+		c.Server.SessionDays = d.Server.SessionDays
+	}
+	if c.Server.SessionMaxDays <= 0 {
+		c.Server.SessionMaxDays = d.Server.SessionMaxDays
+	}
+	if c.Server.SessionMaxDays < c.Server.SessionDays {
+		c.Server.SessionMaxDays = c.Server.SessionDays // the cap can never cut a window short
 	}
 	if c.Kenari.BaseURL == "" {
 		c.Kenari.BaseURL = d.Kenari.BaseURL

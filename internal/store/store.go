@@ -83,7 +83,7 @@ CREATE INDEX IF NOT EXISTS req_ts ON requests(ts);
 CREATE INDEX IF NOT EXISTS req_model_ts ON requests(model, ts);
 CREATE INDEX IF NOT EXISTS req_up_ts ON requests(upstream, ts);
 CREATE INDEX IF NOT EXISTS req_client_ts ON requests(client, ts);
-CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, exp INTEGER NOT NULL, ip TEXT, ua TEXT, created INTEGER);
+CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, exp INTEGER NOT NULL, ip TEXT, ua TEXT, created INTEGER, last_refresh INTEGER);
 CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, upstream TEXT NOT NULL, ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);
 CREATE TABLE IF NOT EXISTS config_history(id TEXT PRIMARY KEY, yaml TEXT NOT NULL);
@@ -155,6 +155,12 @@ func Open(dir string) (*Store, error) {
 			if _, err := db.Exec(`ALTER TABLE requests ADD COLUMN ` + c[0] + ` ` + c[1]); err != nil {
 				return nil, err
 			}
+		}
+	}
+	// sliding sessions (ADR 0044): older databases have no last_refresh column
+	if db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='last_refresh'`).Scan(&n) == nil && n == 0 {
+		if _, err := db.Exec(`ALTER TABLE sessions ADD COLUMN last_refresh INTEGER`); err != nil {
+			return nil, err
 		}
 	}
 	// the session index needs the column above, so it is created after the migration, not in the schema
@@ -631,7 +637,46 @@ func (s *Store) Purge(retentionDays int) {
 
 // PutSession stores a login session by token hash.
 func (s *Store) PutSession(idHash string, exp time.Time, ip, ua string) {
-	_, _ = s.db.Exec(`INSERT OR REPLACE INTO sessions(id,exp,ip,ua,created) VALUES(?,?,?,?,?)`, idHash, exp.Unix(), ip, ua, time.Now().Unix())
+	now := time.Now().Unix()
+	_, _ = s.db.Exec(`INSERT OR REPLACE INTO sessions(id,exp,ip,ua,created,last_refresh) VALUES(?,?,?,?,?,?)`, idHash, exp.Unix(), ip, ua, now, now)
+}
+
+// sessionRefreshEvery is how often a used session is written back: a sliding
+// window that wrote on every request would turn each panel poll into a write.
+const sessionRefreshEvery = time.Hour
+
+// SessionTouch checks a session and slides its window. A session lives until
+// ttl after its last use (renewed at most hourly) and never past maxAge after
+// it was created. It returns the session's expiry and whether the window just
+// moved, in which case the caller must re-issue the cookie with the new expiry.
+// An expired or unknown session is deleted and reported invalid.
+func (s *Store) SessionTouch(idHash string, ttl, maxAge time.Duration) (exp time.Time, renewed, ok bool) {
+	var e, created, last sql.NullInt64
+	if err := s.db.QueryRow(`SELECT exp, created, last_refresh FROM sessions WHERE id=?`, idHash).Scan(&e, &created, &last); err != nil {
+		return time.Time{}, false, false
+	}
+	now := time.Now()
+	hardEnd := time.Unix(created.Int64, 0).Add(maxAge)
+	if e.Int64 <= now.Unix() || !hardEnd.After(now) {
+		s.DeleteSession(idHash)
+		return time.Time{}, false, false
+	}
+	exp = time.Unix(e.Int64, 0)
+	lastRefresh := last.Int64
+	if !last.Valid {
+		lastRefresh = created.Int64
+	}
+	if now.Sub(time.Unix(lastRefresh, 0)) < sessionRefreshEvery {
+		return exp, false, true
+	}
+	next := now.Add(ttl)
+	if next.After(hardEnd) {
+		next = hardEnd
+	}
+	if _, err := s.db.Exec(`UPDATE sessions SET exp=?, last_refresh=? WHERE id=?`, next.Unix(), now.Unix(), idHash); err != nil {
+		return exp, false, true
+	}
+	return next, true, true
 }
 
 // SessionValid reports whether the session exists and is unexpired.

@@ -513,3 +513,52 @@ func TestMediaSpendSeparatesUnitsLegacyAndServices(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 }
+
+// A used session slides forward, at most hourly, and never past its hard cap (ADR 0044).
+func TestSessionTouchSlidesAndIsCapped(t *testing.T) {
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	const day = 24 * time.Hour
+	ttl, max := 7*day, 30*day
+
+	st.PutSession("s", time.Now().Add(ttl), "ip", "ua")
+	if _, renewed, ok := st.SessionTouch("s", ttl, max); !ok || renewed {
+		t.Fatalf("a session touched within the hour must stay as it is: ok=%v renewed=%v", ok, renewed)
+	}
+
+	// Two days in, an hour since the last refresh: the window moves out to ttl from now.
+	now := time.Now().Unix()
+	st.db.Exec(`UPDATE sessions SET created=?, last_refresh=?, exp=? WHERE id='s'`,
+		now-int64((2*day).Seconds()), now-7200, now+int64((5*day).Seconds()))
+	exp, renewed, ok := st.SessionTouch("s", ttl, max)
+	if !ok || !renewed || time.Until(exp) < 6*day {
+		t.Fatalf("a used session must slide: ok=%v renewed=%v left=%v", ok, renewed, time.Until(exp))
+	}
+
+	// 28 days in: the window would run to day 35, but the cap is day 30.
+	st.db.Exec(`UPDATE sessions SET created=?, last_refresh=?, exp=? WHERE id='s'`,
+		now-int64((28*day).Seconds()), now-7200, now+3600)
+	exp, renewed, ok = st.SessionTouch("s", ttl, max)
+	if !ok || !renewed || time.Until(exp) > 2*day+time.Minute {
+		t.Fatalf("the cap must win over the sliding window: left=%v", time.Until(exp))
+	}
+
+	// Past the cap the session is gone however recently it was used.
+	st.db.Exec(`UPDATE sessions SET created=?, last_refresh=?, exp=? WHERE id='s'`,
+		now-int64((31*day).Seconds()), now, now+int64(day.Seconds()))
+	if _, _, ok := st.SessionTouch("s", ttl, max); ok || st.SessionCount() != 0 {
+		t.Fatal("a session past its cap must be refused and deleted")
+	}
+
+	// Idle past the window: expired.
+	st.PutSession("idle", time.Now().Add(-time.Minute), "ip", "ua")
+	if _, _, ok := st.SessionTouch("idle", ttl, max); ok {
+		t.Fatal("an idle, expired session must be refused")
+	}
+	if _, _, ok := st.SessionTouch("nope", ttl, max); ok {
+		t.Fatal("an unknown session must be refused")
+	}
+}

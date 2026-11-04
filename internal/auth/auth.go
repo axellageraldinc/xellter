@@ -138,12 +138,19 @@ func OTPAuthURI(user, secret string) string {
 
 // VerifyTOTP checks an RFC 6238 code (SHA1, 6 digits, 30s, +-1 step).
 func VerifyTOTP(secret, code string, at time.Time) bool {
+	_, ok := MatchTOTP(secret, code, at)
+	return ok
+}
+
+// MatchTOTP is VerifyTOTP that also returns the time step the code belongs to,
+// so the caller can refuse a second use of the same step (RFC 6238, 5.2).
+func MatchTOTP(secret, code string, at time.Time) (step int64, ok bool) {
 	if len(code) != 6 {
-		return false
+		return 0, false
 	}
 	key, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.ToUpper(secret))
 	if err != nil {
-		return false
+		return 0, false
 	}
 	counter := at.Unix() / 30
 	for d := int64(-1); d <= 1; d++ {
@@ -155,10 +162,10 @@ func VerifyTOTP(secret, code string, at time.Time) bool {
 		off := sum[len(sum)-1] & 0x0f
 		v := (binary.BigEndian.Uint32(sum[off:off+4]) & 0x7fffffff) % uint32(math.Pow10(6))
 		if subtle.ConstantTimeCompare([]byte(fmt.Sprintf("%06d", v)), []byte(code)) == 1 {
-			return true
+			return counter + d, true
 		}
 	}
-	return false
+	return 0, false
 }
 
 // TOTPNow is the current code for a secret (tests and tooling).
@@ -184,6 +191,9 @@ type Authenticator struct {
 	clients map[string]*bucket
 	global  bucket
 	hashing bool
+	// lastStep is the newest TOTP time step already accepted; a code for that
+	// step or an older one is a replay. It is saved with the login counters.
+	lastStep int64
 }
 
 type bucket struct {
@@ -209,11 +219,13 @@ func NewAuthenticator(rec *Record, kv KV) *Authenticator {
 	if kv != nil {
 		if b := kv.KVGet(StateKey); b != "" {
 			var s struct {
-				Global  bucket             `json:"global"`
-				Clients map[string]*bucket `json:"clients"`
+				Global   bucket             `json:"global"`
+				Clients  map[string]*bucket `json:"clients"`
+				LastStep int64              `json:"last_totp_step"`
 			}
 			if json.Unmarshal([]byte(b), &s) == nil {
 				a.global = s.Global
+				a.lastStep = s.LastStep
 				if s.Clients != nil {
 					a.clients = s.Clients
 				}
@@ -230,7 +242,7 @@ func (a *Authenticator) persist() {
 	if a.kv == nil {
 		return
 	}
-	b, _ := json.Marshal(map[string]any{"global": a.global, "clients": a.clients})
+	b, _ := json.Marshal(map[string]any{"global": a.global, "clients": a.clients, "last_totp_step": a.lastStep})
 	a.kv.KVSet(StateKey, string(b))
 }
 
@@ -314,7 +326,14 @@ func (a *Authenticator) Verify(username, password, code, client string) Result {
 func (a *Authenticator) secondFactor(code string) bool {
 	raw := strings.TrimSpace(code)
 	digits := regexp.MustCompile(`\D`).ReplaceAllString(raw, "")
-	if VerifyTOTP(a.rec.TotpSecret, digits, a.now()) {
+	if step, ok := MatchTOTP(a.rec.TotpSecret, digits, a.now()); ok {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if step <= a.lastStep {
+			return false // the same code (or an older one) was already used
+		}
+		a.lastStep = step
+		a.persist()
 		return true
 	}
 	norm := strings.ToUpper(regexp.MustCompile(`[^A-Za-z0-9]`).ReplaceAllString(raw, ""))

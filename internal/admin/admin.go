@@ -142,8 +142,13 @@ func (h *Handler) exists(name string) bool {
 
 func (h *Handler) clientIP(r *http.Request) string {
 	if h.a.Cfg().Server.TrustedProxy {
+		// The proxy in front appends the address it saw to the END of the list;
+		// everything before it is whatever the client chose to send. Trust only the last.
 		if x := r.Header.Get("X-Forwarded-For"); x != "" {
-			return strings.TrimSpace(strings.Split(x, ",")[0])
+			parts := strings.Split(x, ",")
+			if ip := strings.TrimSpace(parts[len(parts)-1]); net.ParseIP(ip) != nil {
+				return ip
+			}
 		}
 	}
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
@@ -157,9 +162,20 @@ func (h *Handler) secure(r *http.Request) bool {
 func (h *Handler) guard(f http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		c, err := r.Cookie(cookieName)
-		if err != nil || !h.a.St.SessionValid(auth.HashToken(c.Value)) {
+		if err != nil {
 			jerr(w, 401, "login required")
 			return
+		}
+		srv := h.a.Cfg().Server
+		exp, renewed, ok := h.a.St.SessionTouch(auth.HashToken(c.Value), sessionTTL(srv), sessionMax(srv))
+		if !ok {
+			jerr(w, 401, "login required")
+			return
+		}
+		if renewed {
+			// The window moved on the server; the browser cookie must follow it
+			// or the browser drops it at the old Max-Age.
+			h.setSessionCookie(w, r, c.Value, time.Until(exp))
 		}
 		if r.Method != http.MethodGet && r.Header.Get("X-Xellter") == "" {
 			jerr(w, 403, "missing X-Xellter header")
@@ -213,12 +229,22 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tok, hash := auth.NewToken()
-	ttl := time.Duration(h.a.Cfg().Server.SessionHours) * time.Hour
+	ttl := sessionTTL(h.a.Cfg().Server)
 	h.a.St.PutSession(hash, time.Now().Add(ttl), h.clientIP(r), r.UserAgent())
-	// The cookie covers the whole site: the panel is served at the root and its
-	// API at /api, so a cookie scoped to one path would never be sent back.
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: tok, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: h.secure(r), MaxAge: int(ttl.Seconds())})
+	h.setSessionCookie(w, r, tok, ttl)
 	jok(w, map[string]any{"ok": true})
+}
+
+func sessionTTL(s config.Server) time.Duration { return time.Duration(s.SessionDays) * 24 * time.Hour }
+func sessionMax(s config.Server) time.Duration {
+	return time.Duration(s.SessionMaxDays) * 24 * time.Hour
+}
+
+// setSessionCookie issues the session cookie. It covers the whole site: the
+// panel is served at the root and its API at /api, so a cookie scoped to one
+// path would never be sent back.
+func (h *Handler) setSessionCookie(w http.ResponseWriter, r *http.Request, token string, life time.Duration) {
+	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: h.secure(r), MaxAge: int(life.Seconds())})
 }
 
 func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {

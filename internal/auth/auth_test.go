@@ -77,3 +77,37 @@ type kvMap map[string]string
 
 func (m kvMap) KVGet(k string) string { return m[k] }
 func (m kvMap) KVSet(k, v string)     { m[k] = v }
+
+// A TOTP code works once: the same code, or any older step, is refused afterwards (RFC 6238, 5.2).
+func TestTOTPCodeCannotBeReplayed(t *testing.T) {
+	rec, _, err := NewRecord("axell", "a-long-enough-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	kv := kvMap{}
+	a := NewAuthenticator(&rec, kv)
+	base := time.Now()
+	a.now = func() time.Time { return base }
+	code := TOTPNow(rec.TotpSecret, base)
+	if !a.Verify("axell", "a-long-enough-password", code, "ip1").OK {
+		t.Fatal("first use of a code must work")
+	}
+	if a.Verify("axell", "a-long-enough-password", code, "ip2").OK {
+		t.Fatal("the same code must not work twice")
+	}
+	// An older step is a replay too, even though it is inside the skew window.
+	if a.Verify("axell", "a-long-enough-password", TOTPNow(rec.TotpSecret, base.Add(-30*time.Second)), "ip3").OK {
+		t.Fatal("an older step must not work after a newer one was used")
+	}
+	// A restart must not forget it.
+	b := NewAuthenticator(&rec, kv)
+	b.now = a.now
+	if b.Verify("axell", "a-long-enough-password", code, "ip4").OK {
+		t.Fatal("the replay guard must survive a restart")
+	}
+	// The next step is fresh.
+	b.now = func() time.Time { return base.Add(30 * time.Second) }
+	if !b.Verify("axell", "a-long-enough-password", TOTPNow(rec.TotpSecret, base.Add(30*time.Second)), "ip5").OK {
+		t.Fatal("the next time step must work")
+	}
+}

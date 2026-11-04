@@ -8,6 +8,9 @@ export class ApiError extends Error {
   }
 }
 
+/** The event sent when the server says the login is over (a 401 from anything but the sign-in itself). */
+export const SESSION_EXPIRED = 'xl-session-expired'
+
 type Options = {
   method?: string
   body?: unknown
@@ -31,6 +34,10 @@ export async function api<T>(path: string, opt: Options = {}): Promise<T> {
   })
   const text = await res.text()
   const parsed: unknown = text ? safeParse(text) : {}
+  if (res.status === 401 && path !== 'login' && path !== 'me') {
+    // A 401 on login means wrong credentials; anywhere else it means the session ended.
+    window.dispatchEvent(new Event(SESSION_EXPIRED))
+  }
   if (!res.ok) {
     const message = errorMessage(parsed) || res.statusText
     throw new ApiError(message, res.status)

@@ -14,7 +14,7 @@ section).
 
 ```yaml
 server:   { listen, data_dir, secrets_file, admin_hosts, max_body_mb, log_retention_days,
-            trusted_proxy, session_hours, auth_record }
+            trusted_proxy, session_days, session_max_days, auth_record }
 kenari:   { base_url, sync_minutes, user_agent, first_byte_timeout_s, music_timeout_s, account_key_env }
 routing:  { rank_refresh_minutes, top_models, evict_errors, evict_window_minutes,
             evict_cooldown_minutes, avoid_sunset_days,
@@ -37,8 +37,9 @@ clients[]:
 | `admin_hosts` | `[localhost, 127.0.0.1]` | `Host` values allowed to reach the panel; globs allowed; anything else is 404. Add the tailnet name |
 | `max_body_mb` | `64` | request body limit (413 above it) |
 | `log_retention_days` | `30` | request-log retention; purged every 6 h |
-| `trusted_proxy` | `true` | honour `X-Forwarded-For` (rate limiting, login) and `X-Forwarded-Proto` (Secure cookie) |
-| `session_hours` | `12` | admin login lifetime |
+| `trusted_proxy` | `true` | honour the last `X-Forwarded-For` entry, the proxy's own (rate limiting, login) and `X-Forwarded-Proto` (Secure cookie) |
+| `session_days` | `7` | a panel login lasts this long after it was last used (renewed at most hourly, ADR 0044) |
+| `session_max_days` | `30` | ...and never longer than this after sign-in, however often it is used |
 
 ## kenari
 

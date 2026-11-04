@@ -395,3 +395,25 @@ func TestProviderCurrencyToRupiah(t *testing.T) {
 		}
 	}
 }
+
+// session_hours was replaced by a sliding window; the old key must say so rather than be ignored.
+func TestSessionHoursIsRetiredAndTheWindowHasDefaults(t *testing.T) {
+	_, err := Parse([]byte("server:\n  session_hours: 12\n"))
+	if err == nil || !strings.Contains(err.Error(), "session_days") {
+		t.Fatalf("session_hours must be refused with a pointer to session_days, got %v", err)
+	}
+	c, err := Parse([]byte("server:\n  session_days: 14\n  session_max_days: 3\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Server.SessionDays != 14 || c.Server.SessionMaxDays != 14 {
+		t.Fatalf("the cap must never be shorter than the window: %d/%d", c.Server.SessionDays, c.Server.SessionMaxDays)
+	}
+	d, err := Parse([]byte(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Server.SessionDays != 7 || d.Server.SessionMaxDays != 30 {
+		t.Fatalf("defaults: %d/%d", d.Server.SessionDays, d.Server.SessionMaxDays)
+	}
+}
