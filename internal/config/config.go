@@ -4,8 +4,8 @@
 // part of it: upstreams reference an environment variable name instead, and the
 // admin panel can store values in a separate 0600 secrets file.
 //
-// The shape is deliberately small. A client has a purpose and at most one
-// preset per category (several for chat); a preset is a list of models plus one optimization. Every
+// The shape is deliberately small. A client has a purpose and any number of
+// presets, each with a name of its own; a preset is a category, a list of models plus one optimization. Every
 // other routing rule is a constant (see docs/rewrite-plan.md).
 package config
 
@@ -220,7 +220,7 @@ func (u Upstream) ProviderID() string {
 
 // Client is an app that calls xellter (a chat app, an editor, ...). It has one
 // xellter API key (stored only as a hash), its own kenari keys, one purpose that
-// decides how its text presets are scored, and at most one preset per category (several for chat, ADR 0038).
+// decides how its text presets are scored, and any number of presets, each with a name of its own (ADR 0045).
 type Client struct {
 	Name    string            `yaml:"name" json:"name"`
 	Enabled bool              `yaml:"enabled" json:"enabled"`
@@ -228,15 +228,15 @@ type Client struct {
 	KeyHash string            `yaml:"key_hash" json:"key_hash"`
 	KeyHint string            `yaml:"key_hint" json:"key_hint"`
 	Keys    []Upstream        `yaml:"keys" json:"keys"`       // kenari API keys of this client
-	Presets map[string]Preset `yaml:"presets" json:"presets"` // preset name (one per category, several for chat) -> preset
+	Presets map[string]Preset `yaml:"presets" json:"presets"` // preset name (unique inside the client; any number per category) -> preset
 	Note    string            `yaml:"note" json:"note"`
 }
 
 // Preset is a virtual model exposed to clients: a chosen pool of real models
 // plus the rule that orders them. The name is the owner's own (ADR 0021): it is
 // the model name the client asks for, so it must be unique inside a client. The
-// category is what says what kind of model it serves, and a client holds at
-// most one preset per category (several for chat, ADR 0038).
+// category says what kind of model it serves; a client may hold any number of
+// presets of one category as long as their names differ (ADR 0045).
 type Preset struct {
 	Category     string   `yaml:"category" json:"category"`         // chat | images | videos | audio_speech | audio_transcription | music | systemone
 	Optimization string   `yaml:"optimization" json:"optimization"` // cheapest | balanced | best_quality | fastest
@@ -256,11 +256,6 @@ type Preset struct {
 // A preset that does not say sticks: that is how it behaved before the toggle
 // existed (ADR 0025).
 func (p Preset) IsSticky() bool { return p.Sticky == nil || *p.Sticky }
-
-// MultiCategories are the categories a client may hold several presets of (ADR 0038). A chat preset is a pool and a
-// use, so one app can ask for a fast pool for a voice conversation next to its main one. Every other category stays one
-// preset per client.
-var MultiCategories = []string{"chat"}
 
 // VoicePreset is the name of the chat preset an app asks for on a spoken turn (ADR 0038). The panel offers it as its own
 // entry, "Voice Conversation", with this name fixed, so it is never confused with the ordinary text preset.
@@ -587,7 +582,6 @@ func (c *Config) Validate() error {
 				bad("client %q key %q: capability must be one of %v", cl.Name, u.Name, KeyCapabilities)
 			}
 		}
-		cats := map[string]string{} // category -> preset name, to catch a second preset of a kind that allows only one
 		for name, p := range cl.Presets {
 			where := "client " + cl.Name + " preset " + name
 			if !nameRe.MatchString(name) {
@@ -616,10 +610,6 @@ func (c *Config) Validate() error {
 				bad("%s: %q is a %s preset; pick another name for a %s preset", where, name, legacy, category)
 				continue
 			}
-			if other, dup := cats[category]; dup && !contains(MultiCategories, category) {
-				bad("%s: a client may hold only one %s preset (already %q)", where, category, other)
-			}
-			cats[category] = name
 			if !contains(Optimizations, p.Optimization) {
 				bad("%s: optimization must be one of %v", where, Optimizations)
 			}

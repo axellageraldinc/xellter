@@ -27,7 +27,7 @@ func TestMinimalYAMLWorksAndDefaultsFill(t *testing.T) {
 
 // A preset may carry any name the owner likes, but the old fixed names keep
 // their meaning, so a config written before presets could be renamed still
-// loads. A client holds at most one preset per category, except chat (ADR 0038).
+// loads. A client may hold any number of presets of one category (ADR 0045).
 func TestPresetNamesCoverEveryCategory(t *testing.T) {
 	want := map[string]string{
 		"chat": "text", "images": "image", "videos": "video", "audio_speech": "tts",
@@ -80,7 +80,6 @@ func TestValidationCatchesMistakes(t *testing.T) {
 		"bad preset name":          "clients:\n  - name: x\n    presets:\n      'a b': {category: chat, optimization: balanced}\n",
 		"preset of no category":    "clients:\n  - name: x\n    presets:\n      budget: {optimization: balanced}\n",
 		"preset of the wrong kind": "clients:\n  - name: x\n    presets:\n      text: {category: images, optimization: balanced}\n",
-		"two presets of one kind":  "clients:\n  - name: x\n    presets:\n      image: {category: images, optimization: balanced}\n      mine: {category: images, optimization: balanced}\n",
 		"bad optimization":         "clients:\n  - name: x\n    presets:\n      text: {category: chat, optimization: cheapestest}\n",
 		"model listed twice":       "clients:\n  - name: x\n    presets:\n      text: {category: chat, optimization: balanced, models: [a, a]}\n",
 		"empty model id":           "clients:\n  - name: x\n    presets:\n      text: {category: chat, optimization: balanced, models: ['  ']}\n",
@@ -92,7 +91,18 @@ func TestValidationCatchesMistakes(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	// a client may hold several chat presets (ADR 0038): a fast pool for voice next to the main one
+	// a client may hold several presets of any category (ADR 0045), as long as the names differ
+	for _, cat := range Categories {
+		y := "clients:\n  - name: x\n    presets:\n      first: {category: " + cat + ", optimization: balanced}\n      second: {category: " + cat + ", optimization: cheapest}\n"
+		if c, err := Parse([]byte(y)); err != nil || len(c.Clients[0].Presets) != 2 {
+			t.Errorf("two %s presets were refused: %v", cat, err)
+		}
+	}
+	// a name is one preset: a repeated key is a syntax error, not a silent overwrite
+	if _, err := Parse([]byte("clients:\n  - name: x\n    presets:\n      same: {category: images, optimization: balanced}\n      same: {category: images, optimization: cheapest}\n")); err == nil {
+		t.Error("a preset name used twice was accepted")
+	}
+	// a chat pair, the voice pool next to the main one (ADR 0038)
 	if c, err := Parse([]byte("clients:\n  - name: x\n    presets:\n      text: {category: chat, optimization: balanced}\n      voice-conversation: {category: chat, optimization: cheapest, sticky: false}\n")); err != nil || len(c.Clients[0].Presets) != 2 {
 		t.Fatalf("two chat presets were refused: %v", err)
 	}

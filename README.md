@@ -105,7 +105,7 @@ echo 'kn-...' | ./bin/xellter key add -client demo -name main
 ./bin/xellter serve                            # http://127.0.0.1:8480/
 ```
 
-Then open the panel, create the presets this client needs (one per category) and tick their models.
+Then open the panel, create the presets this client needs and tick their models.
 
 Upgrading an old config:
 

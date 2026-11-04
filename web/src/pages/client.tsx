@@ -45,10 +45,10 @@ export function ClientDetailPage() {
 
   if (!d) return <Page title={name}>Loading…</Page>
 
-  const have = new Set(d.presets.map((p) => p.category))
   const names = new Set(d.presets.map((p) => p.name))
-  // An entry with a fixed name (Voice Conversation) is offered until the client has that preset; the others until it has one of the category.
-  const missing = d.categories.filter((c) => (c.fixed ? !names.has(c.preset) : !have.has(c.category)))
+  // Every category can be added again and again, each preset under a name of its own (ADR 0045).
+  // Only the entry with a fixed name (Voice Conversation) goes away once the client has that preset.
+  const missing = d.categories.filter((c) => !c.fixed || !names.has(c.preset))
   const keyOf = (c: CategoryOption) => `${c.category}:${c.preset}`
 
   return (
@@ -307,7 +307,7 @@ export function ClientDetailPage() {
             <SelectContent>
               {missing.map((c) => (
                 <SelectItem key={keyOf(c)} value={keyOf(c)}>
-                  {c.label} ({c.preset})
+                  {c.fixed ? `${c.label} (${c.preset})` : c.label}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -434,7 +434,7 @@ function AddPresetDialog({
           <DialogDescription>
             {option.fixed
               ? 'A pool of fast models for spoken conversations. The app asks for it by this exact name, so the name cannot be changed. Pick the models and the optimization on the preset afterwards.'
-              : 'The name is the model your app asks for. A client holds one preset per category.'}
+              : 'The name is the model your app asks for, so it must differ from every other preset of this client. A client can hold as many presets of one category as it likes.'}
           </DialogDescription>
         </DialogHeader>
         <DialogBody className="space-y-4">

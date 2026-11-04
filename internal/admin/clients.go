@@ -79,7 +79,7 @@ type categoryOption struct {
 	Category string `json:"category"`
 	Preset   string `json:"preset"`
 	Label    string `json:"label"`
-	Fixed    bool   `json:"fixed"` // an extra preset with a purpose of its own: its name is fixed and the client may hold it next to the category's main one (ADR 0038)
+	Fixed    bool   `json:"fixed"` // a preset with a purpose of its own: its name is fixed, so the client holds it once (ADR 0038)
 }
 
 func categoryOptions() []categoryOption {
@@ -1005,6 +1005,11 @@ func (h *Handler) presets(w http.ResponseWriter, r *http.Request) {
 		}
 		if category == "" {
 			jerr(w, 422, fmt.Sprintf("%q has no category; send one of %v", name, config.Categories))
+			return
+		}
+		// A name is one preset (ADR 0045): saving over an existing one edits it, it never turns it into another kind.
+		if old, ok := cl.Presets[name]; ok && old.Category != "" && old.Category != category {
+			jerr(w, 409, fmt.Sprintf("this client already has a %s preset named %q", old.Category, name))
 			return
 		}
 		opt := in.Optimization

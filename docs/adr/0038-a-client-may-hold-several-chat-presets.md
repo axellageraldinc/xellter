@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-10-28
 - Deciders: maintainer
-- Amends: ADR 0019 and ADR 0021 (one preset per category)
+- Amends: ADR 0019 and ADR 0021 (one preset per category); amended by ADR 0045
 
 ## Context
 

@@ -1008,3 +1008,60 @@ func TestClientIPTrustsOnlyTheProxyEntry(t *testing.T) {
 		t.Fatalf("a junk header must fall back to the socket, got %q", got)
 	}
 }
+
+// A client may hold several presets of one category (ADR 0045). Each is its own pool and ranks on its own; the name
+// is the only thing that has to be unique, and a name is never turned into a preset of another kind.
+func TestSeveralPresetsOfOneCategory(t *testing.T) {
+	a := newTestApp(t)
+	h := New(a)
+	c := sessionCookie(t, a)
+	save := func(name, category string, models ...string) *httptest.ResponseRecorder {
+		return do(t, h, c, http.MethodPost, "/api/presets", map[string]any{
+			"client": "babu", "action": "save", "preset": name, "category": category, "optimization": "cheapest", "models": models,
+		})
+	}
+	for _, p := range []struct {
+		name, model string
+	}{{"quick-chat", "cheap-b"}, {"deep-chat", "pro-c"}, {"third-chat", "cheap-b"}} {
+		if rec := save(p.name, "chat", p.model); rec.Code != http.StatusOK {
+			t.Fatalf("save %s: %d %s", p.name, rec.Code, rec.Body)
+		}
+	}
+	// the same holds for a category that used to allow one
+	if rec := save("pics-a", "images"); rec.Code != http.StatusOK {
+		t.Fatalf("first image preset: %d %s", rec.Code, rec.Body)
+	}
+	if rec := save("pics-b", "images"); rec.Code != http.StatusOK {
+		t.Fatalf("second image preset: %d %s", rec.Code, rec.Body)
+	}
+	presets := a.Cfg().Clients[0].Presets
+	for _, n := range []string{"quick-chat", "deep-chat", "third-chat", "pics-a", "pics-b"} {
+		if _, ok := presets[n]; !ok {
+			t.Fatalf("%s was not kept: %v", n, presets)
+		}
+	}
+	// every preset ranks its own pool
+	rk := a.Rt.Rankings()
+	quick, deep := rk["babu/quick-chat"], rk["babu/deep-chat"]
+	if quick == nil || deep == nil || len(quick.Candidates) == 0 || len(deep.Candidates) == 0 {
+		t.Fatalf("each preset needs its own ranking: %+v %+v", quick, deep)
+	}
+	if quick.Candidates[0].Model != "cheap-b" || deep.Candidates[0].Model != "pro-c" {
+		t.Fatalf("pools were mixed up: %s / %s", quick.Candidates[0].Model, deep.Candidates[0].Model)
+	}
+	// saving over a name edits that preset; it cannot turn it into another kind
+	if rec := save("quick-chat", "images"); rec.Code != http.StatusConflict {
+		t.Fatalf("a name reused for another category: %d %s", rec.Code, rec.Body)
+	}
+	if a.Cfg().Clients[0].Presets["quick-chat"].Category != "chat" {
+		t.Fatal("the preset changed category")
+	}
+	if rec := save("quick-chat", "chat", "cheap-b", "pro-c"); rec.Code != http.StatusOK {
+		t.Fatalf("editing a preset in place: %d %s", rec.Code, rec.Body)
+	}
+	// a rename cannot land on a name that is taken
+	rec := do(t, h, c, http.MethodPost, "/api/presets", map[string]any{"client": "babu", "action": "rename", "preset": "pics-a", "new_name": "pics-b"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("rename onto a taken name: %d %s", rec.Code, rec.Body)
+	}
+}

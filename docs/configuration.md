@@ -115,7 +115,7 @@ numbers and when they return; the same line is in the log.
 ## clients[]
 
 A client is one app that calls xellter. It owns its kenari keys, one purpose and at most one preset
-per category (several for chat, ADR 0038).
+(any number per category, ADR 0045).
 
 | key | meaning |
 |---|---|
@@ -125,7 +125,7 @@ per category (several for chat, ADR 0038).
 | `key_hash` | sha256 hex of the xellter key the app uses; created by `xellter client add` or the panel. Never the key itself |
 | `key_hint` | last four characters of that key, for display |
 | `keys[]` | the client's kenari API keys, see below |
-| `presets{}` | preset name -> preset, at most one per category (several for chat), see below |
+| `presets{}` | preset name -> preset, any number per category, see below |
 | `note` | free text |
 
 ### clients[].keys[]
@@ -149,9 +149,9 @@ The value lives in `data/secrets.env` (0600), never in the YAML.
 
 Key = the model name the app sends. The name is the owner's own (ADR 0021): letters, digits, dot,
 dash and underscore, unique inside the client. The `category` says what the preset serves, and a
-client holds at most one preset per category, so a second preset of a kind is refused, except for `chat`:
-a client may hold several chat presets (ADR 0038), for example a fast one for a voice conversation: the panel offers it as
-"Voice Conversation" with the fixed name `voice-conversation`.
+client may hold any number of presets of one category (ADR 0045), each with its own pool, optimization and
+`sticky` toggle, for example a fast chat pool next to a strong one. Only the name has to differ. The panel also offers
+a chat preset called "Voice Conversation" with the fixed name `voice-conversation` (ADR 0038).
 
 | Category | Suggested name | kenari endpoint |
 |---|---|---|
