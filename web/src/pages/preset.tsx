@@ -443,6 +443,7 @@ function ModelPicker({
   }, [rows, query, sort, billingF, thinkF])
   const filtering = billingF !== 'all' || thinkF !== 'all' || query !== ''
 
+  const visible = React.useMemo(() => families.flatMap(([, list]) => list), [families])
   const toggle = (id: string, on: boolean) => setMany([id], on)
 
   return (
@@ -471,6 +472,18 @@ function ModelPicker({
             <PickSelect label="Billing" value={billingF} onChange={setBillingF} options={BILLING_FILTERS} />
             <PickSelect label="Thinking" value={thinkF} onChange={setThinkF} options={THINK_FILTERS} />
           </div>
+
+          {rows && families.length > 0 && (
+            <div className="flex items-center gap-2">
+              <Button variant="ghost" onClick={() => setMany(visible.filter((m) => m.callable).map((m) => m.id), true)}>
+                Select all
+              </Button>
+              <Button variant="ghost" onClick={() => setMany(visible.map((m) => m.id), false)}>
+                Unselect all
+              </Button>
+              <span className="text-xs text-text-muted">{filtering ? 'Applies to the models shown' : 'Applies to every model'}</span>
+            </div>
+          )}
 
           {mix && (
             <p className="text-xs text-text-muted">
