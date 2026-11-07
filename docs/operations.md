@@ -101,7 +101,7 @@ session's pinned model first, then the preset's models in turn. It moves to the 
 first byte reaches the client** when:
 
 - the model or key answers 5xx, 408, 402 (no balance), 429 (rate or quota limit), 401/403 (key rejected),
-  or "model not allowed / not found". A retriable failure retries the same model once first;
+  or "model not allowed / not found". A retriable failure retries the same model `routing.retries` times first (default 0);
 - the connection fails, or the response headers do not arrive within `kenari.first_byte_timeout_s`;
 - a **streamed chat** answer sends headers but no first token within `routing.first_token_timeout_s`
   (15 s, plus 1 s per 10 000 prompt tokens). Some free upstreams queue for a minute before they say

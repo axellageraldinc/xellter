@@ -41,7 +41,7 @@ they serve nothing while the list is healthy.
 
 ### 2. A request that goes wrong is moved at once
 
-- A retriable error is retried once on the same model, then the next model is tried.
+- A retriable error is retried `routing.retries` times (default 0) on the same model, then the next model is tried.
 - A **streamed chat answer that sends no first token** within `first_token_timeout_s` (15 s,
   plus 1 s per 10 000 prompt tokens) is cancelled and the next model is tried. The caller never
   sees the stall. The last model that can still be tried is never timed out.

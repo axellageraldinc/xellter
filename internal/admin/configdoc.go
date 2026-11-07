@@ -57,6 +57,7 @@ var configDocs = map[string]string{
 	"routing.fail_percent":           "If this share (percent) of a model's requests fail, it is taken out of the preset for a while.",
 	"routing.health_min_requests":    "Requests a model must have served before slow_first_token_s and fail_percent are judged. Prevents one bad request from deciding.",
 	"routing.health_window_minutes":  "How far back (minutes) a model's record is kept for the slow and failure-share judgements. Independent of evict_window_minutes.",
+	"routing.retries":                "How many times a retriable failure (5xx, timeout, 429, network) is tried again on the same model before the next model is tried. 0 = no retry, the first failure moves on at once. Max 5.",
 	"routing.quarantine_minutes":     "First time out for a slow or failing model. It doubles each time the model comes back and fails again, up to evict_cooldown_minutes.",
 	"routing.repin_first_token_s":    "A session's pinned model this slow (first token, seconds) in 2 of the session's last 3 requests loses the session and is re-chosen.",
 	"local_models":                   "Models served from this machine instead of kenari. Free, no key, and added to the pool of every preset of their category.",

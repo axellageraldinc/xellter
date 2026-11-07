@@ -192,6 +192,10 @@ type Routing struct {
 	HealthWindowMin  int `yaml:"health_window_minutes" json:"health_window_minutes"` // how far back a model's slow/unreliable record looks (ADR 0046); independent of evict_window_minutes
 	QuarantineMin    int `yaml:"quarantine_minutes" json:"quarantine_minutes"`       // first time out; doubles each time it comes back and fails again
 	RepinFirstTokenS int `yaml:"repin_first_token_s" json:"repin_first_token_s"`     // a pinned model this slow twice in three requests loses the session
+
+	// Retries is how many extra times a retriable failure is tried again on the same model and key before
+	// the next model is tried. 0 (the default) means no retry: the first failure moves on at once.
+	Retries int `yaml:"retries" json:"retries"`
 }
 
 // Upstream is one kenari API key of a client. Only a name and the secret
@@ -690,6 +694,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Routing.TopModels < 1 || c.Routing.TopModels > 50 {
 		bad("routing.top_models must be 1..50")
+	}
+	if c.Routing.Retries < 0 || c.Routing.Retries > 5 {
+		bad("routing.retries must be between 0 and 5")
 	}
 	if c.Routing.EvictWindowMin < 1 || c.Routing.EvictCooldownMin < 1 {
 		bad("routing.evict_window_minutes and evict_cooldown_minutes must be >= 1")

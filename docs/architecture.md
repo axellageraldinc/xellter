@@ -105,7 +105,7 @@ otherwise an ignored key would look like it still works. `xellter migrate` conve
    is tried (never for the last model that can be tried). Then streaming bodies are copied through in
    16 KB chunks with a flush each; only the head and tail are kept to read `usage`.
 7. **Failure.** `Key.Failure` classifies the status and applies its account/key effect; a retriable
-   failure retries **the same model on the same key once**, then the model is abandoned for this
+   failure retries **the same model on the same key `routing.retries` times** (default 0), then the model is abandoned for this
    request (its other keys are skipped). A non-retriable error abandons the model at once.
 8. **Eviction.** Every failed attempt on a preset request is recorded per `(client, preset, model)`;
    the third failure inside the window evicts the model from that preset and drops any session pin

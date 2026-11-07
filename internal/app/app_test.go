@@ -354,6 +354,7 @@ func TestPresetRoutesToFreeOrPlanFirstAndRewritesModel(t *testing.T) {
 // same discovery again.
 func TestAFailingModelIsSkippedAfterwards(t *testing.T) {
 	e := setup(t, func(c *config.Config) {
+		c.Routing.Retries = 1
 		c.Clients[0].Presets["text"] = config.Preset{Category: "chat", Optimization: "cheapest", Models: []string{"free-a:free", "cheap-b"}}
 	})
 	e.f.chat = func(c call, n int) (int, string) {
@@ -383,6 +384,7 @@ func TestAFailingModelIsSkippedAfterwards(t *testing.T) {
 // other key too. The retry of requirement 15 does not change that: it is the same account being limited.
 func TestRateLimitCooldownIsAccountWide(t *testing.T) {
 	e := setup(t, func(c *config.Config) {
+		c.Routing.Retries = 1
 		c.Clients[0].Presets["text"] = config.Preset{Category: "chat", Optimization: "cheapest", Models: []string{"free-a:free"}}
 	})
 	e.f.chat = func(c call, n int) (int, string) {
@@ -415,6 +417,7 @@ func TestRateLimitCooldownIsAccountWide(t *testing.T) {
 // Requirement 15: a retriable error retries the same model once, and only then moves to the next model.
 func TestRetriableErrorRetriesTheSameModelOnce(t *testing.T) {
 	e := setup(t, func(c *config.Config) {
+		c.Routing.Retries = 1
 		c.Clients[0].Presets["text"] = config.Preset{Category: "chat", Optimization: "cheapest", Models: []string{"free-a:free", "cheap-b"}}
 	})
 	e.f.chat = func(c call, n int) (int, string) {
@@ -433,6 +436,46 @@ func TestRetriableErrorRetriesTheSameModelOnce(t *testing.T) {
 	}
 	if got := resp.Header.Get("X-Xellter-Attempt"); got != "3" {
 		t.Fatalf("the attempt number must be reported: %q", got)
+	}
+}
+
+// With the default of no retries, the first retriable failure moves on to the next model at once.
+func TestNoRetryByDefaultMovesOnAtOnce(t *testing.T) {
+	e := setup(t, func(c *config.Config) {
+		c.Clients[0].Presets["text"] = config.Preset{Category: "chat", Optimization: "cheapest", Models: []string{"free-a:free", "cheap-b"}}
+	})
+	e.f.chat = func(c call, n int) (int, string) {
+		if c.Model == "free-a:free" {
+			return 503, `{"error":{"code":"upstream_error","message":"down"}}`
+		}
+		return 0, ""
+	}
+	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "text"))
+	if resp.StatusCode != 200 || resp.Header.Get("X-Xellter-Model") != "cheap-b" {
+		t.Fatalf("expected the next model: %d %s model=%s", resp.StatusCode, body, resp.Header.Get("X-Xellter-Model"))
+	}
+	if n := e.f.count("free-a:free"); n != 1 {
+		t.Fatalf("with retries 0 the failing model must be tried once, saw %d", n)
+	}
+	if got := resp.Header.Get("X-Xellter-Attempt"); got != "2" {
+		t.Fatalf("attempt number = %q, want 2", got)
+	}
+}
+
+// With no retries and no other model, the caller gets the upstream's own error after one call.
+func TestNoRetryAndNoOtherModelRelaysTheError(t *testing.T) {
+	e := setup(t, func(c *config.Config) {
+		c.Clients[0].Presets["text"] = config.Preset{Category: "chat", Optimization: "cheapest", Models: []string{"free-a:free"}}
+	})
+	e.f.chat = func(c call, n int) (int, string) {
+		return 503, `{"error":{"code":"upstream_error","message":"down"}}`
+	}
+	resp, body := e.post(t, e.keyCl, "/v1/chat/completions", fmt.Sprintf(chatBody, "text"))
+	if resp.StatusCode != 503 || !strings.Contains(body, "down") {
+		t.Fatalf("the upstream error must reach the caller: %d %s", resp.StatusCode, body)
+	}
+	if n := e.f.count("free-a:free"); n != 1 {
+		t.Fatalf("one call, no retry, saw %d", n)
 	}
 }
 

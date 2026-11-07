@@ -506,8 +506,8 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 	snap := s.cat.Snapshot()
 	var last *failure
 	attempts := 0
-	// The plan lists attempts in ring order, one per (model, key). A model is retried once on a retriable
-	// failure and then abandoned, so its remaining keys are skipped: the retry is a property of the model, not
+	// The plan lists attempts in ring order, one per (model, key). A model is retried routing.retries times (0 =
+	// never) on a retriable failure and then abandoned, so its remaining keys are skipped: the retry is a property of the model, not
 	// of the key (requirement 15).
 	dead := map[string]bool{}
 	ftLimit := s.firstTokenLimit(cfg, s.estimate(cl.Name, body), plan.Modality, isStream)
@@ -547,7 +547,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 		if hasEffort && s.efforts.Refuses(at.Model.ID, asked) {
 			drop = effortFields()
 		}
-		for try := 1; try <= 2; try++ {
+		for try := 1; try <= 1+cfg.Routing.Retries; try++ {
 			// The gate is checked once per (model, key): the retry of a model that just failed must not be
 			// refused by the very block that failure created, or requirement 15 could never fire. The key was
 			// already validated and counted for this request.
@@ -683,7 +683,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, cl *config.Client)
 				dead[at.Model.ID] = true
 				break
 			}
-			if try == 2 {
+			if try == 1+cfg.Routing.Retries {
 				dead[at.Model.ID] = true
 			}
 		}
