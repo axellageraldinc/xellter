@@ -119,7 +119,7 @@ out of **that preset only**; the ring skips it and the next best model takes its
 |---|---|---|
 | errors | `evict_errors` (3) failures in a row inside `evict_window_minutes` (60) | `evict_cooldown_minutes` (720) |
 | unreliable | `fail_percent` (40) of its last `health_min_requests` (6) or more requests inside `health_window_minutes` (60) failed | `quarantine_minutes` (30), doubling |
-| slow | median first token above `slow_first_token_s` (10) over the same requests; for a non-streamed answer, the wait less 20 ms per output token; a caller that hung up after that long counts too (ADR 0046) | `quarantine_minutes` (30), doubling |
+| slow | p99 first token above `slow_first_token_s` (10) over the same requests; for a non-streamed answer, the wait less 20 ms per output token; a caller that hung up after that long counts too (ADR 0046) | `quarantine_minutes` (30), doubling |
 | failing | `5` requests in a row failed (5xx, network, timeout, empty answer, or a 4xx another model then answered), however far apart (ADR 0046) | `quarantine_minutes` (30), doubling |
 
 A model that comes back is judged afresh, on half as many requests. If it is bad again it goes out for
@@ -146,7 +146,7 @@ model goes to the end of that session's order. The next model that answers becom
    Most models ignore `none`; a model that refuses the field is served without it. If a client is slow
    because a model thinks for thousands of tokens, the fix is the pool, not the effort.
 5. `journalctl --user -u xellter -f` prints one line each time a model goes out
-   (`client/model out of preset p: slow: median first token 12.3s over its last 7 requests (limit 10s)`)
+   (`client/model out of preset p: slow: p99 first token 12.3s over its last 7 requests (limit 10s)`)
    and each time a session leaves a model.
 
 ### Runbook: a conversation keeps changing model

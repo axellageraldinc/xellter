@@ -102,7 +102,7 @@ A zero or missing value takes the default.
 | key | default | meaning |
 |---|---|---|
 | `first_token_timeout_s` | `15` | a **streamed chat** answer that sends no first token within this many seconds (plus one second per 10 000 prompt tokens, at most 60) is cancelled and the next model is tried. It counts as a failed request in the model's record. The last model that can still be tried is never timed out. `-1` turns it off |
-| `slow_first_token_s` | `10` | a model whose **median** wait for the first token is above this is taken out of the preset |
+| `slow_first_token_s` | `10` | a model whose **p99** wait for the first token is above this is taken out of the preset |
 | `fail_percent` | `40` | a model that failed this share of its requests (5xx, network error, first-token timeout; not 4xx, not a caller that left) is taken out of the preset. 1..100 |
 | `health_min_requests` | `6` | requests inside the window before a model is judged at all. One bad answer never takes a model out. A model coming back from a cooldown is judged on half as many |
 | `health_window_minutes` | `60` | how far back the slow/unreliable record of a model looks. Separate from `evict_window_minutes`, which only times the three-errors rule: a short error window must not shrink the record that slowness is judged on (ADR 0046) |

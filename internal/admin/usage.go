@@ -58,6 +58,7 @@ type usageRow struct {
 	Cached       int64    `json:"cached_tok"`
 	RTKSaved     int64    `json:"rtk_saved"`
 	Cost         float64  `json:"cost_idr"`
+	P99MS        int      `json:"p99_latency_ms"`
 	Savings      []saving `json:"savings,omitempty"`
 	// Removed marks a client that is no longer in the configuration: its old
 	// traffic is still in the log, but it is not a client any more.
@@ -140,7 +141,7 @@ func (h *Handler) usageDrill(w http.ResponseWriter, r *http.Request) {
 				Key: u.Model, Label: u.Model, Client: client, Preset: u.Preset, Model: u.Model,
 				Billing: b, BillingLabel: billingLabel(b),
 				Requests: u.Requests, Errors: u.Errors, InTok: u.InTok, OutTok: u.OutTok,
-				Cached: u.Cached, RTKSaved: u.RTKSaved, Cost: u.Cost,
+				Cached: u.Cached, RTKSaved: u.RTKSaved, Cost: u.Cost, P99MS: u.P99Lat,
 			})
 		}
 		out["level"] = "model"
@@ -163,7 +164,7 @@ func (h *Handler) usageDrill(w http.ResponseWriter, r *http.Request) {
 			rows = append(rows, usageRow{
 				Key: u.Preset, Label: u.Preset, Client: client, Preset: u.Preset,
 				Requests: u.Requests, Errors: u.Errors, InTok: u.InTok, OutTok: u.OutTok,
-				Cached: u.Cached, RTKSaved: u.RTKSaved, Cost: u.Cost,
+				Cached: u.Cached, RTKSaved: u.RTKSaved, Cost: u.Cost, P99MS: u.P99Lat,
 			})
 			delete(known, u.Preset)
 		}
@@ -189,7 +190,7 @@ func (h *Handler) usageDrill(w http.ResponseWriter, r *http.Request) {
 			row := usageRow{
 				Key: u.Client, Label: u.Client, Client: u.Client,
 				Requests: u.Requests, Errors: u.Errors, InTok: u.InTok, OutTok: u.OutTok,
-				Cached: u.Cached, RTKSaved: u.RTKSaved, Cost: u.Cost,
+				Cached: u.Cached, RTKSaved: u.RTKSaved, Cost: u.Cost, P99MS: u.P99Lat,
 			}
 			// The log keeps the name the client had when the request was served. A client
 			// that was renamed or deleted leaves its old traffic behind, and that

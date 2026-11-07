@@ -160,8 +160,8 @@ func (r *Router) observe(client, preset, session, model string, ttft time.Durati
 	case failed*100 >= rt.FailPercent*len(keep):
 		out = fmt.Sprintf("unreliable: %d of its last %d requests failed (limit %d%%)", failed, len(keep), rt.FailPercent)
 		e.kind = "unreliable"
-	case len(waits) >= need && median(waits) > time.Duration(rt.SlowTTFTSecs)*time.Second:
-		out = fmt.Sprintf("slow: median first token %.1fs over its last %d requests (limit %ds)", median(waits).Seconds(), len(waits), rt.SlowTTFTSecs)
+	case len(waits) >= need && p99(waits) > time.Duration(rt.SlowTTFTSecs)*time.Second:
+		out = fmt.Sprintf("slow: p99 first token %.1fs over its last %d requests (limit %ds)", p99(waits).Seconds(), len(waits), rt.SlowTTFTSecs)
 		e.kind = "slow"
 	default:
 		e.strikes = 0 // judged again and healthy: the next time out starts from the short cooldown
@@ -192,10 +192,12 @@ func (r *Router) takeOutLocked(client, preset, model string, e *eviction, out st
 	return out
 }
 
-func median(d []time.Duration) time.Duration {
+// p99 is the 99th percentile (nearest rank) of the waits: an average or a median hides the slow tail, which
+// is what a client's timeout actually hits.
+func p99(d []time.Duration) time.Duration {
 	s := append([]time.Duration(nil), d...)
 	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
-	return s[len(s)/2]
+	return s[(len(s)*99+99)/100-1]
 }
 
 // sessionLocked tracks how often the model a session is pinned to was slow. Two slow answers in the last

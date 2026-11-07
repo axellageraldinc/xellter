@@ -265,6 +265,8 @@ export type UsageRow = {
   cached_tok: number
   rtk_saved: number
   cost_idr: number
+  /** 99th percentile of the answered calls' total time, ms; 0 = none answered. */
+  p99_latency_ms?: number
   billing?: string
   /** The client is no longer in the configuration; this is its old traffic. */
   removed?: boolean
@@ -290,6 +292,8 @@ export type UsageCall = {
   cached_tok: number
   rtk_saved: number
   cost_idr: number
+  /** The call's own total time, ms. */
+  latency_ms?: number
 }
 
 export type Usage = {

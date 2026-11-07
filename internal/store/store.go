@@ -394,6 +394,7 @@ type UsageRow struct {
 	Cached   int64   `json:"cached_tok"`
 	Cost     float64 `json:"cost_idr"`
 	AvgLat   float64 `json:"avg_latency_ms"`
+	P99Lat   int     `json:"p99_latency_ms"` // 99th percentile of the answered calls' total time; 0 = none answered
 	RTKSaved int64   `json:"rtk_saved"`
 }
 
@@ -477,6 +478,7 @@ func (s *Store) Usage(group string, since time.Time, client, preset string) ([]U
 		return nil, err
 	}
 	defer rows.Close()
+	p99 := s.latencyP99(col, since, client, preset)
 	out := []UsageRow{}
 	for rows.Next() {
 		var u UsageRow
@@ -485,6 +487,7 @@ func (s *Store) Usage(group string, since time.Time, client, preset string) ([]U
 			return nil, err
 		}
 		u.Key = k.String
+		u.P99Lat = p99[u.Key]
 		switch group {
 		case "client":
 			u.Client = u.Key
@@ -502,6 +505,42 @@ func (s *Store) Usage(group string, since time.Time, client, preset string) ([]U
 		out = append(out, u)
 	}
 	return out, rows.Err()
+}
+
+// latencyP99 returns the 99th percentile of the total time of the answered calls per group (col is a
+// usageCols expression). An average hides the slow tail, so the usage tables show this instead. SQLite has no
+// percentile, so the times are read and sorted here.
+func (s *Store) latencyP99(col string, since time.Time, client, preset string) map[string]int {
+	rows, err := s.db.Query(fmt.Sprintf(`SELECT %s k, latency_ms FROM requests
+		WHERE ts>=? AND ok=1 AND latency_ms>0 AND (?='' OR client=?) AND (?='' OR preset=?)`, col),
+		since.UnixMilli(), client, client, preset, preset)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	by := map[string][]int{}
+	for rows.Next() {
+		var k sql.NullString
+		var ms int
+		if rows.Scan(&k, &ms) != nil {
+			break
+		}
+		by[k.String] = append(by[k.String], ms)
+	}
+	out := make(map[string]int, len(by))
+	for k, v := range by {
+		out[k] = P99(v)
+	}
+	return out
+}
+
+// P99 is the 99th percentile (nearest rank) of a list of times; 0 for an empty list. It sorts v.
+func P99(v []int) int {
+	if len(v) == 0 {
+		return 0
+	}
+	sort.Ints(v)
+	return v[(len(v)*99+99)/100-1]
 }
 
 // ModelUsageRow is one model's traffic over a window, split by billing kind.
@@ -594,12 +633,14 @@ type CallRow struct {
 	Cached   int64   `json:"cached_tok"`
 	RTKSaved int64   `json:"rtk_saved"`
 	Cost     float64 `json:"cost_idr"`
+	// LatencyMS is the call's own total time, from request to the last byte.
+	LatencyMS int `json:"latency_ms"`
 }
 
 // Calls returns the newest limit calls since the given time, newest first. client and preset filter the rows
 // ("" = no filter).
 func (s *Store) Calls(since time.Time, client, preset string, limit int) ([]CallRow, error) {
-	rows, err := s.db.Query(`SELECT ts,client,preset,model,ok,status,in_tok,out_tok,cached_tok,rtk_saved,cost FROM requests
+	rows, err := s.db.Query(`SELECT ts,client,preset,model,ok,status,in_tok,out_tok,cached_tok,rtk_saved,cost,latency_ms FROM requests
 		WHERE ts>=? AND (?='' OR client=?) AND (?='' OR preset=?) ORDER BY ts DESC, id DESC LIMIT ?`,
 		since.UnixMilli(), client, client, preset, preset, limit)
 	if err != nil {
@@ -612,13 +653,14 @@ func (s *Store) Calls(since time.Time, client, preset string, limit int) ([]Call
 		var ok int
 		var cl, sh, mo sql.NullString
 		var in, outT, ca, rtk sql.NullInt64
-		var st sql.NullInt64
+		var st, lat sql.NullInt64
 		var cost sql.NullFloat64
-		if err := rows.Scan(&r.TS, &cl, &sh, &mo, &ok, &st, &in, &outT, &ca, &rtk, &cost); err != nil {
+		if err := rows.Scan(&r.TS, &cl, &sh, &mo, &ok, &st, &in, &outT, &ca, &rtk, &cost, &lat); err != nil {
 			return nil, err
 		}
 		r.Client, r.Preset, r.Model, r.OK = cl.String, sh.String, mo.String, ok == 1
 		r.Status, r.InTok, r.OutTok, r.Cached, r.RTKSaved, r.Cost = int(st.Int64), in.Int64, outT.Int64, ca.Int64, rtk.Int64, cost.Float64
+		r.LatencyMS = int(lat.Int64)
 		out = append(out, r)
 	}
 	return out, rows.Err()

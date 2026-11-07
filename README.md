@@ -16,7 +16,7 @@ model is slow today.
   reserve that steps in when a model drops out.
 - **Fail over in the request.** An error is retried once, then the next model is tried. A streamed
   answer that sends no first token in 15 s is cancelled and moved on, and the caller never sees the stall.
-- **Out of the preset when it does badly.** Three errors in a row, a median first token above 10 s, or
+- **Out of the preset when it does badly.** Three errors in a row, a p99 first token above 10 s, or
   40 % of requests failing take a model out of *that client's preset*, never out of the others and never
   empty (the last two stay).
 - **Back by itself.** After 30 minutes it serves again on a clean record; if it is bad again it goes out

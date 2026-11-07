@@ -27,7 +27,7 @@ request ──► pick the next model in the ring ──► send ──► first
                                                                                  
 every attempt is recorded per (client, preset, model):
   too many failures in a row ─┐
-  median first token too slow ├─► the model is OUT of that preset for a while,
+  p99 first token too slow ├─► the model is OUT of that preset for a while,
   too large a share failed   ─┘   the reserve takes its place in the ring
   when the time is up ─► it serves again on a clean record and is judged again
 ```
@@ -55,7 +55,7 @@ xellter keeps a record of the last hour for each `(client, preset, model)`. A mo
 | Why | Rule (defaults) | Out for |
 |---|---|---|
 | **errors** | `evict_errors` (3) failures in a row | `evict_cooldown_minutes` (12 h) |
-| **slow** | median first token above `slow_first_token_s` (10 s) | `quarantine_minutes` (30 min), doubling |
+| **slow** | p99 first token above `slow_first_token_s` (10 s) | `quarantine_minutes` (30 min), doubling |
 | **unreliable** | `fail_percent` (40 %) of its requests failed | `quarantine_minutes` (30 min), doubling |
 | **failing** | 5 requests in a row failed or came back empty, however far apart | `quarantine_minutes` (30 min), doubling |
 
@@ -95,7 +95,7 @@ Open a client in the panel. Each preset card shows:
 
 - **Serving now**: the models actually in the ring, with rank, billing, score and why.
 - **Out for now**: each model that is out, the reason with its numbers (for example
-  `slow: median first token 12.3s over its last 7 requests (limit 10s)`) and when it returns.
+  `slow: p99 first token 12.3s over its last 7 requests (limit 10s)`) and when it returns.
 - **Taken out before**: the history of every time a model went out.
 - A **Last 24 h** column on every model: median first token, failure share and request count.
 

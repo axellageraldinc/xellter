@@ -49,7 +49,7 @@ failed over: the response was already committed to the caller.
    model is tried; the timeout counts as a failed request in the model's record. The last model
    that can still be tried is never timed out. `-1` turns the timeout off.
 6. **The panel says who is out and why.** Each preset lists the models that are out, the
-   reason with the numbers (for example `slow: median first token 12.3s over its last 7
+   reason with the numbers (for example `slow: p99 first token 12.3s over its last 7
    requests (limit 10s)`), when they come back and how many times in a row they went out. The same line
    goes to the log.
 

@@ -111,7 +111,7 @@ otherwise an ignored key would look like it still works. `xellter migrate` conve
    the third failure inside the window evicts the model from that preset and drops any session pin
    pointing at it. A success clears the record, so the rule is three failures in a row, not three ever.
    **Health** (ADR 0029): every attempt also feeds a per-`(client, preset, model)` record of the last
-   hour (first-token wait, success). Once it holds `health_min_requests` requests, a median first token above
+   hour (first-token wait, success). Once it holds `health_min_requests` requests, a p99 first token above
    `slow_first_token_s`, or `fail_percent` failed requests, takes the model out for `quarantine_minutes`
    (doubling on each repeat, judged on half as many requests when it returns). A preset is never emptied.
    The ranking also reports a **reserve**: the pool members the list size pushed out, in the

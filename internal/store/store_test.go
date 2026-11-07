@@ -562,3 +562,19 @@ func TestSessionTouchSlidesAndIsCapped(t *testing.T) {
 		t.Fatal("an unknown session must be refused")
 	}
 }
+
+func TestP99(t *testing.T) {
+	if P99(nil) != 0 {
+		t.Fatal("empty list is 0")
+	}
+	v := make([]int, 100)
+	for i := range v {
+		v[i] = i + 1
+	}
+	if got := P99(v); got != 99 {
+		t.Fatalf("p99 of 1..100 = %d, want 99", got)
+	}
+	if got := P99([]int{5, 1000, 7}); got != 1000 {
+		t.Fatalf("p99 of a short list is its max, got %d", got)
+	}
+}

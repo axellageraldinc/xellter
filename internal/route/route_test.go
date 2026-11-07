@@ -419,13 +419,22 @@ func feed(r *Router, preset, model string, n int, ttft time.Duration, ok bool, a
 	return why, at
 }
 
+func TestOneVerySlowAnswerAmongFastOnesIsSlowByP99(t *testing.T) {
+	r, _ := setup("a", "b", "c", "d")
+	feed(r, "text", "a", 5, time.Second, true, t0)
+	why, _ := r.Observe("c", "text", "", "a", 30*time.Second, true, t0.Add(time.Minute))
+	if !strings.HasPrefix(why, "slow: p99 first token 30.0s") {
+		t.Fatalf("the slow tail must count, reason = %q", why)
+	}
+}
+
 func TestASlowModelIsTakenOutWithItsReasonAndComesBack(t *testing.T) {
 	r, _ := setup("a", "b", "c", "d")
 	if why, _ := feed(r, "text", "a", 5, 20*time.Second, true, t0); why != "" {
 		t.Fatalf("five requests are too few to judge a model: %s", why)
 	}
 	why, at := feed(r, "text", "a", 1, 20*time.Second, true, t0.Add(time.Minute))
-	if !strings.HasPrefix(why, "slow: median first token 20.0s") {
+	if !strings.HasPrefix(why, "slow: p99 first token 20.0s") {
 		t.Fatalf("reason = %q", why)
 	}
 	out := r.OutOfService("c", "text", at)
@@ -655,7 +664,7 @@ func TestTheSlowRecordOutlivesAShortEvictionWindow(t *testing.T) {
 		at = at.Add(3 * time.Minute)
 		why, _ = r.Observe("c", "text", "", "a", 20*time.Second, true, at)
 	}
-	if !strings.HasPrefix(why, "slow: median first token 20.0s") {
+	if !strings.HasPrefix(why, "slow: p99 first token 20.0s") {
 		t.Fatalf("six slow answers three minutes apart must take the model out: %q", why)
 	}
 }
