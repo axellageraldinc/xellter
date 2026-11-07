@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { AlertTriangle, ArrowLeft, Coins, PiggyBank, Search, Share2, Wallet, X, Zap } from 'lucide-react'
 import { api } from '@/lib/api'
 import type { Saving, Usage, UsageCall } from '@/lib/types'
-import { idr, num, secs, wib } from '@/lib/format'
+import { idr, ms, num, secs, wib } from '@/lib/format'
 import { shareStory } from '@/lib/share-story'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -156,7 +156,7 @@ export function UsagePage() {
                 <TH className="text-right">Tokens in / out</TH>
                 <TH className="text-right">Cache hit</TH>
                 <TH className="text-right">RTK saved</TH>
-                <TH className="text-right whitespace-nowrap" title="99th percentile of the answered calls' total time">P99 time (ms)</TH>
+                <TH className="text-right whitespace-nowrap" title="99th percentile of the answered calls' total time">P99 time</TH>
                 <TH className="text-right">Rp at list price</TH>
                 {colModel && <TH className="text-right whitespace-nowrap">Saved vs {colModel}</TH>}
               </TR>
@@ -191,7 +191,7 @@ export function UsagePage() {
                       {r.in_tok > 0 ? ((r.cached_tok / r.in_tok) * 100).toFixed(0) + '%' : '—'}
                     </TD>
                     <TD className="tabular text-right text-text-muted">{num(r.rtk_saved)}</TD>
-                    <TD className="tabular text-right whitespace-nowrap">{r.p99_latency_ms ? num(r.p99_latency_ms) : '—'}</TD>
+                    <TD className="tabular text-right whitespace-nowrap">{ms(r.p99_latency_ms)}</TD>
                     <TD className="tabular text-right whitespace-nowrap">Rp {idr(r.cost_idr)}</TD>
                     {colModel && <SavedCell s={r.savings?.find((x) => x.model === colModel)} />}
                   </TR>
@@ -239,7 +239,7 @@ function CallsCard({ calls, level }: { calls: UsageCall[]; level: 'client' | 'pr
                 <TH className="text-right">Tokens in / out</TH>
                 <TH className="text-right">Cache hit</TH>
                 <TH className="text-right">RTK saved</TH>
-                <TH className="text-right whitespace-nowrap">Time (ms)</TH>
+                <TH className="text-right whitespace-nowrap">Time</TH>
                 <TH className="text-right">Rp at list price</TH>
               </TR>
             </THead>
@@ -260,7 +260,7 @@ function CallsCard({ calls, level }: { calls: UsageCall[]; level: 'client' | 'pr
                     {c.in_tok > 0 ? ((c.cached_tok / c.in_tok) * 100).toFixed(0) + '%' : '—'}
                   </TD>
                   <TD className="tabular text-right text-text-muted">{num(c.rtk_saved)}</TD>
-                  <TD className="tabular whitespace-nowrap text-right">{c.latency_ms ? num(c.latency_ms) : '—'}</TD>
+                  <TD className="tabular whitespace-nowrap text-right">{ms(c.latency_ms)}</TD>
                   <TD className="tabular whitespace-nowrap text-right">Rp {idr(c.cost_idr)}</TD>
                 </TR>
               ))}

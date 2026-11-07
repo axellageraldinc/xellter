@@ -14,6 +14,12 @@ export function num(n: number | null | undefined): string {
   return (n ?? 0).toLocaleString('en-US')
 }
 
+/** ms formats a duration in milliseconds: "850 ms" below one second, "11.1 s" from there on. */
+export function ms(n: number | null | undefined): string {
+  if (!n) return '—'
+  return n < 1000 ? Math.round(n) + ' ms' : (n / 1000).toFixed(1) + ' s'
+}
+
 /** human turns a number of seconds into a short phrase. */
 export function human(s: number): string {
   if (s < 90) return Math.round(s) + ' s'
