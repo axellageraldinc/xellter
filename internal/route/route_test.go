@@ -695,3 +695,42 @@ func (r *Router) streakOf(client, preset, model string) int {
 	}
 	return 0
 }
+
+// Follow-up turns of a pinned session must not move the ring: new chats still spread evenly.
+func TestPinnedTurnsDoNotSkewTheRing(t *testing.T) {
+	r, cl := setup("a", "b")
+	used := map[string]int{}
+	now := t0
+	for i := range 8 {
+		sid := "chat-" + string(rune('A'+i))
+		p, err := r.Plan(cl, "text", sid, "/v1/chat/completions", now)
+		if err != nil {
+			t.Fatalf("plan: %v", err)
+		}
+		r.Pin(cl.Name, "text", sid, p.Model, now)
+		used[p.Model]++
+		for range 3 { // three more turns of the same chat
+			now = now.Add(time.Second)
+			q, _ := r.Plan(cl, "text", sid, "/v1/chat/completions", now)
+			if q.Model != p.Model {
+				t.Fatalf("chat %s moved from %s to %s", sid, p.Model, q.Model)
+			}
+			r.Pin(cl.Name, "text", sid, q.Model, now)
+		}
+		now = now.Add(time.Second)
+	}
+	if used["a"] != 4 || used["b"] != 4 {
+		t.Fatalf("eight new chats over two models must split 4/4, got %v", used)
+	}
+}
+
+// A pin left idle is forgotten: a new chat that opens with the same words must be placed again.
+func TestIdlePinExpires(t *testing.T) {
+	r, cl := setup("a", "b")
+	p, _ := r.Plan(cl, "text", "same-opener", "/v1/chat/completions", t0)
+	r.Pin(cl.Name, "text", "same-opener", p.Model, t0)
+	q, _ := r.Plan(cl, "text", "same-opener", "/v1/chat/completions", t0.Add(time.Hour))
+	if q.Model == p.Model {
+		t.Fatalf("an hour-idle pin must not hold; still on %s", q.Model)
+	}
+}

@@ -399,13 +399,24 @@ func (r *Router) order(cl *config.Client, rk *rank.Ranking, session string, now 
 	}
 	// The pinned model goes first, so a sticky session stays on the model it
 	// started with.
+	held := false
 	if r.sticky(cl.Name, rk.Preset) && session != "" {
-		if id := r.pinned(cl.Name, rk.Preset, session); id != "" {
+		if id, at := r.PinOf(cl.Name, rk.Preset, session); id != "" && now.Sub(at) <= pinIdle {
 			add(id)
+			held = true
 		}
 	}
+	// The ring advances only when a request needs a placement. A follow-up turn of a pinned session
+	// already has its model; counting it would skew where the next new chat lands (with two models and a
+	// chatty session, every new chat could land on the same one).
 	if len(ids) > 0 {
-		off := int(r.next(cl.Name, rk.Preset) % uint64(len(ids)))
+		var n uint64
+		if !held {
+			n = r.next(cl.Name, rk.Preset)
+		} else {
+			n = r.peek(cl.Name, rk.Preset)
+		}
+		off := int(n % uint64(len(ids)))
 		for i := range len(ids) {
 			add(ids[(i+off)%len(ids)])
 		}
@@ -424,6 +435,17 @@ func (r *Router) sticky(client, preset string) bool {
 	defer r.stickyMu.RUnlock()
 	v, ok := r.stickyPresets[rank.Key(client, preset)]
 	return !ok || v
+}
+
+// pinIdle is how long a pin survives without a request. A client that names no session is told apart by
+// its first message, so two chats opening with the same words share an id; an idle pin must not carry the
+// old chat's model into the new one.
+const pinIdle = 30 * time.Minute
+
+func (r *Router) peek(client, preset string) uint64 {
+	r.rrMu.Lock()
+	defer r.rrMu.Unlock()
+	return r.rr[client+"/"+preset]
 }
 
 // next advances the round-robin counter of one preset and returns the previous value.
