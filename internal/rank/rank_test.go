@@ -907,6 +907,22 @@ func TestExcludedFreeModelIsNotAddedAutomatically(t *testing.T) {
 	}
 }
 
+// With auto_add off only the owner's models are routed (ADR 0049).
+func TestAutoAddOffKeepsFreeModelsOut(t *testing.T) {
+	f := fixture(chat("paid-a", 100, 300), freeChat("free-a:free"))
+	f.preset("paid-a")
+	sh := f.cl.Presets["text"]
+	off := false
+	sh.AutoAdd = &off
+	if pool := EffectivePool(f.cfg, f.snap, f.pool, f.cl, sh, now); len(pool) != 1 || pool[0] != "paid-a" {
+		t.Fatalf("only the ticked model may remain: %v", pool)
+	}
+	sh.AutoAdd = nil
+	if pool := EffectivePool(f.cfg, f.snap, f.pool, f.cl, sh, now); len(pool) != 2 {
+		t.Fatalf("absent means on: %v", pool)
+	}
+}
+
 // Fastest orders by the measured wait for the first token before price, an unmeasured model counts as average, and a model
 // that fails often is as slow as its retries (ADR 0039).
 func TestFastestOrdersBySpeedBeforePrice(t *testing.T) {

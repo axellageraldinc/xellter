@@ -434,6 +434,9 @@ func clonePresets(m map[string]config.Preset) map[string]config.Preset {
 		if v.Sticky != nil {
 			v.Sticky = new(*v.Sticky)
 		}
+		if v.AutoAdd != nil {
+			v.AutoAdd = new(*v.AutoAdd)
+		}
 		out[k] = v
 	}
 	return out
@@ -881,6 +884,7 @@ type presetView struct {
 	// ExcludedModels are free or promo models xellter would add but the owner unticked (ADR 0035).
 	ExcludedModels []string `json:"excluded_models"`
 	Excluded       []string `json:"excluded"` // the whole saved list, what the panel sends back
+	AutoAdd        bool     `json:"auto_add"` // free and discounted models join the pool on their own
 	Sticky         bool     `json:"sticky"`   // a session keeps one model for its whole life
 	// DailyCapIDR is the most the preset may spend in a day, in rupiah; 0 is no limit (ADR 0043). SpentTodayIDR is
 	// what it has spent since midnight.
@@ -936,6 +940,7 @@ func (h *Handler) clientDetail(w http.ResponseWriter, r *http.Request) {
 			case own[id]:
 			case skip[id]:
 				excluded = append(excluded, id)
+			case !p.IsAutoAdd():
 			default:
 				auto = append(auto, id)
 			}
@@ -943,7 +948,7 @@ func (h *Handler) clientDetail(w http.ResponseWriter, r *http.Request) {
 		presets = append(presets, presetView{
 			Name: n, Category: p.Category, Label: presetLabel(n, p.Category),
 			Optimization: p.Optimization, OptimizationLabel: optimizationLabel[p.Optimization],
-			Models: append([]string{}, p.Models...), AutoModels: auto, FreeModels: free, ExcludedModels: excluded, Excluded: append([]string{}, p.Excluded...), Sticky: p.IsSticky(),
+			Models: append([]string{}, p.Models...), AutoModels: auto, FreeModels: free, ExcludedModels: excluded, Excluded: append([]string{}, p.Excluded...), Sticky: p.IsSticky(), AutoAdd: p.IsAutoAdd(),
 			DailyCapIDR: p.DailyCapIDR, SpentTodayIDR: h.a.Px.PresetSpentToday(cl.Name, n),
 			Ranking:      rk[rank.Key(cl.Name, n)],
 			Evictions:    h.a.Rt.Evictions(cl.Name, n, now),
@@ -978,6 +983,7 @@ func (h *Handler) presets(w http.ResponseWriter, r *http.Request) {
 		Optimization string    `json:"optimization"`
 		Models       []string  `json:"models"`
 		Sticky       *bool     `json:"sticky"`        // absent keeps what the preset has
+		AutoAdd      *bool     `json:"auto_add"`      // absent keeps what the preset has
 		Excluded     *[]string `json:"excluded"`      // absent keeps what the preset has
 		DailyCapIDR  *float64  `json:"daily_cap_idr"` // absent keeps what the preset has; 0 removes the cap
 	}
@@ -1030,6 +1036,10 @@ func (h *Handler) presets(w http.ResponseWriter, r *http.Request) {
 		if in.Sticky != nil {
 			sticky = new(*in.Sticky)
 		}
+		autoAdd := cl.Presets[name].AutoAdd
+		if in.AutoAdd != nil {
+			autoAdd = new(*in.AutoAdd)
+		}
 		excluded := cl.Presets[name].Excluded
 		if in.Excluded != nil {
 			excluded = *in.Excluded
@@ -1049,7 +1059,7 @@ func (h *Handler) presets(w http.ResponseWriter, r *http.Request) {
 		if in.DailyCapIDR != nil {
 			dailyCap = *in.DailyCapIDR
 		}
-		cl.Presets[name] = config.Preset{Category: category, Optimization: opt, Models: models, Excluded: kept, Sticky: sticky, DailyCapIDR: dailyCap}
+		cl.Presets[name] = config.Preset{Category: category, Optimization: opt, Models: models, Excluded: kept, Sticky: sticky, AutoAdd: autoAdd, DailyCapIDR: dailyCap}
 	case "rename":
 		newName := strings.TrimSpace(in.NewName)
 		if newName == "" {

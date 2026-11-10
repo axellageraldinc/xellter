@@ -252,6 +252,9 @@ type Preset struct {
 	// Sticky says whether a session keeps one model for its whole life. A preset
 	// that never said anything sticks, as it always did (ADR 0025).
 	Sticky *bool `yaml:"sticky,omitempty" json:"sticky,omitempty"`
+	// AutoAdd says whether free and discounted models join this preset's pool on their own (ADR 0019, 0049). A
+	// preset that never said anything adds them, as it always did.
+	AutoAdd *bool `yaml:"auto_add,omitempty" json:"auto_add,omitempty"`
 	// DailyCapIDR is the most this preset may spend in one day, in rupiah (ADR 0043). 0 is no limit, which is what
 	// every preset that never said anything has. Once the day's cost reaches it the preset answers 429 until midnight.
 	DailyCapIDR float64 `yaml:"daily_cap_idr,omitempty" json:"daily_cap_idr,omitempty"`
@@ -261,6 +264,10 @@ type Preset struct {
 // A preset that does not say sticks: that is how it behaved before the toggle
 // existed (ADR 0025).
 func (p Preset) IsSticky() bool { return p.Sticky == nil || *p.Sticky }
+
+// IsAutoAdd reports whether free and discounted models are added to the pool on their own. A preset that does not
+// say adds them: that is how it behaved before the toggle existed (ADR 0049).
+func (p Preset) IsAutoAdd() bool { return p.AutoAdd == nil || *p.AutoAdd }
 
 // VoicePreset is the name of the chat preset an app asks for on a spoken turn (ADR 0038). The panel offers it as its own
 // entry, "Voice Conversation", with this name fixed, so it is never confused with the ordinary text preset.

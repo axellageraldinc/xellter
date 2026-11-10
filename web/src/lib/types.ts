@@ -76,6 +76,8 @@ export type PresetView = {
   excluded_models: string[]
   /** Everything the owner unticked, including models that are not free right now. */
   excluded: string[]
+  /** Free and discounted models join the pool on their own. */
+  auto_add: boolean
   /** A session keeps one model for its whole life. */
   sticky: boolean
   /** The most this preset may spend in a day, in rupiah. 0 is no limit. */

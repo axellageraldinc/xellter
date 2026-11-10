@@ -58,6 +58,7 @@ export function PresetCard({
   const [models, setModels] = React.useState<string[]>(preset.models)
   const [excluded, setExcluded] = React.useState<string[]>(preset.excluded ?? [])
   const [sticky, setSticky] = React.useState(preset.sticky)
+  const [autoAdd, setAutoAdd] = React.useState(preset.auto_add)
   const [cap, setCap] = React.useState(preset.daily_cap_idr ? String(preset.daily_cap_idr) : '')
   const [picking, setPicking] = React.useState(false)
   const [renaming, setRenaming] = React.useState(false)
@@ -66,6 +67,7 @@ export function PresetCard({
   const dirty =
     optimization !== preset.optimization ||
     sticky !== preset.sticky ||
+    autoAdd !== preset.auto_add ||
     (Number(cap) || 0) !== (preset.daily_cap_idr || 0) ||
     [...excluded].sort().join('\n') !== [...(preset.excluded ?? [])].sort().join('\n') ||
     models.length !== preset.models.length ||
@@ -87,9 +89,10 @@ export function PresetCard({
     setOptimization(preset.optimization)
     setModels(preset.models)
     setSticky(preset.sticky)
+    setAutoAdd(preset.auto_add)
     setCap(preset.daily_cap_idr ? String(preset.daily_cap_idr) : '')
     setExcluded(preset.excluded ?? [])
-  }, [preset.optimization, preset.models, preset.sticky, preset.excluded, preset.daily_cap_idr])
+  }, [preset.optimization, preset.models, preset.sticky, preset.auto_add, preset.excluded, preset.daily_cap_idr])
 
   async function save() {
     try {
@@ -104,6 +107,7 @@ export function PresetCard({
           models,
           excluded,
           sticky,
+          auto_add: autoAdd,
           daily_cap_idr: Math.max(0, Number(cap) || 0),
         },
       })
@@ -205,6 +209,24 @@ export function PresetCard({
             onCheckedChange={setSticky}
             aria-label="Sticky session"
             title={sticky ? 'Sticky session is on' : 'Sticky session is off'}
+          />
+        </div>
+
+        {/* Whether free and discounted models join the pool on their own. */}
+        <div className="flex items-start justify-between gap-4 rounded-md border border-border bg-surface-muted/40 px-3 py-2.5">
+          <div className="min-w-0">
+            <div className="text-xs font-medium text-text-secondary">Add free models automatically</div>
+            <div className="mt-0.5 text-xs text-text-muted">
+              {autoAdd
+                ? 'Free models and models on promo join this pool while they last.'
+                : 'Only the models you tick are routed. Free and promo models are never added.'}
+            </div>
+          </div>
+          <Switch
+            checked={autoAdd}
+            onCheckedChange={setAutoAdd}
+            aria-label="Add free models automatically"
+            title={autoAdd ? 'Automatic additions are on' : 'Automatic additions are off'}
           />
         </div>
 

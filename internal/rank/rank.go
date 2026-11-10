@@ -185,6 +185,9 @@ func EffectivePool(cfg *config.Config, snap *catalog.Snapshot, pool *upstream.Po
 // AutoPoolFor is AutoPool without the models the owner unticked in this preset
 // (Preset.Excluded, ADR 0035).
 func AutoPoolFor(cfg *config.Config, snap *catalog.Snapshot, pool *upstream.Pool, cl *config.Client, sh config.Preset, now time.Time) []string {
+	if !sh.IsAutoAdd() {
+		return []string{}
+	}
 	skip := map[string]bool{}
 	for _, id := range sh.Excluded {
 		skip[strings.TrimSpace(id)] = true
