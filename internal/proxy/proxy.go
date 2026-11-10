@@ -1014,6 +1014,10 @@ func (s *Server) idrRate(provider string, snap *catalog.Snapshot) float64 {
 // one, and how many units. The request says how many; transcription is billed for a nominal minute.
 func mediaUnits(m *catalog.Model, b *reqBody) (unit, variant string, n float64) {
 	unit = unitOf(m.Endpoint)
+	if m.Endpoint == "audio_transcription" {
+		// The upload is multipart (no JSON fields) and the audio length is not read, so a nominal minute is billed.
+		return unit, "", 60
+	}
 	if b == nil || b.json == nil {
 		return unit, "", 0
 	}
@@ -1034,8 +1038,6 @@ func mediaUnits(m *catalog.Model, b *reqBody) (unit, variant string, n float64) 
 		if json.Unmarshal(b.json["resolution"], &str) == nil {
 			return "second", str, n
 		}
-	case "audio_transcription":
-		n = 60
 	case "music":
 		n = 1
 	}
