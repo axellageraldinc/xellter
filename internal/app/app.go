@@ -475,7 +475,9 @@ func (a *App) readAccount(ctx context.Context, k *upstream.Key) bool {
 			Available float64 `json:"available_micro_idr"`
 		}
 		if json.Unmarshal(raw, &b) == nil {
-			acct.SetBalance(b.Available/1e6, time.Now())
+			now := time.Now()
+			acct.SetBalance(b.Available/1e6, now)
+			a.St.LogBalance(acct.Name, b.Available/1e6, now)
 		}
 	}
 	return true

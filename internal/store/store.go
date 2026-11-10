@@ -91,6 +91,8 @@ CREATE TABLE IF NOT EXISTS effort_facts(model TEXT, level TEXT, verdict TEXT, at
 DROP TABLE IF EXISTS effort_thinkers;
 CREATE TABLE IF NOT EXISTS model_events(id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, client TEXT, preset TEXT, model TEXT, kind TEXT, reason TEXT, until_ts INTEGER, strikes INTEGER);
 CREATE INDEX IF NOT EXISTS ev_cp ON model_events(client, preset, ts);
+CREATE TABLE IF NOT EXISTS balance_log(ts INTEGER NOT NULL, account TEXT NOT NULL, idr REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS bal_acct_ts ON balance_log(account, ts);
 CREATE TABLE IF NOT EXISTS bench(model TEXT NOT NULL, arena TEXT NOT NULL, value REAL, rating REAL, lo REAL, hi REAL, matched TEXT, date TEXT, votes REAL, PRIMARY KEY(model, arena));
 `
 
@@ -1260,4 +1262,70 @@ func (s *Store) Search(since time.Time, client string) (SearchSummary, error) {
 	}
 	o.Model = m.String
 	return o, nil
+}
+
+// ---- balance history ----
+
+// LogBalance records the balance of an account as kenari reported it. Samples older than 100 days are dropped.
+func (s *Store) LogBalance(account string, idr float64, at time.Time) {
+	_, _ = s.db.Exec(`INSERT INTO balance_log(ts,account,idr) VALUES(?,?,?)`, at.UnixMilli(), account, idr)
+	_, _ = s.db.Exec(`DELETE FROM balance_log WHERE ts<?`, at.AddDate(0, 0, -100).UnixMilli())
+}
+
+// BalanceMove is what an account's balance did over a window, from consecutive samples: Spent is the sum of the
+// drops, ToppedUp the sum of the rises. A top-up between two samples hides what was spent in that gap, so Spent is
+// a floor. Samples is how many readings the window held (the one just before it included), Covered how much of
+// the window they span.
+type BalanceMove struct {
+	Spent    float64       `json:"spent_idr"`
+	ToppedUp float64       `json:"topped_up_idr"`
+	Samples  int           `json:"samples"`
+	Covered  time.Duration `json:"covered_ns"`
+}
+
+// BalanceMove sums the balance moves of an account since t.
+func (s *Store) BalanceMove(account string, since time.Time) (BalanceMove, error) {
+	var m BalanceMove
+	// the reading just before the window is the baseline for the first drop
+	rows, err := s.db.Query(`SELECT ts, idr FROM (
+SELECT ts, idr FROM balance_log WHERE account=? AND ts<? ORDER BY ts DESC LIMIT 1)
+UNION ALL SELECT ts, idr FROM balance_log WHERE account=? AND ts>=? ORDER BY ts`, account, since.UnixMilli(), account, since.UnixMilli())
+	if err != nil {
+		return m, err
+	}
+	defer rows.Close()
+	var prev, first, last float64
+	for rows.Next() {
+		var ts int64
+		var idr float64
+		if err := rows.Scan(&ts, &idr); err != nil {
+			return m, err
+		}
+		if m.Samples == 0 {
+			first = float64(ts)
+		} else if d := idr - prev; d < 0 {
+			m.Spent -= d
+		} else {
+			m.ToppedUp += d
+		}
+		prev, last = idr, float64(ts)
+		m.Samples++
+	}
+	m.Covered = time.Duration(last-first) * time.Millisecond
+	return m, rows.Err()
+}
+
+// PaygCost is the catalog cost of the paid-from-balance requests of the given keys since t.
+func (s *Store) PaygCost(keys []string, since time.Time) (float64, error) {
+	if len(keys) == 0 {
+		return 0, nil
+	}
+	args := []any{since.UnixMilli()}
+	for _, k := range keys {
+		args = append(args, k)
+	}
+	q := `SELECT COALESCE(SUM(cost),0) FROM requests WHERE ts>=? AND billing='payg' AND upstream IN (?` + strings.Repeat(",?", len(keys)-1) + `)`
+	var c float64
+	err := s.db.QueryRow(q, args...).Scan(&c)
+	return c, err
 }

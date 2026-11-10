@@ -107,7 +107,7 @@ func (h *Handler) usageDrill(w http.ResponseWriter, r *http.Request) {
 	}
 	out := map[string]any{
 		"window": window, "since": since, "client": client, "preset": preset,
-		"series": series, "kenari": h.kenariStrip(now),
+		"series": series, "kenari": h.kenariStrip(now, since),
 	}
 	// X search is a service, not a model: it gets its own summary beside the tables.
 	if sr, err := h.a.St.Search(since, client); err == nil && sr.Calls > 0 {
@@ -300,7 +300,7 @@ func billingLabel(b string) string {
 
 // kenariStrip is kenari's own view: the plan windows and the balance, next to
 // what xellter's log says. Requirement 19.
-func (h *Handler) kenariStrip(now time.Time) map[string]any {
+func (h *Handler) kenariStrip(now, since time.Time) map[string]any {
 	snap := h.a.Cat.Snapshot()
 	var acct *upstream.Account
 	for _, a := range h.a.Pool.Accounts() {
@@ -325,6 +325,20 @@ func (h *Handler) kenariStrip(now time.Time) map[string]any {
 		return winRank(windows[i]["name"].(string)) < winRank(windows[j]["name"].(string))
 	})
 	out["windows"] = windows
+	// What kenari actually took from the balance in the window, next to what the log priced those calls at.
+	if mv, err := h.a.St.BalanceMove(acct.Name, since); err == nil {
+		var keys []string
+		for _, k := range h.a.Pool.Keys() {
+			if k.Account() == acct {
+				keys = append(keys, k.Name)
+			}
+		}
+		payg, _ := h.a.St.PaygCost(keys, since)
+		out["balance_move"] = map[string]any{
+			"spent_idr": mv.Spent, "topped_up_idr": mv.ToppedUp, "samples": mv.Samples,
+			"covered_s": int(mv.Covered.Seconds()), "payg_catalog_idr": payg,
+		}
+	}
 	return out
 }
 

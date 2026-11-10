@@ -325,6 +325,7 @@ export type Usage = {
     configured: boolean
     account?: { plan?: string; plan_source?: string; balance_idr?: number }
     windows?: { label: string; used_idr: number; budget_idr: number; resets_at: string }[]
+    balance_move?: { spent_idr: number; topped_up_idr: number; samples: number; covered_s: number; payg_catalog_idr: number }
   }
 }
 

@@ -578,3 +578,24 @@ func TestP99(t *testing.T) {
 		t.Fatalf("p99 of a short list is its max, got %d", got)
 	}
 }
+
+func TestBalanceMove(t *testing.T) {
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t0 := time.Now().Add(-10 * time.Hour)
+	st.LogBalance("main", 1000, t0.Add(-time.Hour)) // baseline before the window
+	st.LogBalance("main", 990, t0.Add(time.Hour))
+	st.LogBalance("main", 985, t0.Add(2*time.Hour))
+	st.LogBalance("main", 5985, t0.Add(3*time.Hour)) // top-up
+	st.LogBalance("main", 5980, t0.Add(4*time.Hour))
+	st.LogBalance("other", 1, t0.Add(time.Hour))
+	m, err := st.BalanceMove("main", t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Spent != 20 || m.ToppedUp != 5000 || m.Samples != 5 {
+		t.Errorf("move = %+v, want spent 20, topped up 5000, 5 samples", m)
+	}
+}

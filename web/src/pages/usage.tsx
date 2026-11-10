@@ -135,6 +135,16 @@ export function UsagePage() {
           label="at list price, free and plan included"
         />
       </StatRow>
+      {data?.kenari?.balance_move && data.kenari.balance_move.samples >= 2 && (
+        <p className="mt-2 text-sm text-text-muted">
+          Kenari took <span className="mono text-text">Rp {idr(data.kenari.balance_move.spent_idr)}</span> from the balance
+          {data.kenari.balance_move.covered_s < (window === '30d' ? 30 * 86400 : 86400) - 3600 &&
+            ` in the last ${Math.round(data.kenari.balance_move.covered_s / 3600)} h we have readings for`}
+          , the whole account; the log prices the pay-as-you-go calls of this window at{' '}
+          <span className="mono text-text">Rp {idr(data.kenari.balance_move.payg_catalog_idr)}</span>.
+          {data.kenari.balance_move.topped_up_idr > 0 && ' A top-up in the window hides the spend between its two readings.'}
+        </p>
+      )}
 
       <SavingsCard data={data} ids={ids} setCompare={setCompare} col={colModel} setCol={setCol} windowLabel={window === '30d' ? 'Last 30 days' : 'Last 24 hours'} />
 

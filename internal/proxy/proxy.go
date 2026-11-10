@@ -338,7 +338,8 @@ type reqBody struct {
 	boundary  string
 	ctype     string
 	model     string
-	est       int // estimated prompt tokens, from estimateTokens; 0 until asked
+	est       int     // estimated prompt tokens, from estimateTokens; 0 until asked
+	audioSecs float64 // length of the uploaded audio when it could be read; 0 otherwise
 }
 
 func (s *Server) readBody(w http.ResponseWriter, r *http.Request) (*reqBody, *route.Error) {
@@ -352,6 +353,9 @@ func (s *Server) readBody(w http.ResponseWriter, r *http.Request) (*reqBody, *ro
 		b.multipart = true
 		b.boundary = boundaryOf(b.ctype)
 		b.model = multipartModel(raw, b.boundary)
+		if b.model != "" { // only a transcription is priced by the audio length
+			b.audioSecs = audioSeconds(multipartFile(raw, b.boundary))
+		}
 		return b, nil
 	}
 	if len(bytes.TrimSpace(raw)) == 0 {
@@ -1015,7 +1019,11 @@ func (s *Server) idrRate(provider string, snap *catalog.Snapshot) float64 {
 func mediaUnits(m *catalog.Model, b *reqBody) (unit, variant string, n float64) {
 	unit = unitOf(m.Endpoint)
 	if m.Endpoint == "audio_transcription" {
-		// The upload is multipart (no JSON fields) and the audio length is not read, so a nominal minute is billed.
+		// The upload is multipart (no JSON fields). The length comes from the audio header; when it cannot be
+		// told, a nominal minute is billed.
+		if b != nil && b.audioSecs > 0 {
+			return unit, "", b.audioSecs
+		}
 		return unit, "", 60
 	}
 	if b == nil || b.json == nil {
